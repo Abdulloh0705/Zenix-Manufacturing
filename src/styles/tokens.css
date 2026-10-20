@@ -1,0 +1,120 @@
+/* ==========================================================================
+   ZENIX design tokens — the single source of truth.
+   Visual language shared with ZENIX POS: warm graphite neutrals, one muted steel accent,
+   restrained semantic colours, soft wide shadows, moderate radii. Manufacturing adds a single
+   industrial accent (--mfg) for production / operations / machines / OEE.
+   Components consume tokens only; no component hard-codes sizes or colours.
+   ========================================================================== */
+:root{
+  /* Type scale (11px floor for any text) — scaled by the Font size preference */
+  --fs-scale:1;
+  --fs-2xs:max(11px,calc(11px * var(--fs-scale)));
+  --fs-xs:max(11px,calc(12px * var(--fs-scale)));
+  --fs-sm:calc(13px * var(--fs-scale));
+  --fs-md:calc(14px * var(--fs-scale));
+  --fs-lg:calc(15px * var(--fs-scale));
+  --fs-xl:calc(18px * var(--fs-scale));
+  --fs-kpi:calc(20px * var(--fs-scale));
+  --fs-title:calc(22px * var(--fs-scale));
+  --fs-2xl:calc(24px * var(--fs-scale));
+  --fs-3xl:calc(28px * var(--fs-scale));
+  --lh-tight:1.2;--lh-base:1.5;
+  --fw-medium:500;--fw-semibold:600;--fw-bold:640;
+  --font:'Inter',ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  --font-mono:ui-monospace,'SFMono-Regular',Menlo,Consolas,monospace;
+
+  /* Spacing (4px grid) */
+  --sp-1:4px;--sp-2:8px;--sp-3:12px;--sp-4:16px;--sp-5:20px;--sp-6:24px;--sp-8:32px;
+
+  /* Enterprise density — one compact scale (no user density switch) */
+  --control-h:34px;--control-h-sm:28px;--control-px:11px;
+  --card-pad:16px;--gap:14px;--stack-gap:16px;--form-gap:12px;
+  --nav-h:36px;--page-px:24px;--row-py:8px;--cell-px:14px;
+
+  /* Shape & elevation (POS: soft, wide, low-opacity shadows) */
+  --r-xs:6px;--r-sm:8px;--r-md:10px;--r-lg:14px;--r-xl:18px;--r-pill:999px;
+  --shadow-sm:0 1px 2px rgba(29,33,38,.04);
+  --shadow-card:0 10px 30px rgba(26,30,35,.035),0 1px 3px rgba(26,30,35,.02);
+  --shadow-md:0 12px 32px rgba(29,33,38,.08),0 2px 8px rgba(29,33,38,.04);
+  --shadow-lg:0 28px 72px rgba(24,28,33,.16),0 5px 18px rgba(24,28,33,.06);
+  --blur:18px;
+
+  /* Stacking order — one scale, no magic numbers in components */
+  --z-sticky:10;--z-sidebar:30;--z-topbar:40;--z-fab:50;--z-nav-drawer:60;--z-modal:100;--z-popover:200;--z-toast:300;
+
+  /* Layout */
+  --sidebar-w:240px;--sidebar-w-collapsed:68px;--topbar-h:58px;--content-max:1760px;
+  /* AI launcher tab: overlays the page edge; content is never padded for it */
+  --ai-dock-w:22px;
+
+  /* Light colour environment (ZENIX graphite) */
+  color-scheme:light;
+  --accent:#4d6e9f;--accent-contrast:#ffffff;
+  --accent-ink:color-mix(in srgb,var(--accent) 82%,#000);
+  --accent-soft:color-mix(in srgb,var(--accent) 10%,transparent);
+  --accent-line:color-mix(in srgb,var(--accent) 28%,transparent);
+  --bg:#f3f4f4;--bg-image:none;
+  --surface:#fbfbfa;--surface-solid:#fbfbfa;--surface-raised:#fdfdfc;--surface-2:#f6f6f4;--surface-3:#eff1f2;--surface-glass:rgba(247,248,247,.86);
+  --line:rgba(31,35,40,.085);--line-strong:rgba(31,35,40,.15);
+  --text:#202327;--text-2:#4f555c;--text-3:#6b7078;
+  --success:#36704f;--warning:#85602f;--danger:#a04649;--info:var(--accent);--purple:#6b5b88;
+  /* Manufacturing accent — production, work orders, machines, OEE */
+  --mfg:#336d69;
+  --success-soft:color-mix(in srgb,var(--success) 10%,transparent);--warning-soft:color-mix(in srgb,#b5844f 13%,transparent);
+  --danger-soft:color-mix(in srgb,var(--danger) 9%,transparent);--purple-soft:color-mix(in srgb,var(--purple) 10%,transparent);
+  --mfg-soft:color-mix(in srgb,var(--mfg) 10%,transparent);--neutral-soft:rgba(31,35,40,.055);
+  /* Chart series (muted, POS-aligned categorical slots 1–5) */
+  --series-1:var(--accent);--series-2:#b17a58;--series-3:#5e8f76;--series-4:#c49a55;--series-5:#827789;--chart-grid:rgba(31,35,40,.07);
+  --brand-mark:linear-gradient(145deg,#20262d,#59697c);
+  --avatar-bg:linear-gradient(145deg,#566b82,#2e3945);
+  --focus-ring:0 0 0 3px color-mix(in srgb,var(--accent) 22%,transparent);
+  --scrim:rgba(18,21,25,.38);
+}
+
+:root[data-font-size="small"]{--fs-scale:.93}
+:root[data-font-size="large"]{--fs-scale:1.08}
+
+/* Dark colour environment (POS graphite night) */
+:root[data-theme="dark"]{
+  color-scheme:dark;
+  --accent-contrast:#0f1318;
+  --accent-ink:var(--accent);
+  --accent-soft:color-mix(in srgb,var(--accent) 13%,transparent);
+  --bg:#111315;--bg-image:none;
+  --surface:#181a1d;--surface-solid:#181a1d;--surface-raised:#1d2023;--surface-2:#1e2125;--surface-3:#25292e;--surface-glass:rgba(17,19,21,.88);
+  --line:rgba(255,255,255,.075);--line-strong:rgba(255,255,255,.14);
+  --text:#eef0f2;--text-2:#b9bec5;--text-3:#969ba2;
+  --success:#7cab90;--warning:#d4aa73;--danger:#d78184;--purple:#aa9bb9;--mfg:#7fb5b0;
+  --success-soft:color-mix(in srgb,var(--success) 13%,transparent);--warning-soft:color-mix(in srgb,var(--warning) 14%,transparent);
+  --danger-soft:color-mix(in srgb,var(--danger) 13%,transparent);--purple-soft:color-mix(in srgb,var(--purple) 13%,transparent);
+  --mfg-soft:color-mix(in srgb,var(--mfg) 13%,transparent);--neutral-soft:rgba(255,255,255,.06);
+  --series-2:#c69a89;--series-3:#91aa99;--series-4:#d4aa73;--series-5:#aaa0ad;--chart-grid:rgba(255,255,255,.06);
+  --brand-mark:linear-gradient(145deg,#3a3f45,#1d2023);
+  --avatar-bg:linear-gradient(145deg,#4a5057,#2a2e32);
+  --shadow-sm:0 1px 2px rgba(0,0,0,.3);
+  --shadow-card:0 12px 38px rgba(0,0,0,.16);
+  --shadow-md:0 14px 36px rgba(0,0,0,.34),0 2px 8px rgba(0,0,0,.2);
+  --shadow-lg:0 30px 80px rgba(0,0,0,.46),0 5px 18px rgba(0,0,0,.22);
+  --focus-ring:0 0 0 3px color-mix(in srgb,var(--accent) 28%,transparent);
+  --scrim:rgba(0,0,0,.55);
+}
+
+/* Background environments ("Fon"): a faint page tint behind neutral surfaces. Flat colour only —
+   no gradients, circles, blobs or glows. The accent comes from the theme registry. */
+:root[data-bg="emerald-mist"]{--bg:#f1f4f2}
+:root[data-bg="amber-mist"]{--bg:#f5f3ef}
+:root[data-bg="sapphire-mist"]{--bg:#f3f4f4}
+:root[data-bg="violet-mist"]{--bg:#f3f3f6}
+:root[data-bg="crimson-mist"]{--bg:#f6f2f3}
+:root[data-bg="ocean-mist"]{--bg:#f0f4f5}
+:root[data-bg="neutral-mist"]{--bg:#f2f2f1}
+:root[data-bg="minimal-light"]{--bg:#f7f7f6;--surface:#ffffff;--surface-solid:#ffffff;--surface-raised:#ffffff;--surface-glass:rgba(255,255,255,.9)}
+
+:root[data-bg="emerald-night"]{--bg:#0f1412}
+:root[data-bg="amber-night"]{--bg:#14120f}
+:root[data-bg="sapphire-night"]{--bg:#111315}
+:root[data-bg="violet-night"]{--bg:#121216}
+:root[data-bg="crimson-night"]{--bg:#151112}
+:root[data-bg="ocean-night"]{--bg:#0f1415}
+:root[data-bg="neutral-night"]{--bg:#121212}
+:root[data-bg="minimal-dark"]{--bg:#0e0f11;--surface:#16181a;--surface-solid:#16181a;--surface-raised:#1b1d20;--surface-glass:rgba(14,15,17,.92)}

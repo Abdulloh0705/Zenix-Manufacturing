@@ -1,0 +1,81 @@
+/* Data views: filter bar, tables, pagination */
+.data-view{display:grid;gap:12px;min-width:0}
+.toolbar{display:flex;align-items:center;gap:6px var(--sp-2);flex-wrap:wrap;min-width:0}
+.toolbar-filters{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}
+.toolbar-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-left:auto}
+.filter-strip{display:flex;align-items:center;gap:6px var(--sp-2);flex-wrap:wrap;min-width:0}
+.filter-reset{display:inline-flex;align-items:center;gap:5px;min-height:var(--control-h-sm);padding:0 6px 0 9px;border-radius:var(--r-pill);font-size:var(--fs-xs);font-weight:var(--fw-semibold);color:var(--text-2)}
+.filter-reset:hover{background:var(--surface-3);color:var(--text)}
+.filter-reset .seg-count{background:var(--accent);color:var(--accent-contrast)}
+
+.table-card{min-width:0;border-radius:var(--r-lg);background:var(--surface);border:1px solid var(--line);box-shadow:var(--shadow-card);overflow:hidden}
+.table-scroll{width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch}
+.table-scroll table,.table-card table,.card table{width:100%;font-size:var(--fs-sm)}
+.table-scroll table{min-width:720px}
+.table-scroll table.fit{min-width:0}
+th,td{padding:var(--row-py) var(--cell-px);text-align:left;vertical-align:middle;border-bottom:1px solid var(--line)}
+th{position:sticky;top:0;z-index:1;height:38px;padding-top:0;padding-bottom:0;background:var(--surface-2);font-size:var(--fs-xs);font-weight:var(--fw-semibold);color:var(--text-3);white-space:nowrap;letter-spacing:0}
+.card th{background:transparent;position:static;height:34px}
+.card.flush th{background:var(--surface-2)}
+tbody tr:last-child td{border-bottom:0}
+td{color:var(--text-2);white-space:nowrap}
+td b,td strong,td .num,td.align-right{color:var(--text)}
+td.wrap,td .wrap{white-space:normal}
+td b,td strong{font-weight:var(--fw-semibold)}
+.align-right{text-align:right}.align-center{text-align:center}
+td.align-right,th.align-right{font-variant-numeric:tabular-nums}
+th.align-right .th-sort{margin-left:auto}
+.th-sort{display:inline-flex;align-items:center;gap:3px;font:inherit;color:inherit;letter-spacing:inherit;text-transform:inherit;border-radius:var(--r-xs);padding:2px 4px;margin:-2px -4px}
+.th-sort svg{opacity:0;flex:none;transition:opacity .12s ease}
+.th-sort:hover{color:var(--text)}.th-sort:hover svg,th:focus-within .th-sort svg{opacity:.6}
+.th-sort.active{color:var(--accent)}.th-sort.active svg{opacity:1}
+table.is-interactive tbody tr{cursor:pointer;transition:background-color .12s ease}
+tbody tr{transition:background-color .12s ease}
+tbody tr:hover td{background:color-mix(in srgb,var(--text) 2.2%,transparent)}
+table.is-interactive tbody tr:hover td{background:color-mix(in srgb,var(--text) 3%,transparent)}
+table.is-interactive tbody tr:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+tbody tr.row-danger td:first-child{box-shadow:inset 3px 0 0 var(--danger)}
+tbody tr.row-warning td:first-child{box-shadow:inset 3px 0 0 var(--warning)}
+tbody tr.row-muted td{color:var(--text-3)}
+td.action-col,th.action-col{width:32px;padding-left:0;color:var(--text-3)}
+table.is-interactive tbody tr td.action-col svg{opacity:.4;transition:opacity .12s ease,transform .12s ease}
+table.is-interactive tbody tr:hover td.action-col svg{opacity:1;transform:translateX(2px)}
+.cell-main{display:grid;gap:1px;min-width:0}
+.cell-main b{font-weight:var(--fw-semibold);color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:280px}
+.cell-main small,.cell-sub{display:block;font-size:var(--fs-2xs);color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:280px}
+.cell-actions{display:flex;gap:6px;justify-content:flex-end;flex-wrap:nowrap}
+.pagination{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-3);padding:7px var(--cell-px);border-top:1px solid var(--line);font-size:var(--fs-xs);color:var(--text-2);flex-wrap:wrap;background:var(--surface-2)}
+.pagination em{font-style:normal;color:var(--text-3)}
+.pagination-controls{display:flex;align-items:center;gap:4px}
+.pagination-controls b{min-width:48px;text-align:center;font-variant-numeric:tabular-nums;color:var(--text)}
+.pagination-controls .custom-select-wrap{width:104px}
+.pagination .icon-ghost{width:var(--control-h-sm);height:var(--control-h-sm);min-width:var(--control-h-sm)}
+
+@media (max-width:1100px){.priority-low{display:none}}
+
+/* Phones: rows become stacked cards so nothing is lost to horizontal scrolling */
+@media (max-width:640px){
+  .data-view .table-scroll table{min-width:0}
+  .data-view thead{display:none}
+  .data-view tbody,.data-view tr,.data-view td{display:block;width:100%}
+  .data-view tbody tr{position:relative;padding:12px var(--sp-3) 8px;border-bottom:1px solid var(--line)}
+  .data-view tbody tr:last-child{border-bottom:0}
+  .data-view td{display:flex;justify-content:space-between;align-items:center;gap:var(--sp-3);padding:3px 0;border:0;min-height:26px;text-align:right}
+  .data-view td::before{content:attr(data-label);font-size:var(--fs-2xs);color:var(--text-3);font-weight:var(--fw-medium);text-align:left;flex:none}
+  .data-view td:first-child{padding-bottom:6px;text-align:left;padding-right:28px}
+  .data-view td:first-child::before{display:none}
+  .data-view td:first-child .cell-main b,.data-view td:first-child .cell-main small{max-width:none;white-space:normal}
+  .data-view td.action-col{position:absolute;top:var(--sp-3);right:var(--sp-2);width:auto;padding:0;min-height:0}
+  .data-view td.action-col::before{display:none}
+  .data-view .priority-low{display:flex}
+  .data-view tbody tr.row-danger td:first-child,.data-view tbody tr.row-warning td:first-child{box-shadow:none}
+  .data-view tbody tr.row-danger{box-shadow:inset 3px 0 0 var(--danger)}
+  .data-view tbody tr.row-warning{box-shadow:inset 3px 0 0 var(--warning)}
+  .toolbar .search-inline{max-width:none;flex-basis:100%}
+  .toolbar-actions{margin-left:0}
+  .pagination{justify-content:center}
+}
+/* Small phones: cards keep the key fields; secondary ones stay one tap away in the drawer */
+@media (max-width:480px){
+  .data-view .priority-low{display:none}
+}
