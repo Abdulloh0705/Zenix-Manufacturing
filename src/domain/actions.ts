@@ -6,7 +6,7 @@ import type {
   PermissionMap,ProductionOrder,ProductionStatus,PurchaseLine,PurchaseOrder,QualityCheck,QualityControlPoint,Role,SalesOrder,StockMovement,Supplier,SupplierMaterial,WorkOrder,
 } from '../types'
 import {
-  activeBomFor,actualOrderCost,componentSourceWarehouse,estimateOrderCost,isOpenOrder,isReturnRework,issuedQty,orderQcHold,orderReservations,plannedIssue,rawWarehouseFor,rollUpStandardCosts,isProductItem,itemName,itemUnit,orderMaterialPlan,orderRequirements,perUnit,remainingQty,stockOf,
+  activeBomFor,actualOrderCost,componentSourceWarehouse,estimateOrderCost,isOpenOrder,isReturnRework,issuedQty,lotOrigin,orderQcHold,returnSources,unbuildSource,orderReservations,plannedIssue,rawWarehouseFor,rollUpStandardCosts,isProductItem,itemName,itemUnit,orderMaterialPlan,orderRequirements,perUnit,remainingQty,stockOf,
 } from './manufacturingEngine'
 import {cleanLink,findLink,linkBlock,linkUnitCost,openPurchasesFor,validateLink} from './supplierMaterials'
 import type {LinkInput} from './supplierMaterials'
@@ -72,8 +72,9 @@ export {rawWarehouseFor}
 
 export function finishedWarehouseFor(s:S,lineId?:string){
   const branch=s.productionLines.find(l=>l.id===lineId)?.branchId
-  return s.warehouses.find(w=>w.branchId===branch&&w.status==='Faol'&&(w.type==='Finished'||w.type==='Mixed'))?.id
-    ||s.warehouses.find(w=>w.type==='Finished')?.id||s.warehouses[0]?.id||''
+  const finished=(w:S['warehouses'][number])=>w.status==='Faol'&&(w.type==='Finished'||w.type==='Mixed')
+  // Never an archived store or one that cannot hold finished goods: no such store means no target (P1-10).
+  return s.warehouses.find(w=>w.branchId===branch&&finished(w))?.id||s.warehouses.find(finished)?.id||''
 }
 
 const componentWarehouse=componentSourceWarehouse
@@ -286,6 +287,24 @@ function progressOf(order:ProductionOrder){
   return Math.min(95,Math.round(byWork*.9))
 }
 
+/**
+ * Why a BOM (or an order's frozen snapshot) cannot drive production (P1-11): a component that no longer exists or is
+ * archived, a non-positive or non-finite quantity, negative waste, the product inside itself, or a line in another
+ * unit than the item's stock (BUG-12).
+ */
+export function bomBlocker(s:S,bom:Pick<Bom,'code'|'productId'|'components'>):string|null{
+  for(const c of bom.components){
+    const item=s.rawMaterials.find(m=>m.id===c.materialId)||s.products.find(p=>p.id===c.materialId)
+    if(!item)return `${bom.code}: komponent ${c.materialId} topilmadi — BOM’ni tuzating`
+    if(item.status==='Arxiv')return `${bom.code}: ${item.name} arxivlangan — BOM’ni tuzating`
+    if(c.materialId===bom.productId)return `${bom.code}: mahsulot o‘z tarkibida bo‘lishi mumkin emas`
+    if(!Number.isFinite(Number(c.qty))||Number(c.qty)<=0)return `${bom.code}: ${item.name} miqdori 0 dan katta bo‘lishi kerak`
+    if(!Number.isFinite(Number(c.waste))||Number(c.waste)<0)return `${bom.code}: ${item.name} chiqindi foizi manfiy bo‘lmasin`
+    if(c.unit!==item.unit)return `${bom.code}: ${item.name} birligi (${c.unit}) ombor birligiga (${item.unit}) mos emas — BOM’ni tuzating`
+  }
+  return null
+}
+
 export type CreateOrderPayload={productId:string;quantity:number;bomId?:string;lineId?:string;warehouseId?:string;workCenterId?:string;responsibleId?:string;start?:string;due?:string;priority?:ProductionOrder['priority'];salesOrderId?:string;source?:string;reworkOf?:string}
 
 export function createProductionOrder(s:S,ctx:Ctx,p:CreateOrderPayload):Outcome{
@@ -295,17 +314,21 @@ export function createProductionOrder(s:S,ctx:Ctx,p:CreateOrderPayload):Outcome{
   if(quantity<=0)return fail(s,'Miqdor 0 dan katta bo‘lishi kerak')
   const bom=(p.bomId&&s.boms.find(b=>b.id===p.bomId&&b.status==='Faol'))||activeBomFor(s,product.id)
   if(!bom)return fail(s,`${product.name} uchun faol BOM yo‘q. Avval BOM yarating va faollashtiring.`)
-  // A BOM line in another unit than the item's stock would reserve and issue wrong quantities (BUG-12).
-  const wrongUnit=p.reworkOf?undefined:bom.components.find(c=>c.unit!==itemUnit(s,c.materialId))
-  if(wrongUnit)return fail(s,`${bom.code}: ${itemName(s,wrongUnit.materialId)} birligi (${wrongUnit.unit}) ombor birligiga (${itemUnit(s,wrongUnit.materialId)}) mos emas — BOM’ni tuzating`)
+  // A BOM line in another unit than the item's stock would reserve and issue wrong quantities (BUG-12); a stale or archived component could never be issued (P1-11).
+  const invalidBom=p.reworkOf?null:bomBlocker(s,bom)
+  if(invalidBom)return fail(s,invalidBom)
   const snapshot:Bom=p.reworkOf?{...clone(bom),components:[],byProducts:[]}:clone(bom)
   const lineId=p.lineId||s.settings.defaultLineId
+  if(p.lineId&&!s.productionLines.some(l=>l.id===p.lineId))return fail(s,'Ishlab chiqarish liniyasi topilmadi')
+  // Output lands in an existing, active store that holds finished goods — resolved from the data, never assumed (P1-10).
+  const target=s.warehouses.find(w=>w.id===(p.warehouseId||finishedWarehouseFor(s,lineId)))
+  if(!target||target.status!=='Faol'||!['Finished','Mixed','WIP'].includes(target.type))return fail(s,p.warehouseId?'Tayyor mahsulot ombori mavjud emas, arxivlangan yoki bu turdagi itemni saqlamaydi':'Faol tayyor mahsulot ombori topilmadi — avval ombor yarating')
   const id=ctx.id('mo'),code=nextCode(s.productionOrders.map(o=>o.code),'MO',ctx.now)
   const start=p.start||isoDate(ctx.now)
   // A due date before the start is a data-entry error, not something to replace silently (B3-14 / N-23).
   if(p.due&&p.due<start)return fail(s,`Muddat (${p.due}) boshlanish sanasidan (${start}) oldin bo‘lishi mumkin emas`)
   const order:ProductionOrder={id,code,productId:product.id,quantity,completed:0,scrap:0,bomId:bom.id,bomVersion:bom.version,bomSnapshot:snapshot,
-    warehouseId:p.warehouseId||finishedWarehouseFor(s,lineId),lineId,workCenterId:p.workCenterId||bom.operations[0]?.workCenterId||s.workCenters[0]?.id||'',
+    warehouseId:target.id,lineId,workCenterId:p.workCenterId||bom.operations[0]?.workCenterId||s.workCenters[0]?.id||'',
     responsibleId:p.responsibleId||ctx.user.id,status:'Qoralama',start,due:p.due||addDays(start,Math.max(1,product.leadTime)),progress:0,priority:p.priority||'Normal',
     salesOrderId:p.salesOrderId,estimatedCost:0,actualCost:0,materialReserved:false,qualityStatus:'Pending',createdAt:stamp(ctx.now),source:p.source,reworkOf:p.reworkOf,
     workOrders:buildWorkOrders(snapshot,quantity,ctx),consumed:[],qcHeld:0}
@@ -505,6 +528,8 @@ export function transitionProduction(s:S,ctx:Ctx,id:string,status:ProductionStat
 
   if(status==='Tasdiqlangan'){
     if(!['Qoralama','Material kutilmoqda'].includes(o.status))return fail(s,'Faqat qoralama buyurtma tasdiqlanadi')
+    const invalid=bomBlocker(s,o.bomSnapshot)
+    if(invalid)return fail(s,invalid)
     const r=tryReserve(next,ctx,updated)
     next=r.state;updated=r.order
     if(!r.reserved){
@@ -520,6 +545,8 @@ export function transitionProduction(s:S,ctx:Ctx,id:string,status:ProductionStat
     const backFromQc=o.status==='Sifat nazoratida'&&remainingQty(o)>0
     if(!['Tasdiqlangan','Pauzada'].includes(o.status)&&!backFromQc)return fail(s,o.status==='Sifat nazoratida'?'Qolgan miqdor yo‘q — buyurtmani QC orqali yakunlang':'Jarayonga faqat tasdiqlangan yoki pauzadagi buyurtma o‘tadi')
     if(!updated.materialReserved&&updated.bomSnapshot.components.length)return fail(s,'Material rezerv qilinmagan')
+    const invalid=bomBlocker(s,o.bomSnapshot)
+    if(invalid)return fail(s,invalid)
     updated={...refreshReadyWorkOrders(updated),startedAt:o.startedAt||stamp(ctx.now)}
   }
   if(status==='Pauzada'){
@@ -766,10 +793,13 @@ export function splitProduction(s:S,ctx:Ctx,id:string,splitQty:number):Outcome{
   let left=replanWorkOrders({...o,quantity:o.quantity-qty,materialReserved:false,reservations:undefined})
   left.estimatedCost=Math.round(estimateOrderCost(s,left).total)
   const childNo=s.productionOrders.filter(x=>x.parentOrderId===o.id).length+2
-  let child:ProductionOrder={...clone(o),id:ctx.id('mo'),code:`${o.code}-S${childNo}`,quantity:qty,completed:0,scrap:0,progress:0,status:o.status==='Material kutilmoqda'?'Qoralama':o.status==='Qoralama'?'Qoralama':'Tasdiqlangan',parentOrderId:o.id,source:`Split: ${o.code}`,actualCost:0,materialReserved:false,reservations:undefined,createdAt:stamp(ctx.now),startedAt:undefined,workOrders:buildWorkOrders(o.bomSnapshot,qty,ctx),consumed:[],lot:undefined,serialRange:undefined,qcHeld:0,qualityStatus:'Pending',outputKeys:undefined,costSnapshot:undefined}
+  // The child is a new order on the same frozen BOM: the parent's extra issues, output keys and history stay with the parent (P1-33/34).
+  let child:ProductionOrder={...clone(o),id:ctx.id('mo'),code:`${o.code}-S${childNo}`,quantity:qty,completed:0,scrap:0,progress:0,status:o.status==='Material kutilmoqda'?'Qoralama':o.status==='Qoralama'?'Qoralama':'Tasdiqlangan',parentOrderId:o.id,source:`Split: ${o.code}`,actualCost:0,materialReserved:false,reservations:undefined,createdAt:stamp(ctx.now),startedAt:undefined,completedAt:undefined,workOrders:buildWorkOrders(o.bomSnapshot,qty,ctx),consumed:[],lot:undefined,serialRange:undefined,qcHeld:0,qualityStatus:'Pending',outputKeys:undefined,costSnapshot:undefined,extraIssues:undefined}
   child.estimatedCost=Math.round(estimateOrderCost(s,child).total)
   if(o.materialReserved){
     const a=tryReserve(next,ctx,left);next=a.state;left=a.order
+    // The parent only gives stock back; if it cannot hold its smaller need again the data is inconsistent — change nothing.
+    if(!a.reserved)return fail(s,`${o.code}: qolgan miqdor uchun rezervni qayta tiklab bo‘lmadi — split bajarilmadi`)
     const b=tryReserve(next,ctx,child);next=b.state;child=b.order
     if(!b.reserved)child={...child,status:'Material kutilmoqda'}
   }
@@ -793,10 +823,13 @@ export function mergeProduction(s:S,ctx:Ctx,ids:string[]):Outcome{
   // One merged order can serve one sales order only; merging two would orphan the other SO (N-04).
   if(new Set(orders.map(o=>o.salesOrderId||'')).size>1)return fail(s,'Turli sotuv buyurtmalariga (yoki SO’siz MO bilan) bog‘langan MOlarni birlashtirib bo‘lmaydi')
   if(orders.some(o=>o.reworkOf))return fail(s,'Rework MOlarini birlashtirib bo‘lmaydi')
+  // The merged order keeps one frozen BOM, so every order must carry the same snapshot (P1-19/33).
+  const recipe=(o:ProductionOrder)=>JSON.stringify([o.bomVersion,o.bomSnapshot.components,o.bomSnapshot.operations,o.bomSnapshot.byProducts||[]])
+  if(orders.some(o=>recipe(o)!==recipe(first)))return fail(s,'MOlar BOMning turli versiyasi (snapshot) bilan ochilgan — birlashtirib bo‘lmaydi')
   let next=s
   for(const o of orders)if(o.materialReserved)next=releaseFor(next,ctx,o)
   const total=orders.reduce((a,o)=>a+o.quantity,0)
-  let merged:ProductionOrder={...clone(first),id:ctx.id('mo'),code:nextCode(s.productionOrders.map(o=>o.code),'MO',ctx.now),quantity:total,completed:0,scrap:0,progress:0,status:'Qoralama',materialReserved:false,reservations:undefined,actualCost:0,source:`Merge: ${orders.map(o=>o.code).join(', ')}`,createdAt:stamp(ctx.now),due:orders.map(o=>o.due).sort()[0],priority:orders.some(o=>o.priority==='Kritik')?'Kritik':orders.some(o=>o.priority==='Yuqori')?'Yuqori':first.priority,workOrders:buildWorkOrders(first.bomSnapshot,total,ctx),consumed:[]}
+  let merged:ProductionOrder={...clone(first),id:ctx.id('mo'),code:nextCode(s.productionOrders.map(o=>o.code),'MO',ctx.now),quantity:total,completed:0,scrap:0,progress:0,status:'Qoralama',materialReserved:false,reservations:undefined,actualCost:0,source:`Merge: ${orders.map(o=>o.code).join(', ')}`,createdAt:stamp(ctx.now),startedAt:undefined,parentOrderId:undefined,backorderOf:undefined,extraIssues:undefined,outputKeys:undefined,costSnapshot:undefined,qcHeld:0,qualityStatus:'Pending',lot:undefined,serialRange:undefined,due:orders.map(o=>o.due).sort()[0],priority:orders.some(o=>o.priority==='Kritik')?'Kritik':orders.some(o=>o.priority==='Yuqori')?'Yuqori':first.priority,workOrders:buildWorkOrders(first.bomSnapshot,total,ctx),consumed:[]}
   merged.estimatedCost=Math.round(estimateOrderCost(s,merged).total)
   if(orders.some(o=>o.materialReserved)){
     const r=tryReserve(next,ctx,merged);next=r.state;merged={...r.order,status:r.reserved?'Tasdiqlangan':'Material kutilmoqda'}
@@ -823,9 +856,18 @@ export function createBackorder(s:S,ctx:Ctx,id:string):Outcome{
   if(unfinished.length)return fail(s,`Backorderdan oldin operatsiyalarni yakunlang: ${unfinished.map(w=>w.name).join(', ')}`)
   let next=o.materialReserved?releaseFor(s,ctx,o):s
   const original:ProductionOrder={...o,quantity:o.completed+o.scrap,materialReserved:false,reservations:undefined,status:'Sifat nazoratida'}
-  let back:ProductionOrder={...clone(o),id:ctx.id('mo'),code:`${o.code}-BO`,quantity:remaining,completed:0,scrap:0,progress:0,status:'Qoralama',materialReserved:false,reservations:undefined,backorderOf:o.id,source:`Backorder: ${o.code}`,actualCost:0,createdAt:stamp(ctx.now),startedAt:undefined,workOrders:buildWorkOrders(o.bomSnapshot,remaining,ctx),consumed:[],lot:undefined,serialRange:undefined,qualityStatus:'Pending',qcHeld:0}
+  const codes=new Set(s.productionOrders.map(x=>x.code))
+  let code=`${o.code}-BO`
+  for(let n=2;codes.has(code);n+=1)code=`${o.code}-BO${n}`
+  let back:ProductionOrder={...clone(o),id:ctx.id('mo'),code,quantity:remaining,completed:0,scrap:0,progress:0,status:'Qoralama',materialReserved:false,reservations:undefined,backorderOf:o.id,source:`Backorder: ${o.code}`,actualCost:0,createdAt:stamp(ctx.now),startedAt:undefined,completedAt:undefined,workOrders:buildWorkOrders(o.bomSnapshot,remaining,ctx),consumed:[],lot:undefined,serialRange:undefined,qualityStatus:'Pending',qcHeld:0,extraIssues:undefined,outputKeys:undefined,costSnapshot:undefined}
   back.estimatedCost=Math.round(estimateOrderCost(s,back).total)
   next={...next,productionOrders:[back,...next.productionOrders.map(x=>x.id===o.id?{...original,progress:progressOf(original)}:x)]}
+  // A make-to-order backorder still serves the sales order, which keeps waiting for it (P1-25).
+  if(back.salesOrderId)next={...next,salesOrders:next.salesOrders.map(so=>{
+    if(so.id!==back.salesOrderId)return so
+    const ids=so.productionOrderIds?.length?so.productionOrderIds:so.productionOrderId?[so.productionOrderId]:[]
+    return {...so,productionOrderIds:[...ids.filter(x=>x!==back.id),back.id]}
+  })}
   next=ensureFinalCheck(next,ctx,original)
   const message=`${back.code} · ${remaining} ${itemUnit(s,o.productId)} backorder yaratildi; ${o.code} sifat nazoratiga yuborildi`
   return ok(logActivity(next,ctx,'Production backorder','Ishlab chiqarish',back.code,'warning',message),message,back.id)
@@ -841,7 +883,7 @@ export function unbuildContent(s:S,productId:string,allocations:{lot?:string;qty
   const totals=new Map<string,number>(),basis=new Set<string>()
   const active=activeBomFor(s,productId)
   for(const a of allocations){
-    const lot=a.lot?s.lots.find(l=>l.code===a.lot&&l.itemId===productId):undefined
+    const lot=a.lot?lotOrigin(s,a.lot,productId):undefined
     const mo=lot?.sourceType==='production'?s.productionOrders.find(o=>o.id===lot.sourceId):undefined
     let perUnit:UnbuildLine[]=[]
     if(mo){
@@ -865,7 +907,7 @@ export function unbuildContent(s:S,productId:string,allocations:{lot?:string;qty
 /** What an unbuild of `qty` units would take and return, without changing anything (for the dialog). */
 export function unbuildPreview(s:S,productId:string,qty:number,recoveryPct=100){
   const amount=Math.floor(Number(qty)||0)
-  const fg=s.stockBalances.filter(b=>b.itemId===productId&&b.onHand-b.reserved-(b.quarantine||0)>0).sort((a,b)=>(b.onHand-b.reserved-(b.quarantine||0))-(a.onHand-a.reserved-(a.quarantine||0)))[0]
+  const fg=unbuildSource(s,productId)
   if(!fg||amount<=0)return {warehouseId:fg?.warehouseId,lines:[] as UnbuildLine[],basis:[] as string[]}
   const taken=takeLots(s,productId,amount,'preview',fg.warehouseId)
   const content=unbuildContent(s,productId,[...taken.allocations,...(taken.remaining>0?[{qty:taken.remaining}]:[])])
@@ -880,7 +922,7 @@ export function unbuildProduct(s:S,ctx:Ctx,productId:string,qty:number,recoveryP
   const product=s.products.find(p=>p.id===productId)
   if(!product)return fail(s,'Mahsulot topilmadi')
   if(amount<=0)return fail(s,'Miqdorni kiriting')
-  const fg=s.stockBalances.filter(b=>b.itemId===productId&&b.onHand-b.reserved-(b.quarantine||0)>0).sort((a,b)=>(b.onHand-b.reserved-(b.quarantine||0))-(a.onHand-a.reserved-(a.quarantine||0)))[0]
+  const fg=unbuildSource(s,productId)
   if(!fg||fg.onHand-fg.reserved-(fg.quarantine||0)<amount)return fail(s,`Available tayyor mahsulot yetarli emas (${Math.floor(fg?fg.onHand-fg.reserved-(fg.quarantine||0):0)})`)
   const source=nextRef(s,'UNB',ctx.now)
   let next=changeBalance(s,ctx,fg.warehouseId,productId,{onHand:-amount})
@@ -968,8 +1010,10 @@ export function resolveQuality(s:S,ctx:Ctx,id:string,status:QualityCheck['status
       if(amount>0){
         next=changeBalance(next,ctx,mo.warehouseId,mo.productId,{onHand:-amount,quarantine:-amount})
         let left=amount
+        const ret=s.returns.find(x=>x.reworkOrderId===mo.id)
         next={...next,lots:next.lots.map(l=>{
-          if(left<=1e-9||l.sourceType!=='production'||l.sourceId!==mo.id||l.status!=='quarantine')return l
+          const held=(l.sourceType==='production'&&l.sourceId===mo.id&&l.status==='quarantine')||(Boolean(ret)&&l.sourceType==='return'&&l.sourceId===ret?.id&&l.status==='rework')
+          if(left<=1e-9||!held)return l
           const take=Math.min(left,l.qty);left=q3(left-take)
           return {...l,qty:q3(l.qty-take),status:l.qty-take>1e-9?l.status:'hold' as const}
         })}
@@ -1000,7 +1044,7 @@ export function resolveQuality(s:S,ctx:Ctx,id:string,status:QualityCheck['status
         next={...next,lots:next.lots.map(l=>l.sourceType==='production'&&l.sourceId===mo.id?{...l,status:'available' as const}:l)}
         // A customer-return rework that passed puts the returned lot back into service (BUG-18).
         const ret=s.returns.find(x=>x.reworkOrderId===mo.id)
-        if(ret?.lot)next={...next,lots:next.lots.map(l=>l.code===ret.lot&&l.itemId===mo.productId&&l.status==='rework'?{...l,status:'available' as const}:l)}
+        if(ret)next={...next,lots:next.lots.map(l=>l.itemId===mo.productId&&l.status==='rework'&&(l.sourceType==='return'?l.sourceId===ret.id:Boolean(ret.lot)&&l.code===ret.lot)?{...l,status:'available' as const}:l)}
       }
     }
   }
@@ -1591,39 +1635,79 @@ export function createReturn(s:S,ctx:Ctx,p:{salesOrderId:string;productId:string
   if(qty<=0||qty>line.delivered-alreadyReturned)return fail(s,`Qaytarish miqdori 1–${line.delivered-alreadyReturned} oralig‘ida`)
   if(!p.reason.trim())return fail(s,'Qaytarish sababini yozing')
   const id=ctx.id('ret'),code=nextCode(s.returns.map(r=>r.code),'RET',ctx.now)
-  const lot=s.stockMovements.find(m=>m.type==='Sale -'&&m.source===so.code&&m.itemId===p.productId&&m.lot)?.lot
   const checkId=ctx.id('qc')
-  const row:CustomerReturn={id,code,salesOrderId:so.id,customerId:so.customerId,productId:p.productId,qty,reason:p.reason.trim(),status:'Inspection',createdAt:stamp(ctx.now),qualityCheckId:checkId,lot}
+  // The units are received into quarantine at once, so stock and the ledger show them while they wait for inspection (P1-26).
+  const received=receiveReturn(s,ctx,{id,code,salesOrderId:so.id,customerId:so.customerId,productId:p.productId,qty,reason:p.reason.trim(),status:'Inspection',createdAt:stamp(ctx.now),qualityCheckId:checkId},so)
+  if('error' in received)return fail(s,received.error)
+  const row=received.row,lot=row.lot
   const check:QualityCheck={id:checkId,type:'Final',sourceType:'return',sourceId:id,itemId:p.productId,status:'Pending',inspectorId:s.employees.find(e=>e.department==='Quality')?.id||ctx.user.id,date:stamp(ctx.now),lot,reason:`Customer return: ${p.reason.trim()}`}
-  let next={...s,returns:[row,...s.returns],qualityChecks:[check,...s.qualityChecks]}
+  let next={...received.state,returns:[row,...received.state.returns],qualityChecks:[check,...received.state.qualityChecks]}
   next=logActivity(next,ctx,'Mijoz qaytarishi qabul qilindi','Sotuv',code,'warning',`${so.code} · ${qty} ${itemUnit(s,p.productId)}`)
   next=notify(next,ctx,'quality','Customer return',`${code}: ${itemName(s,p.productId)} ${qty} — inspectionga yuborildi.`,'warning',`/sales?view=returns&id=${id}`)
   return ok(next,`${code} yaratildi va inspectionga yuborildi`,id)
 }
 
+/**
+ * Receives a customer return into quarantine (P1-26): into the warehouse that shipped most of it (an active one), as
+ * the shipped lots it came back from (P1-29) — each a lot record of its own, so the decision moves exactly these units.
+ */
+function receiveReturn(s:S,ctx:Ctx,r:CustomerReturn,so:Pick<SalesOrder,'id'|'code'>):{state:S;row:CustomerReturn}|{error:string}{
+  const src=returnSources(s,so,r.productId,r.qty,r.id)
+  const active=(id?:string)=>Boolean(id&&s.warehouses.some(w=>w.id===id&&w.status==='Faol'))
+  const wh=active(src.warehouseId)?src.warehouseId!:finishedWarehouseFor(s,s.settings.defaultLineId)
+  if(!active(wh))return {error:'Qaytarishni qabul qiladigan faol ombor topilmadi'}
+  const allocations=src.unexplained>0?[...src.allocations,{qty:src.unexplained}]:src.allocations
+  let next=changeBalance(s,ctx,wh,r.productId,{onHand:r.qty,quarantine:r.qty})
+  for(const a of allocations){
+    next=addMove(next,ctx,{type:'Return +',itemId:r.productId,itemType:'finished',warehouseId:wh,qty:a.qty,source:r.code,note:'Customer return · karantin (inspection)',lot:a.lot})
+    if(!a.lot)continue
+    const origin=lotOrigin(s,a.lot,r.productId)
+    next={...next,lots:[{id:ctx.id('lot'),code:a.lot,kind:origin?.kind||'lot',itemId:r.productId,itemType:'finished',qty:a.qty,originalQty:a.qty,warehouseId:wh,status:'quarantine',sourceType:'return',sourceId:r.id,sourceCode:r.code,createdAt:stamp(ctx.now),expiry:origin?.expiry,consumedBy:[]},...next.lots]}
+  }
+  return {state:next,row:{...r,warehouseId:wh,allocations,lot:allocations.find(a=>a.lot)?.lot}}
+}
+
 export function dispositionReturn(s:S,ctx:Ctx,id:string,decision:'Omborga qaytarildi'|'Rework'|'Scrap'):Outcome{
-  const r=s.returns.find(x=>x.id===id)
-  if(!r)return fail(s,'Qaytarish topilmadi')
-  if(r.status!=='Inspection'&&r.status!=='Qabul qilindi')return fail(s,'Qaror allaqachon qabul qilingan')
-  const wh=finishedWarehouseFor(s,s.settings.defaultLineId)
-  let next=s
+  const found=s.returns.find(x=>x.id===id)
+  if(!found)return fail(s,'Qaytarish topilmadi')
+  if(found.status!=='Inspection'&&found.status!=='Qabul qilindi')return fail(s,'Qaror allaqachon qabul qilingan')
+  if(!['Omborga qaytarildi','Rework','Scrap'].includes(decision))return fail(s,'Qaror noto‘g‘ri')
+  let next=s,r=found
+  // A return registered before returns were received into quarantine is received now, then decided (P1-26).
+  if(!r.warehouseId){
+    const so=s.salesOrders.find(x=>x.id===r.salesOrderId)
+    if(!so)return fail(s,'Qaytarishning sotuv buyurtmasi topilmadi')
+    const received=receiveReturn(s,ctx,r,so)
+    if('error' in received)return fail(s,received.error)
+    next=received.state;r=received.row
+  }
+  const wh=r.warehouseId!
+  const balance=next.stockBalances.find(b=>b.warehouseId===wh&&b.itemId===r.productId)
+  if((balance?.quarantine||0)<r.qty-1e-6||(balance?.onHand||0)<r.qty-1e-6)return fail(s,`${r.code}: karantinda ${q3(balance?.quarantine||0)} ${itemUnit(s,r.productId)} bor, qaytarish ${r.qty} — avval qoldiqni tekshiring`)
+  const own=(l:LotRecord)=>l.sourceType==='return'&&l.sourceId===r.id&&l.itemId===r.productId
   let reworkOrderId:string|undefined
-  if(decision!=='Scrap'){
-    next=changeBalance(next,ctx,wh,r.productId,{onHand:r.qty,quarantine:decision==='Rework'?r.qty:0},r.lot)
-    next=addMove(next,ctx,{type:'Return +',itemId:r.productId,itemType:'finished',warehouseId:wh,qty:r.qty,source:r.code,note:decision==='Rework'?'Customer return → rework':'Customer return → good stock',lot:r.lot})
-    if(r.lot)next={...next,lots:next.lots.map(l=>l.code===r.lot?{...l,qty:q3(l.qty+r.qty),status:decision==='Rework'?'rework':l.status||'available'}:l)}
+  if(decision==='Omborga qaytarildi'){
+    next=changeBalance(next,ctx,wh,r.productId,{quarantine:-r.qty})
+    next={...next,lots:next.lots.map(l=>own(l)?{...l,status:'available' as const}:l)}
+    next=retryWaitingOrders(next,ctx)
+  }
+  if(decision==='Scrap'){
+    next=changeBalance(next,ctx,wh,r.productId,{onHand:-r.qty,quarantine:-r.qty})
+    for(const a of r.allocations?.length?r.allocations:[{qty:r.qty,lot:r.lot}])next=addMove(next,ctx,{type:'QC Scrap -',itemId:r.productId,itemType:'finished',warehouseId:wh,qty:-a.qty,source:r.code,note:'Customer return → scrap',lot:a.lot})
+    next={...next,lots:next.lots.map(l=>own(l)?{...l,qty:0,status:'hold' as const}:l)}
   }
   if(decision==='Rework'){
     // Only an order that made the returned lot is its source; otherwise the rework belongs to the return itself (B3-13).
-    const sourceOrder=r.lot?s.productionOrders.find(o=>o.productId===r.productId&&o.lot===r.lot):undefined
-    const created=createProductionOrder(next,ctx,{productId:r.productId,quantity:r.qty,priority:'Yuqori',source:`Rework: ${r.code}`,reworkOf:sourceOrder?.id||r.id})
+    const origin=r.lot?lotOrigin(s,r.lot,r.productId):undefined
+    const sourceOrder=origin?.sourceType==='production'?s.productionOrders.find(o=>o.id===origin.sourceId&&o.productId===r.productId):undefined
+    const created=createProductionOrder(next,ctx,{productId:r.productId,quantity:r.qty,priority:'Yuqori',source:`Rework: ${r.code}`,reworkOf:sourceOrder?.id||r.id,warehouseId:wh})
     if(!created.result.ok)return fail(s,created.result.message)
     reworkOrderId=created.result.id
-    // The returned units wait in quarantine for this rework order's Final pass, not for its source order's.
-    next={...created.state,productionOrders:created.state.productionOrders.map(o=>o.id===reworkOrderId?{...o,qcHeld:r.qty}:o)}
+    // The returned units stay in quarantine for this rework order's Final pass, not for its source order's.
+    next={...created.state,productionOrders:created.state.productionOrders.map(o=>o.id===reworkOrderId?{...o,qcHeld:r.qty}:o),lots:created.state.lots.map(l=>own(l)?{...l,status:'rework' as const}:l)}
   }
   const checkStatus:QualityCheck['status']=decision==='Omborga qaytarildi'?'Passed':decision==='Rework'?'Rework':'Scrap'
-  next={...next,returns:next.returns.map(x=>x.id===id?{...x,status:decision,reworkOrderId}:x),qualityChecks:next.qualityChecks.map(q=>q.id===r.qualityCheckId&&q.status==='Pending'?{...q,status:checkStatus,date:stamp(ctx.now),inspectorId:ctx.user.id}:q)}
+  next={...next,returns:next.returns.map(x=>x.id===id?{...r,status:decision,reworkOrderId}:x),qualityChecks:next.qualityChecks.map(q=>q.id===r.qualityCheckId&&q.status==='Pending'?{...q,status:checkStatus,date:stamp(ctx.now),inspectorId:ctx.user.id}:q)}
   next=logActivity(next,ctx,`Return disposition → ${decision}`,'Sotuv',r.code,decision==='Scrap'?'danger':'info')
   return ok(next,`${r.code}: ${decision}`)
 }
@@ -1650,7 +1734,8 @@ export function transferStock(s:S,ctx:Ctx,itemId:string,from:string,to:string,qt
   for(const a of lotTake.allocations){
     if(a.lot){
       const src=s.lots.find(l=>l.code===a.lot&&l.itemId===itemId&&l.warehouseId===from)
-      if(src)next={...next,lots:[{...src,id:ctx.id('lot'),qty:a.qty,originalQty:a.qty,warehouseId:to,sourceType:'adjustment',sourceId:ref,sourceCode:ref,createdAt:stamp(ctx.now),consumedBy:[]},...next.lots]}
+      // The copy keeps where the lot came from (PO / MO / return), so traceability and unbuild still find it (P1-29/30).
+      if(src)next={...next,lots:[{...src,id:ctx.id('lot'),qty:a.qty,originalQty:a.qty,warehouseId:to,createdAt:stamp(ctx.now),consumedBy:[]},...next.lots]}
     }
     next=addMove(next,ctx,{type:'Transfer -',itemId,itemType:source.itemType,warehouseId:from,qty:-a.qty,source:ref,note:`→ ${s.warehouses.find(w=>w.id===to)?.name}`,lot:a.lot})
     next=addMove(next,ctx,{type:'Transfer +',itemId,itemType:source.itemType,warehouseId:to,qty:a.qty,source:ref,note:`← ${s.warehouses.find(w=>w.id===from)?.name}`,lot:a.lot})
@@ -1976,24 +2061,28 @@ export function advanceSubcontract(s:S,ctx:Ctx,id:string):Outcome{
 /* ---------------------------------------------------------- admin/misc -- */
 
 const REFERENCE_CHECKS:Partial<Record<EntityKey,(s:S,id:string)=>string|null>>={
-  products:(s,id)=>s.productionOrders.some(o=>o.productId===id)?'ishlab chiqarish buyurtmalarida':s.salesOrders.some(o=>o.items.some(i=>i.productId===id))?'sotuv buyurtmalarida':s.boms.some(b=>b.components.some(c=>c.materialId===id))?'boshqa BOM komponentida':stockOf(s,id).onHand>0?'omborda qoldiq bor':null,
-  rawMaterials:(s,id)=>s.boms.some(b=>b.status!=='Arxiv'&&b.components.some(c=>c.materialId===id))?'faol BOM komponentida':s.purchaseOrders.some(p=>p.items.some(i=>i.materialId===id))?'purchase orderlarda':stockOf(s,id).onHand>0?'omborda qoldiq bor':null,
-  suppliers:(s,id)=>s.purchaseOrders.some(p=>p.supplierId===id)?'purchase orderlarda':s.rawMaterials.some(m=>m.supplierId===id)?'material default supplieri':null,
-  customers:(s,id)=>s.salesOrders.some(o=>o.customerId===id)?'sotuv buyurtmalarida':null,
+  products:(s,id)=>s.productionOrders.some(o=>o.productId===id||o.bomSnapshot.components.some(c=>c.materialId===id))?'ishlab chiqarish buyurtmalarida':s.salesOrders.some(o=>o.items.some(i=>i.productId===id))?'sotuv buyurtmalarida':s.boms.some(b=>b.productId===id&&b.status!=='Arxiv')?'mahsulotning faol yoki qoralama BOMi bor':s.boms.some(b=>b.components.some(c=>c.materialId===id))?'boshqa BOM komponentida':s.subcontractOrders.some(o=>o.productId===id)?'subcontract buyurtmalarida':s.returns.some(r=>r.productId===id)?'mijoz qaytarishlarida':stockOf(s,id).onHand>0?'omborda qoldiq bor':null,
+  rawMaterials:(s,id)=>s.boms.some(b=>b.status!=='Arxiv'&&b.components.some(c=>c.materialId===id))?'faol BOM komponentida':s.productionOrders.some(o=>isOpenOrder(o)&&o.bomSnapshot.components.some(c=>c.materialId===id))?'ochiq ishlab chiqarish buyurtmasi BOMida':s.purchaseOrders.some(p=>p.items.some(i=>i.materialId===id))?'purchase orderlarda':s.subcontractOrders.some(o=>o.materialIds.includes(id))?'subcontract buyurtmalarida':stockOf(s,id).onHand>0?'omborda qoldiq bor':null,
+  suppliers:(s,id)=>s.purchaseOrders.some(p=>p.supplierId===id)?'purchase orderlarda':s.subcontractOrders.some(o=>o.supplierId===id)?'subcontract buyurtmalarida':s.rawMaterials.some(m=>m.supplierId===id)?'material default supplieri':null,
+  customers:(s,id)=>s.salesOrders.some(o=>o.customerId===id)?'sotuv buyurtmalarida':s.returns.some(r=>r.customerId===id)?'mijoz qaytarishlarida':null,
   employees:(s,id)=>s.productionOrders.some(o=>o.responsibleId===id&&isOpenOrder(o))?'ochiq MOlarga mas’ul':null,
   warehouses:(s,id)=>s.stockBalances.some(b=>b.warehouseId===id&&(b.onHand>0||b.reserved>0||b.incoming>0||(b.quarantine||0)>0))?'omborda qoldiq, rezerv yoki kutilayotgan kirim bor'
     :s.purchaseOrders.some(p=>p.warehouseId===id&&['Qoralama','Tasdiqlangan','Yo‘lda','Qisman qabul'].includes(p.status))?'ochiq purchase orderlarda'
     :s.productionOrders.some(o=>o.warehouseId===id&&isOpenOrder(o))?'ochiq ishlab chiqarish buyurtmalarida'
-    :s.settings.defaultWarehouseId===id?'standart ombor (Sozlamalar)':null,
+    :s.settings.defaultWarehouseId===id?'standart ombor (Sozlamalar)'
+    :s.employees.some(e=>e.warehouseId===id&&e.status!=='Arxiv')?'xodimlarning ish ombori':null,
   workCenters:(s,id)=>s.boms.some(b=>b.status!=='Arxiv'&&b.operations.some(o=>o.workCenterId===id))?'BOM operatsiyalarida'
     :s.productionOrders.some(o=>isOpenOrder(o)&&o.workOrders.some(w=>w.workCenterId===id))?'ochiq MO operatsiyalarida'
-    :s.equipment.some(e=>e.workCenterId===id)?'uskunalar biriktirilgan':null,
+    :s.equipment.some(e=>e.workCenterId===id)?'uskunalar biriktirilgan'
+    :s.employees.some(e=>e.workCenterId===id&&e.status!=='Arxiv')?'xodimlar biriktirilgan':null,
   productionLines:(s,id)=>s.settings.defaultLineId===id?'standart liniya (Sozlamalar)'
     :s.productionOrders.some(o=>o.lineId===id&&isOpenOrder(o))?'ochiq ishlab chiqarish buyurtmalarida'
     :s.workCenters.some(w=>w.lineId===id)?'work centerlar biriktirilgan':null,
   branches:(s,id)=>s.settings.defaultBranchId===id?'standart filial (Sozlamalar)'
     :s.warehouses.some(w=>w.branchId===id)?'filialda omborlar bor':s.productionLines.some(l=>l.branchId===id)?'filialda liniyalar bor':null,
-  equipment:(s,id)=>s.maintenanceOrders.some(m=>m.equipmentId===id&&['Rejada','Jarayonda'].includes(m.status))?'ochiq maintenance bor':null,
+  equipment:(s,id)=>s.maintenanceOrders.some(m=>m.equipmentId===id&&['Rejada','Jarayonda'].includes(m.status))?'ochiq maintenance bor'
+    :s.repairOrders.some(r=>r.equipmentId===id&&r.status!=='Yakunlangan')?'ochiq ta’mir buyurtmasi bor'
+    :s.downtimeEvents.some(d=>d.equipmentId===id&&!d.end)?'davom etayotgan to‘xtash bor':null,
 }
 
 type Row=Record<string,unknown>

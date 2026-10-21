@@ -1,4 +1,4 @@
-import type {Bom,BomComponent,LotRecord,ManufacturingState,MaterialReservation,ProductionOrder,WorkOrder} from '../types'
+import type {Bom,BomComponent,LotRecord,ManufacturingState,MaterialReservation,ProductionOrder,SalesOrder,WorkOrder} from '../types'
 import {addDays,daysBetween,minutesBetween,periodStart,stamp,todayISO,weekStart,weekdayShort} from '../utils/dates'
 import {SUPPLYING_PO,orderableLinks,preferredSupplierId} from './supplierMaterials'
 
@@ -65,8 +65,9 @@ export function rawWarehouseFor(state:ManufacturingState,warehouseId:string){
   const branch=state.warehouses.find(w=>w.id===warehouseId)?.branchId
   const candidates=state.warehouses.filter(w=>w.branchId===branch&&w.status==='Faol'&&(w.type==='Raw'||w.type==='Mixed'))
   const preferred=candidates.find(w=>w.id===state.settings?.defaultWarehouseId)
+  // Never an archived store or one that cannot hold raw materials: no such store means no source (P1-10).
   return preferred?.id||candidates.at(-1)?.id
-    ||state.warehouses.filter(w=>w.type==='Raw').at(-1)?.id||state.warehouses[0]?.id||''
+    ||state.warehouses.filter(w=>w.status==='Faol'&&(w.type==='Raw'||w.type==='Mixed')).at(-1)?.id||''
 }
 
 /** Where an order takes a component from: sub-assemblies from its own warehouse, raw materials from the branch raw store. */
@@ -569,14 +570,21 @@ export function lotRemaining(lot:LotRecord){
 export function buildTraceability(state:ManufacturingState,orderId:string){
   const order=state.productionOrders.find(o=>o.id===orderId)
   if(!order)return {order:undefined,upstreamLots:[] as LotRecord[],qualityChecks:[] as ManufacturingState['qualityChecks'],movements:[] as ManufacturingState['stockMovements'],downstreamSales:[] as ManufacturingState['salesOrders'],outputLots:[] as LotRecord[],purchases:[] as ManufacturingState['purchaseOrders']}
-  const consumedLots=new Set(order.consumed.map(c=>c.lot).filter(Boolean) as string[])
-  const upstreamLots=state.lots.filter(l=>consumedLots.has(l.code)||l.consumedBy.includes(order.code))
-  const outputLots=state.lots.filter(l=>l.sourceType==='production'&&l.sourceId===order.id)
+  // Each consumed (material, lot) pair resolves to the record it was taken from, else to the lot's origin — never
+  // to a same-named lot of another item or to every transferred copy (P1-29).
+  const upstream=new Map<string,LotRecord>()
+  for(const c of order.consumed){
+    if(!c.lot)continue
+    const taken=state.lots.filter(l=>l.code===c.lot&&l.itemId===c.materialId&&l.consumedBy.includes(order.code))
+    for(const l of taken.length?taken:[lotOrigin(state,c.lot,c.materialId)].filter((x):x is LotRecord=>Boolean(x)))upstream.set(l.id,l)
+  }
+  const upstreamLots=[...upstream.values()]
+  const outputLots=state.lots.filter(l=>l.sourceType==='production'&&l.sourceId===order.id&&l.itemId===order.productId)
   const outputCodes=new Set(outputLots.map(l=>l.code))
   const qualityChecks=state.qualityChecks.filter(q=>q.sourceType==='production'&&q.sourceId===order.id)
   const movements=state.stockMovements.filter(m=>m.source===order.code||m.source===order.id)
-  const salesCodes=new Set(state.stockMovements.filter(m=>m.type==='Sale -'&&m.lot&&outputCodes.has(m.lot)).map(m=>m.source))
-  const downstreamSales=state.salesOrders.filter(s=>s.productionOrderId===order.id||salesCodes.has(s.code))
+  const salesCodes=new Set(state.stockMovements.filter(m=>m.type==='Sale -'&&m.itemId===order.productId&&m.lot&&outputCodes.has(m.lot)).map(m=>m.source))
+  const downstreamSales=state.salesOrders.filter(s=>s.productionOrderId===order.id||s.productionOrderIds?.includes(order.id)||salesCodes.has(s.code))
   const purchaseIds=new Set(upstreamLots.filter(l=>l.sourceType==='purchase').map(l=>l.sourceId))
   const purchases=state.purchaseOrders.filter(p=>purchaseIds.has(p.id))
   return {order,upstreamLots,qualityChecks,movements,downstreamSales,outputLots,purchases}
@@ -588,12 +596,70 @@ export function findTraceOrder(state:ManufacturingState,query:string){
   if(!q)return undefined
   const byCode=state.productionOrders.find(o=>o.code.toLowerCase()===q||o.lot?.toLowerCase()===q)
   if(byCode)return byCode
-  const lot=state.lots.find(l=>l.code.toLowerCase()===q||serialInRange(l,q))
+  const match=state.lots.find(l=>l.code.toLowerCase()===q||serialInRange(l,q))
+  const lot=match&&(lotOrigin(state,match.code,match.itemId)||match)
   if(lot?.sourceType==='production')return state.productionOrders.find(o=>o.id===lot.sourceId)
-  if(lot)return state.productionOrders.find(o=>o.consumed.some(c=>c.lot===lot.code))
+  // A material lot feeds several orders: the latest one that really consumed this item's lot is shown (P1-29).
+  if(lot)return state.productionOrders.filter(o=>o.consumed.some(c=>c.lot===lot.code&&c.materialId===lot.itemId)).sort((a,b)=>b.createdAt.localeCompare(a.createdAt)||b.code.localeCompare(a.code))[0]
   const product=state.products.find(p=>p.sku.toLowerCase()===q||p.name.toLowerCase().includes(q))
   if(product)return [...state.productionOrders].filter(o=>o.productId===product.id).sort((a,b)=>b.createdAt.localeCompare(a.createdAt))[0]
   return state.productionOrders.find(o=>o.code.toLowerCase().includes(q))
+}
+
+/**
+ * The record that tells where a lot came from. A transfer copies a lot into another warehouse under the same code;
+ * copies written before transfers kept the origin are marked "adjustment", so the production / purchase /
+ * return record is preferred and the oldest record decides among equals.
+ */
+export function lotOrigin(state:ManufacturingState,code:string,itemId?:string):LotRecord|undefined{
+  const rows=state.lots.filter(l=>l.code===code&&(!itemId||l.itemId===itemId))
+  const rank=(l:LotRecord)=>l.sourceType==='adjustment'&&!l.sourceId.startsWith('opening')?1:0
+  return [...rows].sort((a,b)=>rank(a)-rank(b)||a.createdAt.localeCompare(b.createdAt))[0]
+}
+
+/**
+ * Where returned units of one sales-order line come from (P1-26/29): the order's own "Sale −" movements of that
+ * product, grouped by warehouse and lot in shipping order, minus what earlier returns of the line already took back.
+ * Returns the allocations for `qty`, the warehouse that shipped most of them, and any part no shipment explains.
+ */
+export function returnSources(state:ManufacturingState,so:Pick<SalesOrder,'id'|'code'>,productId:string,qty:number,excludeReturnId?:string){
+  const shipped=new Map<string,{warehouseId:string;lot?:string;qty:number}>()
+  // The ledger is newest first; walking it backwards gives shipping order.
+  for(const m of [...state.stockMovements].reverse()){
+    if(m.type!=='Sale -'||m.source!==so.code||m.itemId!==productId)continue
+    const key=`${m.warehouseId}|${m.lot||''}`
+    const row=shipped.get(key)||{warehouseId:m.warehouseId,lot:m.lot,qty:0}
+    row.qty=q3(row.qty-m.qty);shipped.set(key,row)
+  }
+  const rows=[...shipped.values()]
+  for(const r of state.returns.filter(x=>x.salesOrderId===so.id&&x.productId===productId&&x.id!==excludeReturnId)){
+    const taken=r.allocations?.length?r.allocations.map(a=>({lot:a.lot,qty:a.qty,warehouseId:r.warehouseId})):[{lot:r.lot,qty:r.qty,warehouseId:r.warehouseId}]
+    for(const a of taken){
+      let left=a.qty
+      for(const row of rows.filter(x=>(x.lot||'')===(a.lot||'')&&(!a.warehouseId||x.warehouseId===a.warehouseId)).concat(rows)){
+        if(left<=1e-9)break
+        const take=Math.min(left,row.qty);row.qty=q3(row.qty-take);left=q3(left-take)
+      }
+    }
+  }
+  let left=Math.max(0,qty)
+  const allocations:{lot?:string;qty:number}[]=[],byWarehouse=new Map<string,number>()
+  for(const row of rows){
+    if(left<=1e-9)break
+    const take=q3(Math.min(left,row.qty))
+    if(take<=0)continue
+    const same=allocations.find(a=>(a.lot||'')===(row.lot||''))
+    if(same)same.qty=q3(same.qty+take);else allocations.push({lot:row.lot,qty:take})
+    byWarehouse.set(row.warehouseId,(byWarehouse.get(row.warehouseId)||0)+take)
+    left=q3(left-take)
+  }
+  const warehouseId=[...byWarehouse].sort((a,b)=>b[1]-a[1])[0]?.[0]
+  return {allocations,warehouseId,unexplained:left}
+}
+
+/** The finished-goods balance an unbuild takes from: the warehouse with the most available units of the product. */
+export function unbuildSource(state:ManufacturingState,productId:string){
+  return state.stockBalances.filter(b=>b.itemId===productId&&availableQuantity(b)>0).sort((a,b)=>availableQuantity(b)-availableQuantity(a))[0]
 }
 
 export function serialInRange(lot:LotRecord,query:string){

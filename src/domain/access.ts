@@ -2,6 +2,7 @@
 // The app enforces them in AppContext before any domain action runs; this frontend-only enforcement is a
 // usability and integrity guard, not a security boundary (anyone with DevTools can change browser storage).
 import type {Employee,ManufacturingState,PermissionAction,PermissionMap,Role,SystemRoleKey} from '../types'
+import {unbuildSource} from './manufacturingEngine'
 
 type S=ManufacturingState
 export type Rule=[module:string,action:PermissionAction]
@@ -173,19 +174,82 @@ export function employeeWriteBlocker(s:S,actor:Employee|undefined,row:Record<str
 
 /* -------------------------------------------------------------- scope (A-H6) -- */
 
-type ScopeTargets={workCenters:string[];warehouses:string[]}
+type ScopeTargets={workCenters:string[];warehouses:string[];branches:string[]}
 
-/** The work centers and warehouses a domain call touches, read from its arguments and the current data. */
+/** Where the units of a return sit: its receiving warehouse, else the warehouses its sales order shipped from. */
+function returnWarehouses(s:S,returnId:unknown){
+  const r=s.returns.find(x=>x.id===returnId)
+  if(!r)return []
+  if(r.warehouseId)return [r.warehouseId]
+  const so=s.salesOrders.find(x=>x.id===r.salesOrderId)
+  return [...new Set(s.stockMovements.filter(m=>m.type==='Sale -'&&m.source===so?.code&&m.itemId===r.productId).map(m=>m.warehouseId))]
+}
+
+/** The work centers, warehouses and branches a domain call touches, read from its arguments and the current data. */
 export function scopeTargets(s:S,name:string,args:unknown[]):ScopeTargets{
-  const t:ScopeTargets={workCenters:[],warehouses:[]}
+  const t:ScopeTargets={workCenters:[],warehouses:[],branches:[]}
   const order=(id:unknown)=>s.productionOrders.find(o=>o.id===id)
   const addOrder=(o:ReturnType<typeof order>)=>{
     if(!o)return
     const centers=o.workOrders.length?o.workOrders.map(w=>w.workCenterId):[o.workCenterId]
     t.workCenters.push(...centers.filter(Boolean));if(o.warehouseId)t.warehouses.push(o.warehouseId)
   }
+  const addPo=(id:unknown)=>{const po=s.purchaseOrders.find(x=>x.id===id);if(po?.warehouseId)t.warehouses.push(po.warehouseId)}
+  const addSo=(id:unknown)=>{
+    const so=s.salesOrders.find(x=>x.id===id)
+    for(const i of so?.items||[]){if(i.warehouseId)t.warehouses.push(i.warehouseId);for(const r of i.reservations||[])t.warehouses.push(r.warehouseId)}
+  }
+  const addLine=(lineId:unknown)=>{const line=s.productionLines.find(l=>l.id===lineId);if(line)t.branches.push(line.branchId)}
   switch(name){
-    case 'reportOutput':case 'recordScrap':case 'recordMaterialScan':case 'transitionProduction':case 'issueExtraMaterial':addOrder(order(args[0]));break
+    case 'reportOutput':case 'recordScrap':case 'recordMaterialScan':case 'transitionProduction':case 'issueExtraMaterial':
+    case 'shortCloseProduction':case 'splitProduction':case 'createBackorder':case 'checkAvailability':case 'createReworkOrder':addOrder(order(args[0]));break
+    case 'updateProductionOrder':{addOrder(order(args[0]));const patch=args[1] as {lineId?:string}|undefined;if(patch?.lineId)addLine(patch.lineId);break}
+    case 'mergeProduction':for(const id of Array.isArray(args[0])?args[0]:[])addOrder(order(id));break
+    case 'createProductionOrder':{
+      const p=args[0] as {warehouseId?:string;lineId?:string;workCenterId?:string}|undefined
+      if(p?.warehouseId)t.warehouses.push(p.warehouseId)
+      if(p?.workCenterId)t.workCenters.push(p.workCenterId)
+      addLine(p?.lineId||s.settings.defaultLineId)
+      break
+    }
+    case 'unbuildProduct':{const b=unbuildSource(s,String(args[0]));if(b)t.warehouses.push(b.warehouseId);break}
+    case 'resolveQuality':{
+      const q=s.qualityChecks.find(x=>x.id===args[0])
+      if(q?.sourceType==='production')addOrder(order(q.sourceId))
+      if(q?.sourceType==='purchase'){const po=s.purchaseOrders.find(x=>x.id===q.sourceId);const wh=po?.receipts.find(r=>r.id===q.receiptId)?.warehouseId||po?.warehouseId;if(wh)t.warehouses.push(wh)}
+      if(q?.sourceType==='subcontract'){const sc=s.subcontractOrders.find(x=>x.id===q.sourceId);if(sc?.warehouseId)t.warehouses.push(sc.warehouseId)}
+      if(q?.sourceType==='return')t.warehouses.push(...returnWarehouses(s,q.sourceId))
+      break
+    }
+    case 'returnPurchaseToSupplier':{
+      const q=s.qualityChecks.find(x=>x.id===args[0]),po=s.purchaseOrders.find(x=>x.id===q?.sourceId)
+      const wh=po?.receipts.find(r=>r.id===q?.receiptId)?.warehouseId||po?.warehouseId
+      if(wh)t.warehouses.push(wh)
+      break
+    }
+    case 'dispositionReturn':t.warehouses.push(...returnWarehouses(s,args[0]));break
+    case 'createReturn':{
+      const p=args[0] as {salesOrderId?:string;productId?:string}|undefined,so=s.salesOrders.find(x=>x.id===p?.salesOrderId)
+      t.warehouses.push(...new Set(s.stockMovements.filter(m=>m.type==='Sale -'&&m.source===so?.code&&m.itemId===p?.productId).map(m=>m.warehouseId)))
+      break
+    }
+    case 'createPurchaseOrder':{const p=args[0] as {warehouseId?:string}|undefined;if(p?.warehouseId)t.warehouses.push(p.warehouseId);break}
+    case 'createPurchaseOrders':for(const p of Array.isArray(args[0])?args[0] as {warehouseId?:string}[]:[])if(p?.warehouseId)t.warehouses.push(p.warehouseId);break
+    case 'confirmPurchase':case 'markPurchaseInTransit':case 'cancelPurchase':case 'closePurchaseShort':case 'updatePurchaseMeta':addPo(args[0]);break
+    case 'cancelSalesOrder':addSo(args[0]);break
+    case 'advanceSubcontract':{const sc=s.subcontractOrders.find(x=>x.id===args[0]);if(sc?.warehouseId)t.warehouses.push(sc.warehouseId);break}
+    case 'createEntity':case 'updateEntity':case 'deleteEntity':case 'duplicateEntity':{
+      // Location-bound master data: a branch-scoped role manages only its own branch's sites (P1-2).
+      const key=String(args[0]),id=args[1],patch=(name==='createEntity'?args[1]:args[2]) as Record<string,unknown>|undefined
+      const row=name==='createEntity'?undefined:(s[key as keyof S] as unknown as Record<string,unknown>[]|undefined)?.find?.(x=>x.id===id)
+      const field=(k:string)=>[row?.[k],patch?.[k]].filter((v):v is string=>typeof v==='string'&&Boolean(v))
+      if(key==='warehouses'||key==='productionLines'){t.branches.push(...field('branchId'))}
+      if(key==='workCenters'){t.branches.push(...field('branchId'));if(row)t.workCenters.push(String(row.id))}
+      if(key==='warehouses'&&row)t.warehouses.push(String(row.id))
+      if(key==='equipment')t.workCenters.push(...field('workCenterId'))
+      if(['maintenanceOrders','maintenanceRequests','repairOrders'].includes(key))for(const eq of field('equipmentId')){const e=s.equipment.find(x=>x.id===eq);if(e)t.workCenters.push(e.workCenterId)}
+      break
+    }
     case 'startWorkOrder':case 'pauseWorkOrder':case 'finishWorkOrder':{
       const o=order(args[0]),wo=o?.workOrders.find(w=>w.id===args[1])
       if(wo){t.workCenters.push(wo.workCenterId);if(o?.warehouseId)t.warehouses.push(o.warehouseId)}else addOrder(o)
@@ -198,11 +262,7 @@ export function scopeTargets(s:S,name:string,args:unknown[]):ScopeTargets{
     case 'adjustStock':t.warehouses.push(String(args[1]));break
     case 'countStock':{const b=s.stockBalances.find(x=>x.id===args[0]);if(b)t.warehouses.push(b.warehouseId);break}
     case 'receivePurchase':{const po=s.purchaseOrders.find(x=>x.id===args[0]);const wh=(args[5] as {warehouseId?:string}|undefined)?.warehouseId||po?.warehouseId;if(wh)t.warehouses.push(wh);break}
-    case 'deliverSalesOrder':{
-      const so=s.salesOrders.find(x=>x.id===args[0])
-      for(const i of so?.items||[]){if(i.warehouseId)t.warehouses.push(i.warehouseId);for(const r of i.reservations||[])t.warehouses.push(r.warehouseId)}
-      break
-    }
+    case 'deliverSalesOrder':addSo(args[0]);break
   }
   return t
 }
@@ -216,19 +276,72 @@ export function scopeBlocker(s:S,actor:Employee|undefined,name:string,args:unkno
   const role=roleOf(s,actor?.id)
   if(!actor||!role||isSuperAdminRole(role)||!role.scope||role.scope==='all')return null
   const t=scopeTargets(s,name,args)
-  if(!t.workCenters.length&&!t.warehouses.length)return null
-  const home=s.workCenters.find(w=>w.id===actor.workCenterId)
-  if(!home)return `“${role.name}” roli joy bilan cheklangan, lekin sizga ish markazi biriktirilmagan — administratorga murojaat qiling`
+  if(!t.workCenters.length&&!t.warehouses.length&&!t.branches.length)return null
+  const home=homeOf(s,actor)
+  if(!home.branchId)return `“${role.name}” roli joy bilan cheklangan, lekin sizga ish markazi yoki ombor biriktirilmagan — administratorga murojaat qiling`
   const centerName=(id:string)=>s.workCenters.find(w=>w.id===id)?.name||id
-  if(role.scope==='workcenter'&&t.workCenters.length&&!t.workCenters.includes(home.id))
-    return `Bu ish ${[...new Set(t.workCenters)].map(centerName).join(', ')} ish markaziga tegishli — siz faqat ${home.name}da ishlaysiz`
+  if(role.scope==='workcenter'&&home.workCenter&&t.workCenters.length&&!t.workCenters.includes(home.workCenter.id))
+    return `Bu ish ${[...new Set(t.workCenters)].map(centerName).join(', ')} ish markaziga tegishli — siz faqat ${home.workCenter.name}da ishlaysiz`
+  // A "warehouse" role tied to one warehouse moves stock only there (P1-2).
+  if(role.scope==='warehouse'&&home.warehouse){
+    const other=[...new Set(t.warehouses)].filter(id=>id!==home.warehouse!.id)
+    if(other.length)return `Bu amal ${other.map(id=>s.warehouses.find(w=>w.id===id)?.name||id).join(', ')} omboriga tegishli — siz faqat ${home.warehouse.name} omborida ishlaysiz`
+  }
   const branchOf=(kind:'wc'|'wh',id:string)=>kind==='wc'?s.workCenters.find(w=>w.id===id)?.branchId:s.warehouses.find(w=>w.id===id)?.branchId
-  const foreign=[...t.workCenters.map(id=>branchOf('wc',id)),...t.warehouses.map(id=>branchOf('wh',id))].filter((b):b is string=>Boolean(b)&&b!==home.branchId)
+  const foreign=[...t.workCenters.map(id=>branchOf('wc',id)),...t.warehouses.map(id=>branchOf('wh',id)),...t.branches].filter((b):b is string=>Boolean(b)&&b!==home.branchId)
   if(foreign.length){
     const mine=s.branches.find(b=>b.id===home.branchId)?.name||home.branchId
     return `Bu amal boshqa filialga tegishli — “${role.name}” roli faqat ${mine} filialida ishlaydi`
   }
   return null
+}
+
+/** The employee's home: work center, warehouse (for a warehouse-scoped role) and the branch they belong to. */
+export function homeOf(s:S,actor:Employee){
+  const workCenter=s.workCenters.find(w=>w.id===actor.workCenterId)
+  const warehouse=actor.warehouseId?s.warehouses.find(w=>w.id===actor.warehouseId):undefined
+  return {workCenter,warehouse,branchId:warehouse?.branchId||workCenter?.branchId}
+}
+
+/**
+ * What a scoped role reads (P1-2): location-bound records outside the employee's scope are left out, so lists,
+ * dashboards and exports show the same world the role may act on. "workcenter": its own work center's orders and
+ * events, its branch's stock; "warehouse": its warehouse's stock (its branch without one), its branch's orders;
+ * "branch": everything of its branch. Master data (warehouses, work centers, items) stays complete so names resolve.
+ * "all", Super Admin and an unknown employee keep the full data (the session is checked elsewhere).
+ */
+export function scopedView(s:S,actor:Employee|undefined):S{
+  const role=roleOf(s,actor?.id)
+  if(!actor||!role||isSuperAdminRole(role)||!role.scope||role.scope==='all')return s
+  const home=homeOf(s,actor)
+  const branchWarehouses=new Set(s.warehouses.filter(w=>w.branchId===home.branchId).map(w=>w.id))
+  const branchCenters=new Set(s.workCenters.filter(w=>w.branchId===home.branchId).map(w=>w.id))
+  const stockWarehouses=role.scope==='warehouse'&&home.warehouse?new Set([home.warehouse.id]):branchWarehouses
+  const centers=role.scope==='workcenter'&&home.workCenter?new Set([home.workCenter.id]):branchCenters
+  const orderVisible=(o:S['productionOrders'][number])=>role.scope==='workcenter'
+    ?(o.workOrders.length?o.workOrders.some(w=>centers.has(w.workCenterId)):centers.has(o.workCenterId))
+    :branchWarehouses.has(o.warehouseId)||o.workOrders.some(w=>branchCenters.has(w.workCenterId))
+  const productionOrders=s.productionOrders.filter(orderVisible)
+  const orderIds=new Set(productionOrders.map(o=>o.id))
+  const purchaseOrders=s.purchaseOrders.filter(p=>stockWarehouses.has(p.warehouseId)||p.receipts.some(r=>r.warehouseId&&stockWarehouses.has(r.warehouseId)))
+  const purchaseIds=new Set(purchaseOrders.map(p=>p.id))
+  const centerOf=(equipmentId:string)=>s.equipment.find(e=>e.id===equipmentId)?.workCenterId||''
+  return {...s,
+    productionOrders,
+    stockBalances:s.stockBalances.filter(b=>stockWarehouses.has(b.warehouseId)),
+    stockMovements:s.stockMovements.filter(m=>stockWarehouses.has(m.warehouseId)),
+    lots:s.lots.filter(l=>stockWarehouses.has(l.warehouseId)),
+    purchaseOrders,
+    timeLogs:s.timeLogs.filter(l=>orderIds.has(l.orderId)),
+    downtimeEvents:s.downtimeEvents.filter(d=>centers.has(d.workCenterId)),
+    equipment:s.equipment.filter(e=>branchCenters.has(e.workCenterId)),
+    maintenanceOrders:s.maintenanceOrders.filter(m=>branchCenters.has(centerOf(m.equipmentId))),
+    maintenanceRequests:s.maintenanceRequests.filter(m=>branchCenters.has(centerOf(m.equipmentId))),
+    repairOrders:s.repairOrders.filter(m=>branchCenters.has(centerOf(m.equipmentId))),
+    qualityChecks:s.qualityChecks.filter(q=>q.sourceType==='production'?orderIds.has(q.sourceId):q.sourceType==='purchase'?purchaseIds.has(q.sourceId):true),
+    subcontractOrders:s.subcontractOrders.filter(o=>!o.warehouseId||branchWarehouses.has(o.warehouseId)),
+    returns:s.returns.filter(r=>!r.warehouseId||branchWarehouses.has(r.warehouseId)),
+  }
 }
 
 /* ----------------------------------------------------- default roles -- */

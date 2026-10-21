@@ -96,7 +96,7 @@ Takrorlar bitta qatorga birlashtirilgan, har bir ID saqlangan. Oxirgi yangilanis
 | A-H3 | Backup import/eksport himoyasiz | FIXED | Import/restore `settings.edit`, eksport `settings.export`; importdan oldin zaxira; backup’da Super Admin bo‘lmasa rad | AppContext `replaceAll`; brauzer | Akkauntlar backup’ga kirmaydi (ataylab) |
 | A-H4 | `export` deyarli qo‘llanmaydi | FIXED | Har bir jadval CSV’si joriy modulning `export` huquqiga bog‘langan; audit CSV `audit.export` | brauzer (Operator: CSV tugmasi yo‘q) | — |
 | A-H5 | Operator huquqlari juda keng | FIXED | `execute` ajratildi: operator ishni bajaradi, rejalashtirmaydi/bekor qilmaydi | access “execute: operators…” | — |
-| A-H6 | `scope` qo‘llanmaydi | PARTIAL | Domain darajasida (`scopeBlocker`): `workcenter` — sex ishi faqat o‘z ish markazida; `branch`/`warehouse` — faqat o‘z filiali (filial xodimning ish markazidan) | release A-H6 (2 test) | `warehouse` scope alohida omborga emas, filialga bog‘lanadi (xodimda ombor maydoni yo‘q); ro‘yxatlar filtrlanmaydi — faqat amallar |
+| A-H6 | `scope` qo‘llanmaydi | FIXED | Domain darajasida (`scopeBlocker`): `workcenter` — sex ishi faqat o‘z ish markazida; `branch` — o‘z filiali; `warehouse` — xodimga `warehouseId` biriktirilsa faqat shu ombor (aks holda filial). Qamrov MO split/merge/backorder, QC, qaytarish, xarid, sotuv bekor qilish va joyga bog‘liq master-data CRUD’ga kengaytirildi. O‘qish: `scopedView` ro‘yxat, dashboard va eksportlarni shu doiraga qisqartiradi | release A-H6 (2 test), phase1 P1-2 (3 test) | Frontend himoyasi — backend xavfsizligi emas |
 | A-M1 | Pul ma’lumotlari hammaga ko‘rinadi | FIXED | `costs.view`siz: tannarx/marja ustunlari, BOM tannarxi, MO “Tannarx” tabi, WC stavkasi, scrap yo‘qotishi, Hisobotlar → Xarajatlar/Profitability, dashboard tannarx KPI, AI marja javoblari, xodim stavkasi yashiriladi | brauzer (Operator) | Material xarid narxi va ombor qiymati ta’minot/ombor ishi uchun ko‘rinadi |
 | A-M2 | Audit jurnali zaif | FIXED | Har yozuvda `userId`; kirish hodisalari alohida jurnal; faoliyat kesilmaydi (arxiv) | release BUG-07/A-M2, auth | Brauzer xotirasini o‘zgartira oladigan odam jurnalni ham o‘zgartiradi |
 | A-M3 | Migratsiya xavfi | FIXED | `schemaVersion` v4; qo‘shuvchi, idempotent, oldin zaxira | access v4 testlari | — |
@@ -108,3 +108,17 @@ Takrorlar bitta qatorga birlashtirilgan, har bir ID saqlangan. Oxirgi yangilanis
 | A-L2 | HR holati va akkaunt holati aralash | FIXED | Akkaunt holati (`active/blocked`) alohida | auth | — |
 | A-L3 | Rol tanlovida Super Admin chiqadi | FIXED | Faqat berish mumkin bo‘lgan rollar | access A-C2 | — |
 | A-L4 | Yangi rol id’lari demo naqshiga mos | FIXED | `role-<vaqt>-<tasodif>` | reset.ts `isGeneratedDemoId` | — |
+
+## Phase 1 (2026-10-21) — ma’lumotlar yaxlitligi
+
+Testlar: `tests/phase1.test.mjs` (24 test; 12 tasi eski kodda yiqiladi).
+
+| ID | Muammo | Holat | Tuzatish |
+|---|---|---|---|
+| P1-10 | Ombor fallback’i arxivlangan/noto‘g‘ri turdagi omborga tushardi | FIXED | `finishedWarehouseFor`/`rawWarehouseFor` faqat faol, mos turdagi ombor; MO yaratishda ombor/liniya tekshiriladi |
+| P1-11 | BOM’da o‘chirilgan/arxivlangan komponent bilan MO ochilardi | FIXED | `bomBlocker` — yaratish, tasdiqlash va boshlashda |
+| P1-26/27 | Qaytarish karantinsiz, qarorgacha omborda ko‘rinmas; Scrap harakat yozmasdi; standart omborga tushardi | FIXED | Ro‘yxatga olishda jo‘natgan omborga karantin bilan qabul; Good/Rework/Scrap aynan shu birliklarni siljitadi, Scrap `QC Scrap -` yozadi |
+| P1-29 | Qaytarish/trace birinchi mos lotni olardi; transfer nusxasi lot manbasini yo‘qotardi | FIXED | `returnSources` (haqiqiy Sale − harakatlari bo‘yicha lotlarga bo‘lish), `lotOrigin`, transfer nusxasi manbani saqlaydi |
+| P1-30 | Transfer qilingan lot unbuild’da joriy BOM’ga tushardi | FIXED | `lotOrigin` orqali MO snapshot |
+| P1-31 | Faol BOM’i/ochiq MO snapshot’i/subcontract/qaytarishi bor yozuvni o‘chirish mumkin edi | FIXED | `REFERENCE_CHECKS` kengaytirildi |
+| P1-33/34 | Split/backorder bolasi ota-ning extraIssues/outputKeys’ini meros olardi; turli snapshot’li MO’lar birlashardi; MTO backorder SO’dan uzilardi | FIXED | Toza bola buyurtma, snapshot tengligi, SO’ga bog‘lash, rezervni tiklab bo‘lmasa split bekor |

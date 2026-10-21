@@ -11,7 +11,7 @@ import {setDisplayCurrency} from '../../../utils/format'
 import {migrateSupplierLinks} from '../../../domain/supplierMaterials'
 import {clearTransactions,holdsOnlyDemoRecords,TRANSACTION_KEYS} from '../../../domain/reset'
 import {stamp} from '../../../utils/dates'
-import {actionRules,allowedBy,entityRules,hasPermission,roleOf,scopeBlocker} from '../../../domain/access'
+import {actionRules,allowedBy,entityRules,hasPermission,roleOf,scopeBlocker,scopedView} from '../../../domain/access'
 import {SCHEMA_VERSION,migrateState} from '../../../domain/migrations'
 import * as Auth from '../../../domain/auth'
 import type {Account,AuthOutcome,AuthStore,SecurityPolicy,Session,SessionProblem} from '../../../domain/auth'
@@ -240,6 +240,8 @@ export function AppProvider({children}:{children:ReactNode}){
   const currentEmployee=(session&&state.employees.find(x=>x.id===session.employeeId))||NOBODY
   const currentRole=(session&&roleOf(state,currentEmployee.id))||NO_ROLE
   const can=useCallback((module:string,action:PermissionAction='view')=>Boolean(session)&&hasPermission(currentRole,module,action),[currentRole,session])
+  // A scoped role reads only its branch / warehouse / work center (P1-2); actions still validate against the full data.
+  const view=useMemo(()=>scopedView(state,session?currentEmployee:undefined),[state,session,currentEmployee])
 
   function pushToast(message:string,tone:ToastTone='success'){
     const id=uid('toast')
@@ -297,14 +299,19 @@ export function AppProvider({children}:{children:ReactNode}){
     if(key==='employees'&&patch&&(patch.roleId!==undefined||patch.status==='Arxiv'))return [['users','edit']]
     return entityRules(key as EntityKeyName,action)
   }
-  const createEntity=(key:EntityKey,payload:Record<string,unknown>)=>execute('createEntity',(s,ctx)=>A.createEntity(s,ctx,key,payload,ENTITY_LABEL[key]),rulesFor(key,'create'))
+  // Location-bound master data (sites, equipment, maintenance) is checked against the role's scope too (P1-2).
+  const scoped=(name:string,args:unknown[],run:(s:ManufacturingState,ctx:Ctx)=>Outcome)=>(s:ManufacturingState,ctx:Ctx):Outcome=>{
+    const outside=scopeBlocker(s,ctx.user,name,args)
+    return outside?{state:s,result:{ok:false,message:outside}}:run(s,ctx)
+  }
+  const createEntity=(key:EntityKey,payload:Record<string,unknown>)=>execute('createEntity',scoped('createEntity',[key,payload],(s,ctx)=>A.createEntity(s,ctx,key,payload,ENTITY_LABEL[key])),rulesFor(key,'create'))
   const updateEntity=(key:EntityKey,id:string,patch:Record<string,unknown>)=>{
     const before=(stateRef.current[key] as unknown as Record<string,unknown>[]).find(x=>x.id===id)
     const changes=Object.fromEntries(Object.entries(patch).filter(([k,v])=>before?.[k]!==v))
-    return execute('updateEntity',(s,ctx)=>A.updateEntity(s,ctx,key,id,patch,ENTITY_LABEL[key]),rulesFor(key,'edit',changes))
+    return execute('updateEntity',scoped('updateEntity',[key,id,patch],(s,ctx)=>A.updateEntity(s,ctx,key,id,patch,ENTITY_LABEL[key])),rulesFor(key,'edit',changes))
   }
-  const deleteEntity=(key:EntityKey,id:string)=>execute('deleteEntity',(s,ctx)=>A.deleteEntity(s,ctx,key,id,ENTITY_LABEL[key]),key==='employees'?[['users','delete']]:rulesFor(key,'delete'))
-  const duplicateEntity=(key:EntityKey,id:string)=>execute('duplicateEntity',(s,ctx)=>A.duplicateEntity(s,ctx,key,id,ENTITY_LABEL[key]),rulesFor(key,'create'))
+  const deleteEntity=(key:EntityKey,id:string)=>execute('deleteEntity',scoped('deleteEntity',[key,id],(s,ctx)=>A.deleteEntity(s,ctx,key,id,ENTITY_LABEL[key])),key==='employees'?[['users','delete']]:rulesFor(key,'delete'))
+  const duplicateEntity=(key:EntityKey,id:string)=>execute('duplicateEntity',scoped('duplicateEntity',[key,id],(s,ctx)=>A.duplicateEntity(s,ctx,key,id,ENTITY_LABEL[key])),rulesFor(key,'create'))
 
   const saveSupplier=(p:Parameters<typeof A.saveSupplier>[2])=>execute('saveSupplier',(s,ctx)=>A.saveSupplier(s,ctx,p),[['purchases',p.id?'edit':'create']])
   const addAttachment=(a:Parameters<typeof A.addAttachment>[2])=>{const module=ATTACHMENT_MODULE[a.entityType];if(!module){const message='Bu hujjat turi uchun permission aniqlanmagan';pushToast(message,'danger');return {ok:false,message}}return execute('addAttachment',(s,ctx)=>A.addAttachment(s,ctx,a),[[module,'edit']])}
@@ -503,13 +510,13 @@ export function AppProvider({children}:{children:ReactNode}){
   const authInfo=useMemo(()=>({needsSetup:!auth.accounts.length,signedIn:Boolean(session&&account),session,account,accounts:auth.accounts,events:auth.events,policy:auth.policy,notice:authNotice}),[auth,session,account,authNotice])
 
   const value=useMemo<AppContextValue>(()=>({
-    ...domain,state,resolvedTheme,toasts,dismissToast,sidebarMobile,setSidebarMobile,searchOpen,setSearchOpen,notifOpen,setNotifOpen,aiOpen,setAiOpen,
+    ...domain,state:view,resolvedTheme,toasts,dismissToast,sidebarMobile,setSidebarMobile,searchOpen,setSearchOpen,notifOpen,setNotifOpen,aiOpen,setAiOpen,
     currentEmployee,currentRole,can,toast,saveSettings,setPreferences,setTheme,setAppearance,setCurrency,resetTransactions,importState,restoreLastBackup,lastBackup,markAllRead,markNotificationRead,activityArchive,
     createEntity,updateEntity,deleteEntity,duplicateEntity,addAttachment,removeAttachment,saveSupplier,
     auth:authInfo,login,logout,clearAuthNotice:()=>setAuthNotice(''),setupSuperAdmin,changePassword,createUser,updateUser,setUserStatus,resetUserPassword,deleteUser,updateSecurityPolicy,
   // Actions read the latest state through stateRef, so re-creating them only when state changes is sufficient.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }),[state,resolvedTheme,toasts,sidebarMobile,searchOpen,notifOpen,aiOpen,currentEmployee,currentRole,can,toast,dismissToast,authInfo])
+  }),[view,resolvedTheme,toasts,sidebarMobile,searchOpen,notifOpen,aiOpen,currentEmployee,currentRole,can,toast,dismissToast,authInfo])
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>
 }
 

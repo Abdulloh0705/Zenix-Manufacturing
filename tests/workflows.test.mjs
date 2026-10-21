@@ -200,13 +200,17 @@ test('downtime stops the machine, blocks its work center and feeds OEE availabil
   assert.equal(ended.state.equipment.find(e=>e.id==='eq3').status,'Ishlamoqda')
 })
 
-test('customer return disposition to good stock puts units back with a movement',()=>{
+test('customer return is received into quarantine with a movement; good-stock disposition makes it available',()=>{
   const s=fresh()
   const ret=s.returns.find(r=>r.status==='Inspection')
-  const before=stockOf(s,ret.productId).onHand
+  assert.ok(ret.warehouseId,'the return was received into a warehouse when it was registered')
+  assert.ok(s.stockMovements.some(m=>m.type==='Return +'&&m.source===ret.code&&m.warehouseId===ret.warehouseId))
+  const before=stockOf(s,ret.productId,ret.warehouseId)
   const done=A.dispositionReturn(s,ctx(s,'em4'),ret.id,'Omborga qaytarildi')
   assert.ok(done.result.ok)
-  assert.equal(stockOf(done.state,ret.productId).onHand-before,ret.qty)
+  const after=stockOf(done.state,ret.productId,ret.warehouseId)
+  assert.equal(after.onHand,before.onHand,'on hand already counted at receipt')
+  assert.equal(before.quarantine-after.quarantine,ret.qty,'quarantine released')
 })
 
 test('material scan validates the BOM and posts a real material issue',()=>{
@@ -702,8 +706,10 @@ const stripQcHolds=s=>({...s,productionOrders:s.productionOrders.map(o=>{const {
 /** Every unit of finished-goods quarantine belongs to exactly one order's stored Final QC hold. */
 function assertQcHoldsBacked(s){
   for(const b of s.stockBalances.filter(b=>s.products.some(p=>p.id===b.itemId))){
-    const held=s.productionOrders.filter(o=>o.warehouseId===b.warehouseId&&o.productId===b.itemId).reduce((a,o)=>a+(o.qcHeld||0),0)
-    assert.equal(held,b.quarantine||0,`${b.itemId}@${b.warehouseId}: quarantine ${b.quarantine||0}, order holds ${held}`)
+    // Customer returns waiting for inspection hold their received units in quarantine too (P1-26).
+    const returns=s.returns.filter(r=>r.status==='Inspection'&&r.warehouseId===b.warehouseId&&r.productId===b.itemId).reduce((a,r)=>a+r.qty,0)
+    const held=s.productionOrders.filter(o=>o.warehouseId===b.warehouseId&&o.productId===b.itemId).reduce((a,o)=>a+(o.qcHeld||0),0)+returns
+    assert.equal(held,b.quarantine||0,`${b.itemId}@${b.warehouseId}: quarantine ${b.quarantine||0}, order and return holds ${held}`)
   }
 }
 

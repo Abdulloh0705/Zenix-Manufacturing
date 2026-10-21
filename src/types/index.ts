@@ -75,7 +75,9 @@ export interface QualityCheck{id:string;type:'Kirish'|'Jarayon'|'Final';sourceTy
 export interface QualityAlert{id:string;title:string;sourceId:string;severity:'Past'|'O‘rta'|'Yuqori';status:'Ochiq'|'Jarayonda'|'Yopilgan';reason:string;ownerId:string;createdAt:string;rootCause?:string;correctiveAction?:string;preventiveAction?:string;resolution?:string}
 export interface Equipment{id:string;name:string;model:string;serial:string;workCenterId:string;status:'Ishlamoqda'|'Servis yaqin'|'To‘xtagan';lastMaintenance:string;nextMaintenance:string;mtbf:number;mttr:number;downtime:number;maintenanceCost:number;maintenanceIntervalDays:number}
 export interface MaintenanceOrder{id:string;code:string;equipmentId:string;type:'Preventive'|'Corrective'|'Emergency';status:'Rejada'|'Jarayonda'|'Yakunlangan'|'Bekor';scheduled:string;completed?:string;technicianId:string;cost:number;note:string;requestId?:string;startedAt?:string}
-export interface Employee{id:string;name:string;roleId:string;department:string;workCenterId:string;shift:string;status:string;attendance:number;efficiency:number;hourlyCost:number}
+export interface Employee{id:string;name:string;roleId:string;department:string;workCenterId:string;shift:string;status:string;attendance:number;efficiency:number;hourlyCost:number;
+  /** Home warehouse for a "warehouse"-scoped role; without it the scope falls back to the employee's branch. */
+  warehouseId?:string}
 export type SystemRoleKey='super_admin'|'admin'|'production_manager'|'operator'|'quality'|'maintenance'|'warehouse'|'supply_sales'
 export interface Role{id:string;name:string;scope:'all'|'branch'|'warehouse'|'workcenter';permissions:PermissionMap;
   /** Set on the eight built-in roles; they cannot be deleted. */
@@ -95,7 +97,9 @@ export type DowntimeReason='Setup / changeover'|'Unplanned stop'|'Maintenance'|'
 export interface DowntimeEvent{id:string;equipmentId:string;workCenterId:string;reason:DowntimeReason;start:string;end?:string;minutes:number;note:string;sourceId?:string}
 export interface LotRecord{id:string;code:string;kind:'lot'|'serial';itemId:string;itemType:'raw'|'finished';qty:number;originalQty?:number;warehouseId:string;status?:'available'|'quarantine'|'hold'|'rework';sourceType:'purchase'|'production'|'return'|'adjustment';sourceId:string;sourceCode:string;createdAt:string;expiry?:string;serialFrom?:string;serialTo?:string;consumedBy:string[]}
 export interface Forecast{id:string;productId:string;period:string;qty:number}
-export interface CustomerReturn{id:string;code:string;salesOrderId:string;customerId:string;productId:string;qty:number;reason:string;status:'Qabul qilindi'|'Inspection'|'Omborga qaytarildi'|'Rework'|'Scrap';createdAt:string;qualityCheckId?:string;reworkOrderId?:string;lot?:string}
+export interface CustomerReturn{id:string;code:string;salesOrderId:string;customerId:string;productId:string;qty:number;reason:string;status:'Qabul qilindi'|'Inspection'|'Omborga qaytarildi'|'Rework'|'Scrap';createdAt:string;qualityCheckId?:string;reworkOrderId?:string;lot?:string;
+  /** Set on returns received into quarantine when they were registered: the receiving warehouse and the shipped lots they came back from. */
+  warehouseId?:string;allocations?:{lot?:string;qty:number}[]}
 export interface Attachment{id:string;entityType:string;entityId:string;name:string;size:number;mime:string;addedBy:string;addedAt:string;dataUrl?:string}
 
 export interface NotificationItem{id:string;type:string;title:string;text:string;severity:'info'|'warning'|'danger'|'success';read:boolean;date:string;path?:string;
