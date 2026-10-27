@@ -2,7 +2,9 @@ import {useState} from 'react'
 import type {FormEvent,ReactNode} from 'react'
 import {Navigate,useNavigate,useSearchParams} from 'react-router-dom'
 import {useApp} from '../../../app/providers/AppProvider/AppContext'
-import {Checkbox,Field,Icon,Input,Select} from '../../../shared/ui'
+import {Checkbox,Confirm,Field,Icon,Input,Select} from '../../../shared/ui'
+import {downloadText} from '../../../utils/exportData'
+import {todayISO} from '../../../utils/dates'
 
 /** Where to go after signing in: only paths inside this app (never an external URL). */
 export function safeNext(raw:string|null){
@@ -52,6 +54,28 @@ export function PasswordInput({id,value,onChange,autoComplete,autoFocus,invalid}
     <input id={id} className="ui-input" type={shown?'text':'password'} value={value} onChange={e=>onChange(e.target.value)} autoComplete={autoComplete} autoFocus={autoFocus} aria-invalid={invalid||undefined} spellCheck={false}/>
     <button type="button" className="password-toggle" onClick={()=>setShown(v=>!v)} aria-label={shown?'Parolni yashirish':'Parolni ko‘rsatish'} aria-pressed={shown}><Icon name={shown?'eye-off':'eye'} size={16}/></button>
   </div>
+}
+
+/**
+ * Shown instead of the app while stored data cannot be opened. Nothing has been written over it: the user
+ * downloads a copy first, then chooses to start clean (the copy is also kept in the browser when it fits).
+ */
+export function RecoveryScreen(){
+  const app=useApp(),r=app.recovery
+  const [downloaded,setDownloaded]=useState(false),[ask,setAsk]=useState(false),[error,setError]=useState('')
+  if(!r)return null
+  const download=()=>{downloadText(`zenix-saqlangan-malumot-${todayISO()}.json`,r.raw,'application/json');setDownloaded(true)}
+  const start=()=>{const out=app.startClean(downloaded);if(!out.ok)setError(out.message)}
+  return <AuthShell title="Ma’lumotlarni tiklash" subtitle={r.reason==='unreadable'?'Brauzerda saqlangan ma’lumot buzilgan yoki ZENIX formatida emas.':'Saqlangan ma’lumotni ochishda xatolik yuz berdi.'}>
+    <div className="form-stack">
+      <div className="inline-note warning" role="status"><Icon name="info"/><span>Hech narsa o‘chirilmadi va ustidan yozilmadi — ma’lumot brauzerda o‘zgarmagan holda turibdi. Davom etishdan oldin nusxasini yuklab oling.</span></div>
+      <button type="button" className="secondary-glass-btn" onClick={download}><Icon name="download" size={16}/>{downloaded?'Nusxa yuklab olindi':'Nusxani yuklab olish'}</button>
+      <button type="button" className="primary-glass-btn auth-submit" onClick={()=>setAsk(true)}><Icon name="refresh" size={16}/>Toza holatda ochish</button>
+      {error&&<div className="inline-note danger" role="alert"><Icon name="warning"/><span>{error}</span></div>}
+    </div>
+    <p className="soft-meta auth-help"><Icon name="key" size={13}/>Keyin Tizim → Backup import orqali eksport qilingan zaxirani tiklash mumkin.</p>
+    <Confirm open={ask} onClose={()=>setAsk(false)} onConfirm={start} danger title="Toza holatda ochilsinmi?" text="Ilova bo‘sh ish nusxasi bilan ochiladi. O‘qilmagan ma’lumot nusxasi brauzerda alohida saqlanadi (joy bo‘lsa) va Tizim → Tiklash nusxalari bo‘limida qoladi." confirmText="Toza holatda ochish"/>
+  </AuthShell>
 }
 
 export function LoginPage(){

@@ -40,9 +40,13 @@ test('MPS rows cover manufactured products and never suggest negative quantities
   assert.ok(rows.every(r=>Number.isInteger(r.suggested)),'default prototype planning rounds suggestions to whole units, not a hardcoded lot of 50')
 })
 
-test('MPS demand per week is max(forecast, confirmed sales)',()=>{
+test('MPS demand per week is max(forecast, make-to-stock sales) + make-to-order sales',()=>{
   const rows=createMpsRows(seedState)
-  for(const r of rows)for(const w of r.weeks)assert.equal(w.demand,Math.max(w.forecast,w.sales))
+  for(const r of rows)for(const w of r.weeks){
+    assert.ok(w.mto>=0&&w.mto<=w.sales)
+    assert.equal(w.demand,Math.max(w.forecast,w.sales-w.mto)+w.mto)
+    if(!w.mto)assert.equal(w.demand,Math.max(w.forecast,w.sales),'without make-to-order lines the rule is unchanged')
+  }
 })
 
 test('MRP rows calculate raw-material shortages and recommendations',()=>{

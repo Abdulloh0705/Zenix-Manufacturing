@@ -44,6 +44,8 @@
 
   /* Layout */
   --sidebar-w:240px;--sidebar-w-collapsed:68px;--topbar-h:58px;--content-max:1760px;
+  /* Device safe areas (notch, home indicator). index.html sets viewport-fit=cover; they are 0 on every other device. */
+  --safe-top:env(safe-area-inset-top,0px);--safe-right:env(safe-area-inset-right,0px);--safe-bottom:env(safe-area-inset-bottom,0px);--safe-left:env(safe-area-inset-left,0px);
   /* AI launcher tab: overlays the page edge; content is never padded for it */
   --ai-dock-w:22px;
 
@@ -99,22 +101,39 @@
   --scrim:rgba(0,0,0,.55);
 }
 
-/* Background environments ("Fon"): a faint page tint behind neutral surfaces. Flat colour only —
-   no gradients, circles, blobs or glows. The accent comes from the theme registry. */
-:root[data-bg="emerald-mist"]{--bg:#f1f4f2}
-:root[data-bg="amber-mist"]{--bg:#f5f3ef}
-:root[data-bg="sapphire-mist"]{--bg:#f3f4f4}
-:root[data-bg="violet-mist"]{--bg:#f3f3f6}
-:root[data-bg="crimson-mist"]{--bg:#f6f2f3}
-:root[data-bg="ocean-mist"]{--bg:#f0f4f5}
-:root[data-bg="neutral-mist"]{--bg:#f2f2f1}
-:root[data-bg="minimal-light"]{--bg:#f7f7f6;--surface:#ffffff;--surface-solid:#ffffff;--surface-raised:#ffffff;--surface-glass:rgba(255,255,255,.9)}
+/* Background environments ("Fon"): each family tints the page and the surface hierarchy with its own
+   accent — page most, raised surfaces least — so families differ noticeably but stay calm. Flat colour
+   only: no gradients, circles, blobs, glows or photos. A family never forces dark mode; the accent comes
+   from the theme registry (set on <html> as --accent). */
+:root{
+  --tint:var(--accent);--tint-bg:6%;--tint-surface:1.6%;--tint-2:3.6%;--tint-3:5.5%;--tint-line:30%;
+  --bg:color-mix(in srgb,var(--tint) var(--tint-bg),#f2f3f3);
+  --surface:color-mix(in srgb,var(--tint) var(--tint-surface),#fbfbfa);--surface-solid:var(--surface);
+  --surface-raised:color-mix(in srgb,var(--tint) calc(var(--tint-surface) / 2),#fdfdfc);
+  --surface-2:color-mix(in srgb,var(--tint) var(--tint-2),#f6f6f4);
+  --surface-3:color-mix(in srgb,var(--tint) var(--tint-3),#eff1f2);
+  --surface-glass:color-mix(in srgb,var(--bg) 88%,transparent);
+  --line:color-mix(in srgb,color-mix(in srgb,var(--tint) var(--tint-line),#1f2328) 8.5%,transparent);
+}
+/* Dark: deep navy/charcoal base under every family. */
+:root[data-theme="dark"]{
+  --tint-bg:5%;--tint-surface:3.5%;--tint-2:4.5%;--tint-3:6%;--tint-line:25%;
+  --bg:color-mix(in srgb,var(--tint) var(--tint-bg),#0f1215);
+  --surface:color-mix(in srgb,var(--tint) var(--tint-surface),#171a1e);--surface-solid:var(--surface);--surface-glass:color-mix(in srgb,var(--bg) 90%,transparent);
+  --surface-raised:color-mix(in srgb,var(--tint) var(--tint-surface),#1c1f23);
+  --surface-2:color-mix(in srgb,var(--tint) var(--tint-2),#1d2125);
+  --surface-3:color-mix(in srgb,var(--tint) var(--tint-3),#24292e);
+  --line:color-mix(in srgb,color-mix(in srgb,var(--tint) var(--tint-line),#ffffff) 7.5%,transparent);
+}
+/* Minimal: untinted, the cleanest surfaces (white / near black). */
+:root[data-family="minimal"]{--tint-bg:0%;--tint-surface:0%;--tint-2:0%;--tint-3:0%;--tint-line:0%;--bg:#f6f6f5;--surface:#ffffff;--surface-raised:#ffffff}
+:root[data-family="minimal"][data-theme="dark"]{--bg:#0d0e10;--surface:#16181a;--surface-raised:#1b1d20}
 
-:root[data-bg="emerald-night"]{--bg:#0f1412}
-:root[data-bg="amber-night"]{--bg:#14120f}
-:root[data-bg="sapphire-night"]{--bg:#111315}
-:root[data-bg="violet-night"]{--bg:#121216}
-:root[data-bg="crimson-night"]{--bg:#151112}
-:root[data-bg="ocean-night"]{--bg:#0f1415}
-:root[data-bg="neutral-night"]{--bg:#121212}
-:root[data-bg="minimal-dark"]{--bg:#0e0f11;--surface:#16181a;--surface-solid:#16181a;--surface-raised:#1b1d20;--surface-glass:rgba(14,15,17,.92)}
+/* UI density: control height, card padding and gaps across every page (font size is separate). */
+:root[data-density="compact"]{--control-h:32px;--control-h-sm:26px;--control-px:9px;--card-pad:12px;--gap:10px;--stack-gap:12px;--form-gap:9px;--nav-h:32px}
+:root[data-density="comfortable"]{--control-h:40px;--control-h-sm:32px;--control-px:14px;--card-pad:20px;--gap:18px;--stack-gap:20px;--form-gap:16px;--nav-h:40px}
+
+/* Table density: row and header height of every table (shared tables and hand-built ones). */
+:root{--th-h:38px}
+:root[data-table-density="compact"]{--row-py:4px;--cell-px:10px;--th-h:32px}
+:root[data-table-density="comfortable"]{--row-py:13px;--cell-px:16px;--th-h:44px}

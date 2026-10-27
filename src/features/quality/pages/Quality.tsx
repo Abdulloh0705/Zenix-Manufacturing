@@ -1,7 +1,7 @@
 import {useMemo,useState} from 'react'
 import {useNavigate,useSearchParams} from 'react-router-dom'
 import {useApp} from '../../../app/providers/AppProvider/AppContext'
-import {Card,Confirm,Drawer,Empty,Field,FilterSelect,Icon,InfoGrid,Input,KPI,Modal,PageHeader,ResourceTable,SectionTitle,Select,StatusBadge,Textarea,Toggle,positive,required,useForm,useRecordParam,useSearchParamState} from '../../../shared/ui'
+import {Card,Confirm,Drawer,Empty,Field,FilterSelect,Icon,Input,KPI,Modal,PageHeader,ResourceTable,SectionTitle,Select,StatusBadge,Textarea,Toggle,positive,required,useForm,useRecordParam,useSearchParamState} from '../../../shared/ui'
 import type {QualityAlert,QualityCheck,QualityControlPoint} from '../../../types'
 import {sourceLabel} from '../../../domain/actions'
 import {awaitsRework,isDefect,outputByDay,reworkOrders,scrapEvents} from '../../../domain/manufacturingEngine'
@@ -58,7 +58,8 @@ function Overview(){
 function Checks(){
   const app=useApp(),s=app.state
   const [q,setQ]=useSearchParamState('q'),[status,setStatus]=useSearchParamState('status'),[type,setType]=useSearchParamState('type'),[range,setRange]=useSearchParamState('range')
-  const [check,setCheck]=useState<string|null>(null),[create,setCreate]=useState(false)
+  // ?id= opens the check (global search, notifications, shared links).
+  const [check,setCheck]=useRecordParam(),[create,setCreate]=useState(false)
   const since=range?periodStart(Number(range)):''
   const rows=s.qualityChecks.filter(c=>(!status||c.status===status)&&(!type||c.type===type)&&c.date.slice(0,10)>=since)
   return <div className="page-stack">
@@ -274,7 +275,7 @@ function ControlPoints(){
     <div className="card flush"><div className="table-scroll"><table className="qcp-table"><thead><tr><th>Control point</th><th>Bosqich</th><th>Item</th><th>Tur</th><th>Chastota</th><th className="align-right">Namuna</th><th className="align-right">Tekshiruv</th><th>Faol</th>{canEdit&&<th className="action-col"><span className="sr-only">Amal</span></th>}</tr></thead><tbody>
       {s.qualityControlPoints.map(c=><tr key={c.id} className={c.active?undefined:'row-muted'}>
         <td><div className="cell-main"><b>{c.title}</b><small title={c.instructions}>{c.instructions}</small></div></td>
-        <td><StatusBadge tone={c.scope==='Final'?'purple':c.scope==='Incoming'?'info':'mfg'}>{c.scope}</StatusBadge>{c.operationName&&<small className="cell-sub">{c.operationName}</small>}</td>
+        <td><StatusBadge tone={c.scope==='Final'?'purple':c.scope==='Incoming'?'info':'mfg'}>{c.scope}</StatusBadge>{c.operationName&&<small className="cell-sub">{c.operationName}</small>}{c.blocking&&<small className="cell-sub warning-text">Majburiy — keyingi operatsiyani to‘sadi</small>}</td>
         <td>{c.productId?materialName(s,c.productId):<span className="muted">Barcha itemlar</span>}</td>
         <td>{c.checkType}</td>
         <td>{c.frequency}</td>
@@ -293,9 +294,9 @@ function QcpModal({qcp,onClose}:{qcp?:QualityControlPoint;onClose:()=>void}){
   const app=useApp(),s=app.state
   const items=[...s.products.map(p=>({id:p.id,label:`${p.name} (mahsulot)`})),...s.rawMaterials.map(m=>({id:m.id,label:`${m.name} (xomashyo)`}))]
   const operations=[...new Set(s.boms.filter(b=>b.status==='Faol').flatMap(b=>b.operations.map(o=>o.name)))]
-  const form=useForm({title:qcp?.title||'',scope:qcp?.scope||'Final',productId:qcp?.productId||'',operationName:qcp?.operationName||'',frequency:qcp?.frequency||'Every time',sampleRate:String(qcp?.sampleRate??100),checkType:qcp?.checkType||'Pass-Fail',instructions:qcp?.instructions||'',active:qcp?.active??true},v=>({title:required(v.title,'Nomi'),instructions:required(v.instructions,'Ko‘rsatma'),sampleRate:Number(v.sampleRate)>0&&Number(v.sampleRate)<=100?undefined:'1–100%'}))
+  const form=useForm({title:qcp?.title||'',scope:qcp?.scope||'Final',productId:qcp?.productId||'',operationName:qcp?.operationName||'',frequency:qcp?.frequency||'Every time',sampleRate:String(qcp?.sampleRate??100),checkType:qcp?.checkType||'Pass-Fail',instructions:qcp?.instructions||'',active:qcp?.active??true,blocking:qcp?.blocking??false},v=>({title:required(v.title,'Nomi'),instructions:required(v.instructions,'Ko‘rsatma'),sampleRate:Number(v.sampleRate)>0&&Number(v.sampleRate)<=100?undefined:'1–100%'}))
   return <Modal open onClose={onClose} title={qcp?'Control point tahrirlash':'Yangi control point'} size="lg"
-    footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Bekor qilish</button><button type="button" className="primary-glass-btn" onClick={()=>form.submit(v=>{const payload={...v,productId:v.productId||undefined,operationName:v.scope==='In-process'?v.operationName||undefined:undefined,sampleRate:Number(v.sampleRate)};const r=qcp?app.updateEntity('qualityControlPoints',qcp.id,payload):app.createEntity('qualityControlPoints',payload);if(r.ok)onClose();return r.ok})}>Saqlash</button></>}>
+    footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Bekor qilish</button><button type="button" className="primary-glass-btn" onClick={()=>form.submit(v=>{const payload={...v,productId:v.productId||undefined,operationName:v.scope==='In-process'?v.operationName||undefined:undefined,blocking:v.scope==='In-process'?v.blocking:undefined,sampleRate:Number(v.sampleRate)};const r=qcp?app.updateEntity('qualityControlPoints',qcp.id,payload):app.createEntity('qualityControlPoints',payload);if(r.ok)onClose();return r.ok})}>Saqlash</button></>}>
     <div className="form-grid">
       <Field className="span-2" label="Nomi" required error={form.error('title')}><Input {...form.input('title')} autoFocus/></Field>
       <Field label="Bosqich"><Select value={form.values.scope} onChange={v=>form.set('scope',v as QualityControlPoint['scope'])}>{[['Incoming','Incoming (qabul)'],['In-process','In-process (operatsiya)'],['Final','Final']].map(([v,l])=><option key={v} value={v}>{l}</option>)}</Select></Field>
@@ -305,6 +306,7 @@ function QcpModal({qcp,onClose}:{qcp?:QualityControlPoint;onClose:()=>void}){
       <Field label="Chastota"><Select value={form.values.frequency} onChange={v=>form.set('frequency',v as QualityControlPoint['frequency'])}>{['Every time','Random','Periodic','On demand'].map(x=><option key={x} value={x}>{x}</option>)}</Select></Field>
       <Field label="Namuna %" error={form.error('sampleRate')}><Input type="number" min="1" max="100" {...form.input('sampleRate')}/></Field>
       <Field className="span-2" label="Ko‘rsatma" required error={form.error('instructions')}><Textarea {...form.input('instructions')}/></Field>
+      {form.values.scope==='In-process'&&<div className="span-2"><Toggle checked={form.values.blocking} onChange={v=>form.set('blocking',v)} label="Majburiy tekshiruv" description="Pending yoki Failed bo‘lsa, keyingi operatsiya boshlanmaydi"/></div>}
     </div>
   </Modal>
 }

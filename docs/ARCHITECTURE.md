@@ -37,13 +37,43 @@ Uskuna: downtime hodisasi ↔ OEE availability ↔ capacity; maintenance so‘ro
 PLM: ECO → draft BOM revision → review → approve → apply (eski MOlar o‘z snapshotini saqlaydi)
 ```
 
+## Saqlash va tiklash
+
+| Kalit | Mazmun |
+|---|---|
+| `zenix-manufacturing-v3-state` | ish ma’lumoti (bitta JSON, `schemaVersion`) |
+| `zenix-auth-v1` · `zenix-session-v1` | akkauntlar va xeshlar · shu brauzer sessiyasi (backup’ga kirmaydi) |
+| `zenix-activity-archive-v1` | 600 tadan eski faoliyat yozuvlari |
+| `zenix-manufacturing-v3-before-reset` | tozalash / import / tiklashdan oldingi zaxira (Tizim → Tiklash) |
+| `zenix-manufacturing-before-v4` · `…-v3-before-repair` · `…-v3-unreadable` | migratsiyadan · tuzatishdan oldingi · o‘qilmagan asl nusxa (Tizim → Tiklash nusxalari) |
+
+- **Yuklash** (`domain/persistence.ts` → `prepareStored`): har bir ro‘yxatda yozuv bo‘lmagan / ID’siz elementlar chetga olinadi va sanaladi; ichki ro‘yxatlar (`workOrders`, `items`, `receipts`, …) va miqdorlar (`onHand`, `quantity`, …) yo‘q bo‘lsa `[]` / `0`; BOM snapshot’i yo‘q MO bugungi BOM’dan **tiklanmaydi** — bo‘sh, belgilangan snapshot oladi; takroriy ID faqat xabar qilinadi (ikkala nusxa saqlanadi). Keyin `normalizeLoaded` (keyingi versiyalarda qo‘shilgan ro‘yxat/sozlamalar) va `migrateState` (versiyali, idempotent). Yangiroq versiya saqlagan ma’lumot pasaytirilmaydi, foydalanuvchiga aytiladi. Xuddi shu yo‘l backup import va boshqa tab saqlagan matn uchun ham ishlatiladi.
+- **Tiklash rejimi:** JSON o‘qilmasa yoki holat qurib bo‘lmasa, ilova saqlashni to‘xtatadi va `RecoveryScreen`ni ko‘rsatadi (nusxani yuklab olish → toza holatda ochish). Toza holatda birinchi sozlangan akkaunt xodimi Super Admin bo‘lib qoladi (`restoreSuperAdmin`), aks holda hech kim amal bajara olmasdi.
+- **Yozish:** domain amali va UI sozlamalari saqlangan oxirgi nusxadan davom etadi va darhol yoziladi (`syncedState.ts`). Boshqa tab o‘qilmagan yangi ma’lumot saqlagan bo‘lsa yozuv rad etiladi (`conflict`): o‘sha ma’lumot qabul qilinadi va foydalanuvchiga oxirgi o‘zgarish saqlanmagani aytiladi. Yozish muvaffaqiyatsiz bo‘lsa (`failed`) amal xabari “saqlanmadi” deydi va saqlash tiklanguncha doimiy banner turadi.
+- **Xatolar:** `RootBoundary` (provider va shell ustida, kontekstsiz) + har sahifada `PageBoundary`; foydalanuvchiga texnik tafsilot ko‘rsatilmaydi, faqat qayta yuklash va ma’lumot nusxasi.
+
+## Backend integratsiya nuqtalari
+
+Sahifalar biznes ma’lumotini faqat `useApp()` orqali o‘qiydi va o‘zgartiradi; localStorage’ga to‘g‘ridan-to‘g‘ri faqat qurilma darajasidagi UI qulayliklari yozadi (sidebar holati, AI tugma joyi, xomashyo forma qoralamasi). Shuning uchun almashtiriladigan joylar AppProvider ichida:
+
+| Hozir | Backend bilan |
+|---|---|
+| `execute(name, fn, rules)` — sof `actions.ts` funksiyasi lokal holatga | `POST /api/commands/{name}` (yoki resurs endpoint’i) — server o‘sha qoidani (`ACTION_RULES`, `scopeBlocker`) va invariantlarni tekshiradi; javobdagi holat/patch `commit` qilinadi |
+| `hydrate()` + `prepareStored` | dastlabki `GET` (scope bo‘yicha); migratsiya serverda |
+| `persist` / `syncedState` / `storage` event | server versiyasi (ETag / `If-Match`) — `conflict` oqimi aynan shu javobga mos keladi |
+| `domain/auth.ts` + `crypto.ts` (PBKDF2 brauzerda) | server sessiyasi (HttpOnly cookie), parol xeshi serverda — [AUTH.md](AUTH.md) |
+| `scopedView` (o‘qishni cheklash) | serverda filtrlangan so‘rovlar |
+
+`manufacturingEngine.ts` / `planning.ts` / `dashboard.ts` sof hisob-kitoblar — klientda (ko‘rinish) va serverda (tekshiruv) bir xil ishlatilishi mumkin. Brauzerdagi RBAC — UX qatlami; haqiqiy xavfsizlik chegarasi faqat server bo‘ladi.
+
 ## UI arxitekturasi
 
 - **Overlay stack** (`shared/ui/Overlays.tsx`): Modal, Drawer, Popover, Select, mobil navigatsiya bitta stekda ro‘yxatdan o‘tadi. Faqat eng yuqori qatlam Escape, Tab (focus trap) va tashqi bosishni qabul qiladi; fokus ochuvchi elementga qaytadi; scroll lock `scrollbar-gutter: stable` bilan sakramaydi.
 - **z-index shkalasi** (`styles/tokens.css`): sticky 10 · sidebar 30 · topbar 40 · AI dock 50 · mobil nav 60 · modal/drawer 100 · popover 200 · toast 300. Popover modal ichidan ochilishi mumkinligi sababli moddan yuqorida.
 - **ResourceTable** (`shared/ui/ResourceTable.tsx`): ko‘rinadigan matn bo‘yicha qidiruv, raqamli/locale tartiblash (tri-state, `aria-sort`), filtr slotlari va “Tozalash”, sahifa o‘lchami, joriy natijani CSV eksport, bir marta bosib ochish, telefonda kartalar. Filtrlar URL’da (`useSearchParamState`), yozuv drawer’i `?id=` orqali ochiladi (deep link, global qidiruv, bildirishnomalar).
 - **Shell**: `Sidebar` (collapse saqlanadi, hover/klaviatura flyout, mobil drawer + accordion, `inert`), `Topbar` (global qidiruv / Ctrl+K palette, kontekst, Theme·Fon·Valyuta·Fullscreen, bildirishnomalar, profil: parolni o‘zgartirish va chiqish), `AiAssistant` (o‘ng chetdagi ingichka tab, faqat Y bo‘yicha suriladi; o‘ngdan chiquvchi overlay panel — sahifa o‘lchami o‘zgarmaydi). Sidebar ≤1024px’da off-canvas drawer.
-- **Sahifalar lazy yuklanadi** (`App.tsx`), har sahifa ErrorBoundary bilan.
+- **Sahifalar lazy yuklanadi** (`App.tsx`), har sahifa ErrorBoundary bilan; ilova ildizida `RootBoundary`. Toast’lar barcha marshrutlarda (login/setup ham) ko‘rinadi.
+- **iOS safe-area:** `viewport-fit=cover` + `--safe-top/right/bottom/left` tokenlari (topbar, sidebar drawer, kontent pasti, AI tugma, toast, auth sahifasi). Boshqa qurilmalarda inset 0 — joylashuv o‘zgarmaydi.
 
 ## Uslublar
 

@@ -1,7 +1,7 @@
 # ZENIX — yagona BUG reyestri
 
 Manbalar: 1-audit (BUG-01…18), mahsulot auditi (N-01…26), 3-audit (B3-01…15), Login/RBAC auditi (A-C1…A-L4).
-Takrorlar bitta qatorga birlashtirilgan, har bir ID saqlangan. Oxirgi yangilanish: 2026-10-20.
+Takrorlar bitta qatorga birlashtirilgan, har bir ID saqlangan. Oxirgi yangilanish: 2026-10-26 (Phase 5).
 
 **Holatlar:**
 - **FIXED** — kod o‘zgardi va dalil bor: regression test (eski kodda yiqilishi tekshirilgan) yoki brauzerda tekshiruv. Ma’lum chegara bo‘lsa “Cheklov” ustunida.
@@ -75,7 +75,7 @@ Takrorlar bitta qatorga birlashtirilgan, har bir ID saqlangan. Oxirgi yangilanis
 | BUG-17 | UI matni ↔ mantiq | PARTIAL | MPS/MRP yaxlitlash, Available, BOM waste matnlari; QCP `frequency`/`sampleRate` endi avtomatik tekshiruvni boshqaradi (Every time / On demand / Random % / Periodic har N-chi) | release BUG-17 | `timezone` sozlamasi qo‘llanmaydi — sanalar brauzerning lokal vaqtida |
 | BUG-18 | CSV injection, operator ID, qaytgan lot, `createdAt` UTC | FIXED | `neutralize()`; vaqt ishni boshlagan kishiga; `stamp()` | bugRegistry BUG-18 | — |
 | N-11 | Serial genealogy (qaysi serial ketdi) | OPEN | — | — | Har bir serial alohida yozuv bo‘lishi kerak: ma’lumot modeli o‘zgarishi (lot → serial qatorlari, sotuv/qaytarishda serial tanlash). Hozir serial diapazon lot darajasida |
-| N-14 | MRP needBy = bugun + lead time; vaqt bo‘yicha taqsimlanmagan | PARTIAL | `needBy` endi talab sanasi: draft MO boshlanishi yoki MPS’ning birinchi yetishmovchi haftasi, ota mahsulot ishlab chiqarish vaqti ayirilgan | release N-14 | Netting haftalarga bo‘lingan emas (ufq bo‘yicha jami) — to‘liq time-phased MRP alohida ish |
+| N-14 | MRP needBy = bugun + lead time; vaqt bo‘yicha taqsimlanmagan | FIXED | Phase 2: `runMrp` (src/domain/planning.ts) — kunlik/haftalik bucket, projected available, net = max(0, safety − proyeksiya), lead time bo‘yicha release, talabga pegging | release N-14, phase2 P2-08/09 | “Xomashyo balansi (jami)” jadvali (createMrpPlan) jami ko‘rinish sifatida qoldi |
 | N-17 | Natija oynasi butun qoldiqni to‘ldiradi; STOP sababi yo‘q | FIXED | Bo‘sh standart qiymat + kalit; STOP sababi | kod: OutputModal `good:''`, Shop Floor `STOP_REASONS` (UI testi yo‘q) | — |
 | N-19 / B3-15 | Unbuild joriy BOM va 97% ishlatadi | FIXED | Olinadigan lot uni yaratgan MO’ga bog‘lanadi: MO BOM snapshot’i, haqiqiy sarf bilan cheklangan; lot MO’siz bo‘lsa faol BOM; qayta tiklash % foydalanuvchi kiritadi (0–100) | release N-19/B3-15 | — |
 | N-20 | Brak o‘rniga qo‘shimcha issue yo‘q | FIXED | `issueExtraMaterial`: sabab majburiy, faqat bo‘sh qoldiqdan, BOM rejasi bilan cheklangan, MO’da `extraIssues`, ledger va jurnalda; faqat `production.edit` | release N-20 | — |
@@ -96,7 +96,7 @@ Takrorlar bitta qatorga birlashtirilgan, har bir ID saqlangan. Oxirgi yangilanis
 | A-H3 | Backup import/eksport himoyasiz | FIXED | Import/restore `settings.edit`, eksport `settings.export`; importdan oldin zaxira; backup’da Super Admin bo‘lmasa rad | AppContext `replaceAll`; brauzer | Akkauntlar backup’ga kirmaydi (ataylab) |
 | A-H4 | `export` deyarli qo‘llanmaydi | FIXED | Har bir jadval CSV’si joriy modulning `export` huquqiga bog‘langan; audit CSV `audit.export` | brauzer (Operator: CSV tugmasi yo‘q) | — |
 | A-H5 | Operator huquqlari juda keng | FIXED | `execute` ajratildi: operator ishni bajaradi, rejalashtirmaydi/bekor qilmaydi | access “execute: operators…” | — |
-| A-H6 | `scope` qo‘llanmaydi | PARTIAL | Domain darajasida (`scopeBlocker`): `workcenter` — sex ishi faqat o‘z ish markazida; `branch`/`warehouse` — faqat o‘z filiali (filial xodimning ish markazidan) | release A-H6 (2 test) | `warehouse` scope alohida omborga emas, filialga bog‘lanadi (xodimda ombor maydoni yo‘q); ro‘yxatlar filtrlanmaydi — faqat amallar |
+| A-H6 | `scope` qo‘llanmaydi | FIXED | Domain darajasida (`scopeBlocker`): `workcenter` — sex ishi faqat o‘z ish markazida; `branch` — o‘z filiali; `warehouse` — xodimga `warehouseId` biriktirilsa faqat shu ombor (aks holda filial). Qamrov MO split/merge/backorder, QC, qaytarish, xarid, sotuv bekor qilish va joyga bog‘liq master-data CRUD’ga kengaytirildi. O‘qish: `scopedView` ro‘yxat, dashboard va eksportlarni shu doiraga qisqartiradi | release A-H6 (2 test), phase1 P1-2 (3 test) | Frontend himoyasi — backend xavfsizligi emas |
 | A-M1 | Pul ma’lumotlari hammaga ko‘rinadi | FIXED | `costs.view`siz: tannarx/marja ustunlari, BOM tannarxi, MO “Tannarx” tabi, WC stavkasi, scrap yo‘qotishi, Hisobotlar → Xarajatlar/Profitability, dashboard tannarx KPI, AI marja javoblari, xodim stavkasi yashiriladi | brauzer (Operator) | Material xarid narxi va ombor qiymati ta’minot/ombor ishi uchun ko‘rinadi |
 | A-M2 | Audit jurnali zaif | FIXED | Har yozuvda `userId`; kirish hodisalari alohida jurnal; faoliyat kesilmaydi (arxiv) | release BUG-07/A-M2, auth | Brauzer xotirasini o‘zgartira oladigan odam jurnalni ham o‘zgartiradi |
 | A-M3 | Migratsiya xavfi | FIXED | `schemaVersion` v4; qo‘shuvchi, idempotent, oldin zaxira | access v4 testlari | — |
@@ -108,3 +108,110 @@ Takrorlar bitta qatorga birlashtirilgan, har bir ID saqlangan. Oxirgi yangilanis
 | A-L2 | HR holati va akkaunt holati aralash | FIXED | Akkaunt holati (`active/blocked`) alohida | auth | — |
 | A-L3 | Rol tanlovida Super Admin chiqadi | FIXED | Faqat berish mumkin bo‘lgan rollar | access A-C2 | — |
 | A-L4 | Yangi rol id’lari demo naqshiga mos | FIXED | `role-<vaqt>-<tasodif>` | reset.ts `isGeneratedDemoId` | — |
+
+## Phase 1 (2026-10-21) — ma’lumotlar yaxlitligi
+
+Testlar: `tests/phase1.test.mjs` (24 test; 12 tasi eski kodda yiqiladi).
+
+| ID | Muammo | Holat | Tuzatish |
+|---|---|---|---|
+| P1-10 | Ombor fallback’i arxivlangan/noto‘g‘ri turdagi omborga tushardi | FIXED | `finishedWarehouseFor`/`rawWarehouseFor` faqat faol, mos turdagi ombor; MO yaratishda ombor/liniya tekshiriladi |
+| P1-11 | BOM’da o‘chirilgan/arxivlangan komponent bilan MO ochilardi | FIXED | `bomBlocker` — yaratish, tasdiqlash va boshlashda |
+| P1-26/27 | Qaytarish karantinsiz, qarorgacha omborda ko‘rinmas; Scrap harakat yozmasdi; standart omborga tushardi | FIXED | Ro‘yxatga olishda jo‘natgan omborga karantin bilan qabul; Good/Rework/Scrap aynan shu birliklarni siljitadi, Scrap `QC Scrap -` yozadi |
+| P1-29 | Qaytarish/trace birinchi mos lotni olardi; transfer nusxasi lot manbasini yo‘qotardi | FIXED | `returnSources` (haqiqiy Sale − harakatlari bo‘yicha lotlarga bo‘lish), `lotOrigin`, transfer nusxasi manbani saqlaydi |
+| P1-30 | Transfer qilingan lot unbuild’da joriy BOM’ga tushardi | FIXED | `lotOrigin` orqali MO snapshot |
+| P1-31 | Faol BOM’i/ochiq MO snapshot’i/subcontract/qaytarishi bor yozuvni o‘chirish mumkin edi | FIXED | `REFERENCE_CHECKS` kengaytirildi |
+| P1-33/34 | Split/backorder bolasi ota-ning extraIssues/outputKeys’ini meros olardi; turli snapshot’li MO’lar birlashardi; MTO backorder SO’dan uzilardi | FIXED | Toza bola buyurtma, snapshot tengligi, SO’ga bog‘lash, rezervni tiklab bo‘lmasa split bekor |
+
+## Phase 2 (2026-10-21) — MRP, MES, sig‘im, sifat va tannarx
+
+Testlar: `tests/phase2.test.mjs` (23 test, sobit soat 2026-10-21 08:00). Jami suite: 233.
+
+| ID | Muammo | Holat | Tuzatish |
+|---|---|---|---|
+| P2-01 | Work order’da operator, operatsiya miqdori, setup/run, tarix yo‘q; MO bekor qilinganda job card ochiq qolardi | FIXED | `WorkOrder`: operatorIds, goodQty/scrapQty, setupActualMin, muzlatilgan stavkalar, history; `jobCard`, `WORK_ORDER_PHASE` (BLOCKED→READY→IN_PROGRESS⇄PAUSED→COMPLETED/CANCELLED); bekor/merge’da “Bekor qilingan”, tarix saqlanadi |
+| P2-02 | Operatsiya miqdori nazorat qilinmasdi | FIXED | `reportOperationOutput`: kirgan − qayd etilgan dan ortig‘i faqat yozma sabab bilan, MO miqdoridan hech qachon oshmaydi; oraliq scrap MO’ga (material, NCR), oxirgi operatsiya = MO natijasi (backflush, QC karantin); takroriy kalit — no-op |
+| P2-03 | Setup va run vaqti ajratilmasdi | FIXED | `markSetupDone`: setup alohida time log, run bo‘shliqsiz davom etadi; pauza vaqti time log oraliqlaridan |
+| P2-04 | Operator ish markazi doirasi tekshirilmasdi | FIXED | `operatorScopeBlocker` (access.ts): `assignWorkOrder` va `startWorkOrder(employeeId)` |
+| P2-05 | Aylanma BOM sub-BOM orqali o‘tardi; portlatish jim o‘tkazib yuborardi | FIXED | `findBomCycle`/`explodeBom` (planning.ts); saveBom va faollashtirishda rad, MRP issue sifatida ko‘rsatadi |
+| P2-06 | MRP vaqt bo‘yicha emas, MTS/MTO farqi yo‘q, tavsiya talab manbasini bilmasdi | FIXED | `runMrp`: MTS forecast’ni iste’mol qiladi, MTO ustiga qo‘shiladi; FIFO pegging (safety stock talabga berilmaydi); `confirmMrpSuggestion` → qoralama MO/PO (“MRP <key>” bilan), qoralama PO bor tavsiya qayta yaratilmaydi |
+| P2-07 | Xomashyo faqat bitta ombordan rezerv/chiqim qilinardi | FIXED | `componentSourceWarehouses`: filialning boshqa Raw/Mixed omborlari ham; rezerv hammasi-yoki-hech narsa, chiqim ombor bo‘yicha, boshqa filial ishlatilmaydi; “warehouse” roli faqat o‘z omborida |
+| P2-08 | Sig‘im kalendar, smena, texnik xizmat va to‘xtashni bilmasdi; Gantt tekshiruvsiz sana o‘zgartirardi | FIXED | `workCenterDay` (ish kunlari, smenalar, maintenance, downtime), `scheduleOperations` (finite, bog‘liqlik, ustma-ust yo‘q), `rescheduleProductionOrder` (o‘tgan/noto‘g‘ri sana rad, band resurs uchun override sabab bilan) |
+| P2-09 | In-process tekshiruv work order’ga bog‘lanmagan, majburiy QC keyingi operatsiyani to‘smasdi, in-process scrap stock/costga ta’sir qilmasdi | FIXED | QualityCheck.workOrderId/operatorId; QCP `blocking`; eng so‘nggi tekshiruv qaror qiladi; `resolveQuality(...,qty)` scrap’ni MO’ga yozadi (bitta NCR) |
+| P2-10 | Haqiqiy tannarx chiqimni bugungi narxda baholardi; energiya va WIP yo‘q | FIXED | Chiqim paytidagi narx (`issueUnitCost`), time log va work order’da muzlatilgan stavkalar, energiya (WC tarifi), WIP/relieved, rework alohida ko‘rsatiladi, `costInputGaps` — taxminiy qism belgilanadi |
+| P2-11 | OEE operatsiya miqdorini bilmasdi | FIXED | Job card miqdori bo‘lsa shu, bo‘lmasa MO natijasi; formula o‘zgarmadi |
+| P2-12 | MPS jadval izohi “50 lik lot” deb yozardi, kod 1 birlik edi | FIXED | Izoh tuzatildi; MPS ufqi 4/8/12 hafta |
+
+**Cheklovlar:** sig‘im kun ichida bo‘shliqlarni to‘ldirmaydi (har work center uchun kunlik ko‘rsatkich); texnik xizmat/to‘xtash kun sig‘imini kamaytiradi, smena ichidagi aniq vaqt oralig‘ini emas; umumiy UoM konversiya jadvali hali yo‘q (BUG-12); karantindagi stock MRP’da kirim sifatida hisoblanmaydi (konservativ).
+
+## Phase 4 (2026-10-26) — UI/UX, dizayn tizimi, responsive, overlay va accessibility
+
+Audit: umumiy komponentlar (Overlays, Forms, ResourceTable, Layout), shell (Sidebar, Topbar, AI dock) va 93 ta ko‘rinish (har bir modul sub-view) haqiqiy brauzerda 1920 / 1440 / 1280 / 1024 / 768 / 480 / 375 px’da: gorizontal overflow, <11px matn, nomsiz boshqaruv, h1, kichik bosish nishoni, konsol xatolari. Yangi UI testlar: `tests/ui/*.test.tsx` (jsdom, `npm run test:ui`, 39 test). Jami: 253 domain + 39 UI.
+
+| ID | Daraja | Muammo | Holat | Tuzatish |
+|---|---|---|---|---|
+| P4-01 | High | Jadvalda formatlangan pul/miqdor ustuni matn sifatida saralanardi (“1 200 000” < “300”), dd.mm.yyyy sanalar ham | FIXED | `tableSort.ts`: xom raqam / ISO sana, guruhlangan raqam va dd.mm.yyyy ma’nosi bo‘yicha; bo‘sh qiymat doim oxirida; `paginate` |
+| P4-02 | High | Interfeys / jadval zichligi sozlamasi yo‘q edi (talab qilingan) | FIXED | `uiDensity`, `tableDensity` (compact/standard/comfortable) → `<html data-density / data-table-density>` tokenlari; Sozlamalar va mobil “Ko‘rinish” menyusida |
+| P4-03 | Medium | Fon oilasi faqat sahifa fonini o‘zgartirardi, sirtlar bir xil — oilalar deyarli farqlanmasdi | FIXED | Accent asosidagi sirt ierarxiyasi (`tokens.css`), dark — navy/charcoal asos; “Graphite” → “Neutral”, tartib talab bo‘yicha |
+| P4-04 | Medium | Eski / noto‘g‘ri saqlangan ko‘rinish qiymatlari (oila nomi, item id) qo‘llab-quvvatlanmaydigan holatda qolardi | FIXED | `normalizePrefs` / `normalizeFamily` yuklashda va legacy migratsiyada |
+| P4-05 | Medium | Telefon’da baland menyu (Ko‘rinish) trigger va topbar ustiga surilardi | FIXED | `Popover`: pastga ochilgan panel joyida qoladi va scroll qiladi; `top-*` joy bo‘lmasa pastga aylanadi |
+| P4-06 | Medium | Bildirishnoma sozlamasi faqat yangi xabarni to‘xtatardi; o‘chirilgan turdagi eski xabarlar qo‘ng‘iroqchada qolardi | FIXED | `visibleNotifications` (modul ruxsati + tur sozlamasi) |
+| P4-07 | Medium | “Muddat kechikishi” va “AI tavsiyalari” bildirishnoma kalitlari ishlaydigandek ko‘rinardi, lekin bunday xabar manbai yo‘q | FIXED (rost holat) | Kalitlar o‘chirilgan, sababi va signallar qayerda ko‘rinishi yozilgan |
+| P4-08 | Medium | Global qidiruvda ombor va sifat tekshiruvi yo‘q edi; QC tekshiruvini havola bilan ochib bo‘lmasdi | FIXED | `searchIndex.ts` (ombor `?q=`, QC `?id=`), Quality → Tekshiruvlar `useRecordParam` |
+| P4-09 | Medium | Forma: yozuv almashganda eski qiymat/xato qolishi mumkin edi (umumiy himoya yo‘q); xatoli submitdan keyin fokus joyida qolardi; ikki marta bosish ikki marta saqlashi mumkin edi | FIXED | `useForm(…, resetKey)`, `focusFirstInvalid`, 600ms takroriy submit himoyasi; `ResolveForm` key bilan |
+| P4-10 | Medium | Kichik bosish nishonlari: switch 36×21, lokatsiya chipidagi o‘chirish 20×20, sarlavha saralash 23px | FIXED | Switch 40×24, chip tugmasi 24×24, `th-sort` ≥24px, `pointer:coarse` da ≥36px |
+| P4-11 | Low | AI tugmasi mobil brauzer paneli / safe-area’ni hisobga olmasdi | FIXED | `aiDock.ts`: `visualViewport` balandligi, safe-area inset, nisbat bo‘yicha qayta joylash; noto‘g‘ri saqlangan qiymat → default |
+| P4-12 | Low | `theme-color` meta yangi sahifa fonlariga mos emasdi (eski ko‘k-kulrang ranglar) | FIXED | Light `#f3f4f4`, dark `#111315` |
+
+**Tekshirildi, muammo yo‘q:** overlay stack (Escape faqat yuqori qatlam, focus trap va qaytishi, ichma-ich scroll lock, portal, z-index shkalasi), Ctrl+K, KPI → filtrlangan modul (8/8), bildirishnoma → yozuv, mobil drawer, toast `aria-live`, Tabs/Select klaviatura, ruxsat yo‘q / topilmadi / sahifa xatosi holatlari.
+
+**Cheklovlar:** iOS safe-area faqat `viewport-fit=cover` yoqilganda nolga teng bo‘lmaydi (hozir yoqilmagan — brauzer o‘zi chegaralaydi). “Muddat kechikishi” / “AI” bildirishnomalari uchun manba yaratish domen o‘zgarishi — Phase 5 doirasi. Brauzer QA pane yashirin holatda o‘tdi (rAF/animatsiyalar kechikadi), shu sababli vizual tekshiruv skrinshot + DOM o‘lchovlari bilan qilindi.
+
+## Phase 3 (2026-10-26) — xarid/qabul, supplier, BOM/routing/variant, PLM/ECO, texnik xizmat
+
+Testlar: `tests/phase3.test.mjs` (20 test, 22 ssenariy, sobit soat 2026-10-21 08:00). Jami suite: 253. Faol revisiya endi o‘zgarmas bo‘lgani uchun 2 ta eski test (BUG-12, P1-19/P1-30) yangi revisiya orqali o‘zgartirishga moslandi — tekshiruv mazmuni saqlangan.
+
+| ID | Muammo | Holat | Tuzatish |
+|---|---|---|---|
+| P3-01 | Qoralama PO qatorlarini tahrirlab bo‘lmasdi | FIXED | `updatePurchaseDraft` (faqat Qoralama, supplier aloqasi/MOQ/birlik tekshiruvi) + UI tahrirlash |
+| P3-02 | Qabulda supplier loti, joy, qabul qiluvchi, qabul/rad taqsimoti yo‘q edi; ichki lot kodi qayta ishlatilishi mumkin edi | FIXED | `PurchaseReceipt`: supplierLot, location, receivedBy, inspection, accepted/rejected/returned/scrapped; ichki lot bitta qabulga tegishli |
+| P3-03 | Majburiy kirish QC `autoQualityChecks` o‘chirilganda o‘tkazib yuborilardi; umumiy QCP materialnikidan ustun bo‘lardi | FIXED | `blocking` Incoming QCP har doim karantinga oladi; materialning o‘z QCP’si birinchi |
+| P3-04 | Kirish tekshiruvi faqat “hammasi yoki hech narsa” edi | FIXED | `inspectReceipt`: qisman qabul, lot bo‘linadi (available + hold), NCR ochiladi |
+| P3-05 | Rad etilgan qismni scrap qilish yo‘q; supplier return lotning qabul qilingan qismini ham kamaytirardi | FIXED | `scrapRejectedReceipt`, `returnPurchaseToSupplier(qty)` faqat qaror kutayotgan rad etilgan qoldiq va hold lotdan |
+| P3-06 | Supplier KPI faqat qabul sanasi va QC soniga tayanardi | FIXED | `supplierPerformance`: qator bo‘yicha vaqtida yetkazish, amaldagi lead time, rad ulushi (miqdor), narx farqi, bajarilish; ma’lumot yo‘q bo‘lsa `missing`; `supplierPurchaseHistory` |
+| P3-07 | Bir nechta supplier bo‘lsa MRP tavsiyani bloklardi; narxi kiritilmagan link “eng arzon” bo‘lib qolardi | FIXED | `chooseSupplier`: asosiy supplier, aks holda muddat → MOQ bilan jami narx; narxsiz link faqat boshqasi bo‘lmasa, sabab bilan |
+| P3-08 | Faol/arxiv BOM `saveBom` orqali joyida o‘zgarardi (tarix buzilardi) | FIXED | Faqat Draft saqlanadi; ECO review/approved draftni qulflaydi; `bomFingerprint` |
+| P3-09 | Routing bog‘liqligi, work center va vaqtlar tekshirilmasdi | FIXED | `routingBlocker` (nom, arxiv WC, manfiy/0 vaqt, operator, yo‘q/o‘ziga/aylanma bog‘liqlik); `saveRouting`, `copyRouting`, `archiveBom` |
+| P3-10 | Variantlar matn edi; SKU/shtrix-kod yagonaligi va variant BOM yo‘q | FIXED | `saveVariant` (values, barcode, kombinatsiya yagonaligi), `Bom.variantId`, `activeBomFor(product, variant)`, MO/SO’da variant; zaxira mahsulot darajasida |
+| P3-11 | ECO o‘zgarishlarni muzlatmasdi, tasdiqdan keyin draft o‘zgarishi mumkin edi, bekor qilish/tarix yo‘q | FIXED | Review’da `changes` + fingerprint; tasdiq/qo‘llash fingerprint va faol bazani tekshiradi; `cancelEngineeringChange`; history, approvedAt/appliedAt; review = products.edit, tasdiq = products.approve |
+| P3-12 | PM har doim +30 kun; reja yo‘q uskunaga '' sana bilan PM yaratilardi | FIXED | `MaintenancePlan` (kun/hafta/oy/ish soati), `maintenanceDue`, `recordEquipmentRuntime`, `saveMaintenancePlan`; corrective ish PM rejasini surmaydi |
+| P3-13 | Maintenance buyurtmasini to‘g‘ridan-to‘g‘ri rejalash, ko‘chirish, davomiylik, tarix yo‘q; bir uskunaga ustma-ust servis | FIXED | `createMaintenanceOrder`/`updateMaintenanceOrder` (`needs-override` + sabab), plannedHours, downtimeMinutes, history; kalendar ko‘rinishi |
+| P3-14 | Jarayondagi servis sig‘imda ikki marta hisoblanardi; davomiylik faqat so‘rovdan olinardi | FIXED | `workCenterDay`: to‘xtash bir marta, rejaning qolgan oynasi alohida; `maintenanceWindow` |
+| P3-15 | MTBF/MTTR saqlangan (to‘qilgan) raqamlardan ko‘rsatilardi | FIXED | `reliabilityOf`: faqat qayd etilgan nosozliklardan; yetarli ma’lumot bo‘lmasa izoh bilan “—” |
+| P3-16 | Maintenance amallari joy doirasi (scope) bilan tekshirilmasdi | FIXED | `scopeTargets`: maintenance buyurtma/so‘rov/reja/runtime → uskunaning work centeri |
+
+**Cheklovlar:** PO’da QQS/chegirma maydonlari yo‘q (ma’lumot modeli qo‘llamaydi); supplier return PO qatorini qayta ochmaydi (almashtirish yetkazmasi yangi PO bilan); variantlar alohida zaxira saqlamaydi; routing BOM revisiyasi bilan birga versiyalanadi (alohida Routing obyekti yo‘q); runtime rejada keyingi sana prognoz qilinmaydi.
+
+## Phase 5 (2026-10-26) — arxitektura, ishonchlilik, saqlash, testlar va CI
+
+Audit: AppContext (holat, commit/persist yo‘llari, tablar), saqlash va migratsiya, xato chegaralari, marshrutlar, unumdorlik, lint/CI/E2E. Dalil: `tests/phase5.test.mjs` (10), `tests/ui/reliability.test.tsx` (7), `e2e/` (Playwright, 17). Jami: 263 domain + 46 UI + 17 E2E.
+
+| ID | Daraja | Muammo | Holat | Tuzatish |
+|---|---|---|---|---|
+| P5-01 | High | O‘qilmagan saqlangan ma’lumot 250 ms’dan keyin avtomatik toza seed bilan almashtirilardi; nusxa UI’siz kalitda qolardi | FIXED | Tiklash rejimi: saqlash to‘xtaydi, `RecoveryScreen` (nusxani yuklab olish → tasdiq bilan toza holat); nusxa Tizim → Tiklash nusxalarida |
+| P5-02 | High | Ro‘yxat ichidagi buzilgan yozuv (null, `workOrders`/`items`/`receipts` yo‘q, `onHand: null`, snapshot yo‘q) yuklashni yoki sahifani yiqitardi; yuklash xatosi oq ekran berardi | FIXED | `domain/persistence.ts`: tuzatish + hisobot + asl nusxa (`…-before-repair`); yuklash `try` ichida → tiklash rejimi; `RootBoundary` |
+| P5-03 | High | Sozlama, bildirishnoma o‘qildi belgisi va tozalash tabning eski nusxasidan commit qilinardi; debounce yozuvi boshqa tabning yangi saqlovini o‘chirardi | FIXED | `commitLatest` (oxirgi nusxadan, darhol yozish); `syncedState.write` o‘qilmagan yangi ma’lumot ustidan yozmaydi (`conflict`) |
+| P5-04 | Medium | Saqlash xatosi sessiyada bir marta aytilardi; keyingi amallar “bajarildi” deb ko‘rinardi | FIXED | Amal xabari “brauzerda saqlanmadi”, doimiy banner; muvaffaqiyatli saqlovda yo‘qoladi |
+| P5-05 | Medium | Amaldan keyin arxivga ko‘chirilmagan holat yozilardi (commit qilinganidan farqli) | FIXED | `persist(stateRef.current)` |
+| P5-06 | Medium | Muddatlari yo‘q/buzilgan sessiya hech qachon tugamasdi; buzilgan akkaunt yozuvi qidiruvni yiqitardi; `storage` hodisasidagi JSON xato berardi | FIXED | `normalizeSession`, `normalizeAuthStore` filtri, `sessionProblem` noto‘g‘ri vaqt → expired, xavfsiz `parseJson` |
+| P5-07 | Medium | Toza holatdan keyin hech kim Super Admin emas (rol biznes ma’lumotida) → har amal bloklanardi | FIXED | `restoreSuperAdmin`: eng eski faol akkaunt xodimi |
+| P5-08 | Medium | Toast faqat shell ichida: login oldidan chiqqan migratsiya/tuzatish xabarlari ko‘rinmasdi | FIXED | `Toasts` App ildizida |
+| P5-09 | Low | Xotira o‘lchagichi faqat ish ma’lumotini sanardi (zaxiralar ham kvotani egallaydi) | FIXED | `storageUsage`: ish ma’lumoti + jami |
+| P5-10 | Low | Favicon yo‘q → har yuklashda konsolda 404 | FIXED | Inline SVG icon |
+| P5-11 | Low | Select tugmasida `aria-activedescendant` combobox rolisiz (noto‘g‘ri ARIA) | FIXED | `role="combobox"`, nom label’dan |
+| P5-12 | Low | iOS safe-area: `viewport-fit=cover` yoqilmagan | FIXED | `viewport-fit=cover` + `--safe-*` tokenlari (inset 0 bo‘lgan qurilmalarda o‘zgarish yo‘q) |
+| P5-13 | Tooling | Lint, CI va brauzer E2E yo‘q edi | FIXED | ESLint (26 topilma tuzatildi; a11y/hook istisnolari qatorida sababi bilan), `npm run check`, GitHub Actions, Playwright smoke |
+
+**Tekshirildi, muammo yo‘q:** Sales → MRP → PO → qisman qabul → majburiy QC → MO rezerv → Shop Floor (+scrap) → Final QC → tayyor mahsulot → tannarx/OEE → yetkazish → qaytarish → qaror → lot trace → BOM revisiyasi (eski MO snapshot va tannarxi o‘zgarmaydi) zanjiri har qadamda va rad etilgan/takroriy amallardan keyin invariantlar bilan (qoldiq = harakatlar, manfiy/NaN yo‘q, rezerv egasi bor, havolalar butun); demo tarix ham shu invariantlarda. Unumdorlik (seed ma’lumoti): seed 0.7 ms, MRP 0.3 ms, nazorat markazi 0.9 ms — optimallashtirish talab qilinmadi; sahifalar allaqachon lazy.
+
+**Kechiktirildi (sababi bilan):** umumiy UoM konversiyasi (BUG-12) va serial genealogy (N-11) — ma’lumot modeli o‘zgarishi; “Muddat kechikishi”/“AI” bildirishnomalari — haqiqiy hodisa manbai yo‘q, o‘chiq qoladi; runtime reja bo‘yicha keyingi sana prognozi — foydalanish tezligi ma’lumoti yo‘q, raqam to‘qilmaydi; supplier return PO qatorini qayta ochmaydi; sig‘im kun ichida emas, kunlik. localStorage tranzaksion emas: ikki tab bir millisekundda yozsa poyga mumkin (oyna toraygan, yo‘qolmagan). Brauzerdagi auth/RBAC xavfsizlik chegarasi emas.

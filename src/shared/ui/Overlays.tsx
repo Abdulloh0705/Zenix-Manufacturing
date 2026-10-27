@@ -162,10 +162,15 @@ export function Popover({open,onClose,anchorRef,children,className='',placement=
       if(placement==='right-start'&&left+panelW>vw-margin)left=Math.max(margin,a.left-panelW-offset)
       if(!placement.startsWith('right')&&!placement.startsWith('left')){
         const below=vh-a.bottom-offset-margin,above=a.top-offset-margin
-        if(top+panelH>vh-margin&&above>below)top=Math.max(margin,a.top-panelH-offset)
+        // Flip to the side with more room when the preferred side cannot hold the panel.
+        if(placement.startsWith('top')){if(top<margin&&below>above)top=a.bottom+offset}
+        else if(top+panelH>vh-margin&&above>below)top=Math.max(margin,a.top-panelH-offset)
       }
       left=Math.max(margin,Math.min(left,vw-panelW-margin))
-      top=Math.max(margin,Math.min(top,vh-margin-Math.min(panelH,vh-margin*2)))
+      // A panel opening below its trigger stays anchored and scrolls when taller than the room left
+      // (sliding it up would cover the trigger and the topbar); other placements are kept on screen.
+      const anchoredBelow=!placement.startsWith('right')&&!placement.startsWith('left')&&top>=a.bottom&&vh-top-margin>=160
+      if(!anchoredBelow)top=Math.max(margin,Math.min(top,vh-margin-Math.min(panelH,vh-margin*2)))
       const maxHeight=placement.startsWith('top')&&top<a.top?a.top-offset-margin:vh-top-margin
       setStyle({position:'fixed',left,top,minWidth:width,maxWidth:vw-margin*2,maxHeight:Math.max(160,maxHeight),visibility:'visible'})
     }

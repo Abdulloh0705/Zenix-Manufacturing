@@ -1,6 +1,7 @@
-import type {Bom,BomComponent,LotRecord,ManufacturingState,MaterialReservation,ProductionOrder,WorkOrder} from '../types'
-import {addDays,daysBetween,minutesBetween,periodStart,stamp,todayISO,weekStart,weekdayShort} from '../utils/dates'
+import type {Bom,BomComponent,LotRecord,ManufacturingState,MaterialConsumption,MaterialReservation,ProductionOrder,SalesOrder,WorkCenter,WorkOrder} from '../types'
+import {addDays,daysBetween,isoDate,minutesBetween,parseDate,periodStart,stamp,todayISO,weekStart,weekdayShort} from '../utils/dates'
 import {SUPPLYING_PO,orderableLinks,preferredSupplierId} from './supplierMaterials'
+import {maintenanceWindow} from './maintenance'
 
 export type OeeInput={plannedMinutes:number;downtimeMinutes:number;idealCycleMinutes:number;totalCount:number;goodCount:number}
 export type OeeResult={availability:number;performance:number;quality:number;oee:number}
@@ -65,13 +66,27 @@ export function rawWarehouseFor(state:ManufacturingState,warehouseId:string){
   const branch=state.warehouses.find(w=>w.id===warehouseId)?.branchId
   const candidates=state.warehouses.filter(w=>w.branchId===branch&&w.status==='Faol'&&(w.type==='Raw'||w.type==='Mixed'))
   const preferred=candidates.find(w=>w.id===state.settings?.defaultWarehouseId)
+  // Never an archived store or one that cannot hold raw materials: no such store means no source (P1-10).
   return preferred?.id||candidates.at(-1)?.id
-    ||state.warehouses.filter(w=>w.type==='Raw').at(-1)?.id||state.warehouses[0]?.id||''
+    ||state.warehouses.filter(w=>w.status==='Faol'&&(w.type==='Raw'||w.type==='Mixed')).at(-1)?.id||''
 }
 
 /** Where an order takes a component from: sub-assemblies from its own warehouse, raw materials from the branch raw store. */
 export function componentSourceWarehouse(state:ManufacturingState,order:Pick<ProductionOrder,'warehouseId'>,itemId:string){
   return isProductItem(state,itemId)?order.warehouseId:rawWarehouseFor(state,order.warehouseId)
+}
+
+/**
+ * Every store an order may draw a component from, preferred first: the source warehouse above, then the other
+ * active stores of the same branch that hold that kind of item (Raw/Mixed for materials; Finished/Mixed/WIP for
+ * sub-assemblies), oldest first. Stores of another branch are never used — they need a transfer.
+ */
+export function componentSourceWarehouses(state:ManufacturingState,order:Pick<ProductionOrder,'warehouseId'>,itemId:string){
+  const primary=componentSourceWarehouse(state,order,itemId)
+  const branch=state.warehouses.find(w=>w.id===(primary||order.warehouseId))?.branchId
+  const types=isProductItem(state,itemId)?['Finished','Mixed','WIP']:['Raw','Mixed']
+  const others=state.warehouses.filter(w=>w.id!==primary&&w.branchId===branch&&w.status==='Faol'&&types.includes(w.type)).map(w=>w.id).reverse()
+  return [primary,...others].filter(Boolean)
 }
 
 /** BOM quantity of one component (incl. planned waste) for the whole order — the most that may ever be issued to it. */
@@ -155,9 +170,6 @@ function openSalesLines(state:ManufacturingState,productId:string){
     .flatMap(o=>o.items.filter(i=>i.productId===productId).map(i=>({order:o,open:Math.max(0,i.qty-i.delivered),reserved:i.reserved||0})))
 }
 
-function openSalesDemand(state:ManufacturingState,productId:string){
-  return openSalesLines(state,productId).reduce((sum,l)=>sum+l.open,0)
-}
 
 /**
  * Projected availability of an item: available (on hand − reserved) + incoming − demand that is not
@@ -172,10 +184,18 @@ export function projectedStock(state:ManufacturingState,itemId:string){
   return {...stock,demand,projected:stock.available+stock.incoming-demand}
 }
 
-export type MpsWeek={week:string;forecast:number;sales:number;demand:number;scheduled:number;projected:number;suggested:number}
+/** `sales` = unreserved sales due in the week, `mto` = the make-to-order part of it (not consumed by forecast). */
+export type MpsWeek={week:string;forecast:number;sales:number;mto:number;demand:number;scheduled:number;projected:number;suggested:number}
 
 /**
- * Time-phased Master Production Schedule. Demand per week = max(forecast, confirmed sales).
+ * Demand of one bucket with forecast consumption: make-to-stock sales consume the forecast (max of the two),
+ * make-to-order sales come on top of it — they were never part of the stock forecast.
+ */
+export const bucketDemand=(forecast:number,mtsSales:number,mtoSales:number)=>Math.max(forecast,mtsSales)+mtoSales
+export const isMakeToOrder=(order:Pick<SalesOrder,'mode'>)=>order.mode==='Make-to-order'
+
+/**
+ * Time-phased Master Production Schedule. Demand per week = max(forecast, make-to-stock sales) + make-to-order sales.
  * Stock already reserved for sales is excluded from "available" so it is not counted twice.
  */
 export function createMpsRows(state:ManufacturingState,horizonWeeks=4){
@@ -192,13 +212,15 @@ export function createMpsRows(state:ManufacturingState,horizonWeeks=4){
     const buckets:MpsWeek[]=weeks.map((week,index)=>{
       const end=addDays(week,6)
       const forecast=state.forecasts.filter(f=>f.productId===product.id&&f.period===week).reduce((a,f)=>a+f.qty,0)
-      const weekSales=salesLines.filter(l=>index===0?l.order.deliveryDate<=end:l.order.deliveryDate>=week&&l.order.deliveryDate<=end).reduce((a,l)=>a+Math.max(0,l.open-l.reserved),0)
-      const demand=Math.max(forecast,weekSales)
+      const inWeek=salesLines.filter(l=>index===0?l.order.deliveryDate<=end:l.order.deliveryDate>=week&&l.order.deliveryDate<=end)
+      const unreserved=(lines:typeof inWeek)=>lines.reduce((a,l)=>a+Math.max(0,l.open-l.reserved),0)
+      const mto=unreserved(inWeek.filter(l=>isMakeToOrder(l.order))),weekSales=unreserved(inWeek)
+      const demand=bucketDemand(forecast,weekSales-mto,mto)
       const scheduled=index===0?activeProductionQty(state,product.id,end):activeProductionQty(state,product.id,end,week)
       projected=projected+scheduled-demand
       let suggested=0
       if(projected<0){suggested=Math.ceil(-projected/lotSize)*lotSize;projected+=suggested}
-      return {week,forecast,sales:weekSales,demand,scheduled,projected,suggested}
+      return {week,forecast,sales:weekSales,mto,demand,scheduled,projected,suggested}
     })
     const forecast=buckets.reduce((a,b)=>a+b.forecast,0)
     const scheduled=activeProductionQty(state,product.id)
@@ -232,9 +254,17 @@ export function explodeBomRequirements(state:ManufacturingState,bomId:string,qua
   return [...totals.values()]
 }
 
-export function activeBomFor(state:ManufacturingState,productId:string):Bom|undefined{
+/**
+ * The active BOM revision that applies: a variant's own active BOM when it has one, else the product's general one
+ * (variant-specific BOMs never stand in for the product or for another variant).
+ */
+export function activeBomFor(state:ManufacturingState,productId:string,variantId?:string):Bom|undefined{
+  if(variantId){
+    const own=state.boms.find(b=>b.productId===productId&&b.variantId===variantId&&b.status==='Faol')
+    if(own)return own
+  }
   const product=state.products.find(p=>p.id===productId)
-  return state.boms.find(b=>b.id===product?.defaultBomId&&b.status==='Faol')??state.boms.find(b=>b.productId===productId&&b.status==='Faol')
+  return state.boms.find(b=>b.id===product?.defaultBomId&&b.status==='Faol'&&!b.variantId)??state.boms.find(b=>b.productId===productId&&b.status==='Faol'&&!b.variantId)
 }
 
 /** Low-level code: 0 for top-level items, parent level + 1 for sub-assemblies. */
@@ -369,23 +399,132 @@ export function materialShortages(state:ManufacturingState,plan=createMrpPlan(st
 
 /* ----------------------------------------------------------- Capacity -- */
 
+/* ------------------------------------------------------ Work orders -- */
+
+export type WorkOrderPhase='BLOCKED'|'READY'|'IN_PROGRESS'|'PAUSED'|'COMPLETED'|'CANCELLED'
+/** Lifecycle of a job card: BLOCKED (waits for predecessors / release) → READY → IN_PROGRESS ⇄ PAUSED → COMPLETED; CANCELLED with its MO. */
+export const WORK_ORDER_PHASE:Record<WorkOrder['status'],WorkOrderPhase>={Kutilmoqda:'BLOCKED',Tayyor:'READY',Jarayonda:'IN_PROGRESS',Pauzada:'PAUSED',Yakunlangan:'COMPLETED','Bekor qilingan':'CANCELLED'}
+const OPEN_WORK=(w:Pick<WorkOrder,'status'>)=>w.status!=='Yakunlangan'&&w.status!=='Bekor qilingan'
+export const isOpenWorkOrder=OPEN_WORK
+
+/** Whether the job card has operation-level quantities reported. */
+const tracksQty=(wo:WorkOrder)=>wo.goodQty!==undefined||wo.scrapQty!==undefined
+
+/**
+ * Units that reach an operation: the order quantity for a first operation, otherwise the fewest good units its
+ * predecessors reported (a predecessor without reported quantities passes the whole order on).
+ */
+export function operationInput(order:Pick<ProductionOrder,'quantity'|'workOrders'>,wo:WorkOrder){
+  const preds=order.workOrders.filter(w=>wo.dependsOn.includes(w.operationId))
+  return preds.length?Math.min(...preds.map(p=>tracksQty(p)?p.goodQty??0:order.quantity)):order.quantity
+}
+
+/** The operation whose good output is the finished product: the last one (by sequence) no other operation waits for. */
+export function finalWorkOrder(order:Pick<ProductionOrder,'workOrders'>){
+  const needed=new Set(order.workOrders.flatMap(w=>w.dependsOn))
+  return [...order.workOrders].filter(w=>!needed.has(w.operationId)).sort((a,b)=>b.sequence-a.sequence)[0]
+}
+
 export function workOrderRemainingMinutes(order:ProductionOrder,wo:WorkOrder){
-  if(wo.status==='Yakunlangan')return 0
+  if(!OPEN_WORK(wo))return 0
   const op=order.bomSnapshot.operations.find(o=>o.id===wo.operationId)
   if(!op)return Math.max(0,wo.plannedMin-wo.actualMin)
   const setup=wo.actualMin>0?0:op.setupMin
-  return setup+op.runMin*remainingQty(order)
+  const units=tracksQty(wo)?Math.max(0,operationInput(order,wo)-(wo.goodQty||0)-(wo.scrapQty||0)):remainingQty(order)
+  return setup+op.runMin*units
+}
+
+/**
+ * Job card of one operation, from persisted records only: planned setup/run vs measured time (productive time is
+ * actualMin plus the running interval; pauses are the gaps between its time logs), quantities and operators.
+ */
+export function jobCard(state:ManufacturingState,order:ProductionOrder,wo:WorkOrder,now=new Date()){
+  const op=order.bomSnapshot.operations.find(o=>o.id===wo.operationId)
+  const nowStamp=stamp(now)
+  const running=wo.status==='Jarayonda'&&wo.lastStartAt?minutesBetween(wo.lastStartAt,nowStamp):0
+  const actualMin=wo.actualMin+running
+  const logs=state.timeLogs.filter(t=>t.workOrderId===wo.id).sort((a,b)=>a.start.localeCompare(b.start))
+  let pausedMin=0
+  for(let i=1;i<logs.length;i++)if(logs[i-1].end)pausedMin+=minutesBetween(logs[i-1].end!,logs[i].start)
+  const last=logs.at(-1)
+  if(wo.status==='Pauzada'&&last?.end)pausedMin+=minutesBetween(last.end,nowStamp)
+  const input=operationInput(order,wo)
+  const setupMin=wo.setupActualMin??0
+  return {
+    phase:WORK_ORDER_PHASE[wo.status],plannedSetupMin:op?.setupMin??0,plannedRunMin:op?op.runMin*order.quantity:wo.plannedMin,plannedMin:wo.plannedMin,
+    actualMin,setupMin,runMin:Math.max(0,actualMin-setupMin),pausedMin,
+    plannedQty:input,goodQty:wo.goodQty??0,scrapQty:wo.scrapQty??0,openQty:Math.max(0,input-(wo.goodQty||0)-(wo.scrapQty||0)),tracksQty:tracksQty(wo),
+    operators:[...new Set([...(wo.operatorIds||[]),...logs.map(l=>l.employeeId)])],logs,history:wo.history||[],
+    instructions:op?.instructions||'',worksheet:op?.worksheet,
+  }
+}
+
+/* --------------------------------------------------------- Calendar -- */
+
+/** Working days when neither the work center nor the company sets them: Monday–Friday. */
+export const DEFAULT_WORKING_DAYS=[1,2,3,4,5]
+/** Clock minute a working day starts; downtime and maintenance are matched against the shift window from here. */
+export const SHIFT_START_MINUTE=8*60
+
+export function workCenterCalendar(state:ManufacturingState,wc:Pick<WorkCenter,'calendar'>,shiftOverride?:number){
+  const p=state.settings?.policies
+  const workingDays=wc.calendar?.workingDays?.length?wc.calendar.workingDays:p?.workingDays?.length?p.workingDays:DEFAULT_WORKING_DAYS
+  const shifts=Math.max(1,Math.floor(Number(wc.calendar?.shifts)||1))
+  const shiftMinutes=Math.max(0,shiftOverride??(Number(wc.calendar?.shiftMinutes)||p?.shiftMinutes||480))
+  return {workingDays,shifts,shiftMinutes,dayMinutes:shifts*shiftMinutes}
+}
+
+export const isWorkingDay=(state:ManufacturingState,wc:Pick<WorkCenter,'calendar'>,date:string)=>workCenterCalendar(state,wc).workingDays.includes(parseDate(date).getDay())
+
+/** Minutes of [start, end) that fall inside the shift window of `date`. */
+function windowOverlap(start:string,end:string,date:string,windowMinutes:number){
+  const from=parseDate(date).getTime()+SHIFT_START_MINUTE*60000,to=from+windowMinutes*60000
+  return Math.max(0,Math.round((Math.min(to,parseDate(end).getTime())-Math.max(from,parseDate(start).getTime()))/60000))
+}
+
+export type WorkCenterDay={date:string;working:boolean;
+  /** Shift clock minutes of the day, what stops and planned maintenance take from it, what is left on the clock. */
+  dayMinutes:number;blocked:number;clock:number;
+  /** Productive minutes: clock minutes × efficiency — what the day can absorb of routing time. */
+  capacity:number}
+
+/**
+ * Productive capacity of one work center on one day: its calendar (working day, shifts × shift minutes) minus the
+ * share of its machines that are unavailable — a machine stopped now (today), logged downtime inside the shift
+ * window, planned maintenance that day (the request's downtime hours, else the whole shift) — times efficiency.
+ */
+export function workCenterDay(state:ManufacturingState,wc:WorkCenter,date:string,now=new Date(),shiftOverride?:number):WorkCenterDay{
+  const cal=workCenterCalendar(state,wc,shiftOverride)
+  if(!cal.workingDays.includes(parseDate(date).getDay()))return {date,working:false,dayMinutes:0,blocked:0,clock:0,capacity:0}
+  const machines=state.equipment.filter(e=>e.workCenterId===wc.id)
+  const today=isoDate(now),nowStamp=stamp(now)
+  const lost=machines.map(e=>{
+    if(date===today&&e.status==='To‘xtagan')return cal.dayMinutes
+    const stops=state.downtimeEvents.filter(d=>d.equipmentId===e.id).reduce((a,d)=>a+windowOverlap(d.start,d.end||nowStamp,date,cal.dayMinutes),0)
+    // Planned service windows. Running work is counted once: the time it has already stopped the machine is in
+    // "stops" above, only the rest of its planned window is added here.
+    const service=state.maintenanceOrders.filter(m=>m.equipmentId===e.id&&(m.status==='Rejada'||m.status==='Jarayonda')).reduce((a,m)=>{
+      const w=maintenanceWindow(state,m)
+      if(!w.hours)return a+(m.status==='Rejada'&&m.scheduled.slice(0,10)===date?cal.dayMinutes:0)
+      const from=m.status==='Jarayonda'&&nowStamp>w.start?nowStamp:w.start
+      return from<w.end?a+windowOverlap(from,w.end,date,cal.dayMinutes):a
+    },0)
+    return Math.min(cal.dayMinutes,stops+service)
+  })
+  const blocked=machines.length?round(lost.reduce((a,b)=>a+b,0)/machines.length):0
+  const clock=Math.max(0,cal.dayMinutes-blocked)
+  return {date,working:true,dayMinutes:cal.dayMinutes,blocked,clock,capacity:round(clock*wc.efficiency/100)}
 }
 
 /**
  * Rough-cut capacity check for the MPS horizon: routing minutes needed for each week's scheduled +
- * suggested quantity (run time per unit, setup once per product-week) against the week's available
- * work-center minutes (shift × efficiency × working days).
+ * suggested quantity (run time per unit, setup once per product-week) against the week's productive
+ * work-center minutes from their calendars (working days, shifts, efficiency, planned maintenance).
  */
-export function mpsCapacityByWeek(state:ManufacturingState,rows:ReturnType<typeof createMpsRows>,shiftMinutes=state.settings?.policies?.shiftMinutes||480,workDays=5){
-  const capacity=state.workCenters.reduce((a,w)=>a+round(shiftMinutes*w.efficiency/100),0)*workDays
+export function mpsCapacityByWeek(state:ManufacturingState,rows:ReturnType<typeof createMpsRows>,now=new Date()){
   const weeks=rows[0]?.weeks.map(w=>w.week)??[]
   return weeks.map((week,i)=>{
+    const capacity=state.workCenters.reduce((a,w)=>a+Array.from({length:7},(_,d)=>workCenterDay(state,w,addDays(week,d),now).capacity).reduce((x,y)=>x+y,0),0)
     const load=rows.reduce((a,r)=>{
       const ops=activeBomFor(state,r.product.id)?.operations??[]
       const qty=(r.weeks[i]?.scheduled??0)+(r.weeks[i]?.suggested??0)
@@ -395,34 +534,36 @@ export function mpsCapacityByWeek(state:ManufacturingState,rows:ReturnType<typeo
   })
 }
 
-export type CapacityDay={date:string;load:number;capacity:number;utilization:number}
+export type CapacityDay={date:string;load:number;capacity:number;utilization:number;working?:boolean;blocked?:number}
 
-/** Finite capacity over a horizon: open work-order minutes spread over each order's start→due window. */
-export function calculateCapacityLoads(state:ManufacturingState,horizonDays=5,shiftMinutes=state.settings?.policies?.shiftMinutes||480){
-  const today=todayISO()
+/**
+ * Load against calendar capacity over a horizon: each open order's remaining work-order minutes are spread over the
+ * working days of the work center inside the order's start→due window (all on the due day when the window has no
+ * working day — impossible as planned, so it shows as overload). Capacity per day comes from workCenterDay.
+ */
+export function calculateCapacityLoads(state:ManufacturingState,horizonDays=5,shiftMinutes?:number,now=new Date()){
+  const today=isoDate(now)
   const days=Array.from({length:horizonDays},(_,i)=>addDays(today,i))
   return state.workCenters.map(workCenter=>{
     const machines=state.equipment.filter(e=>e.workCenterId===workCenter.id)
     const down=machines.length>0&&machines.every(e=>e.status==='To‘xtagan')
-    const dailyCapacity=round(shiftMinutes*workCenter.efficiency/100)
+    const calendar=days.map(d=>workCenterDay(state,workCenter,d,now,shiftMinutes))
     const load=new Map(days.map(d=>[d,0]))
-    const orders=state.productionOrders.filter(o=>isOpenOrder(o)&&o.workOrders.some(w=>w.workCenterId===workCenter.id&&w.status!=='Yakunlangan'))
+    const orders=state.productionOrders.filter(o=>isOpenOrder(o)&&o.workOrders.some(w=>w.workCenterId===workCenter.id&&OPEN_WORK(w)))
     let loadMinutes=0
     for(const order of orders){
       const minutes=order.workOrders.filter(w=>w.workCenterId===workCenter.id).reduce((a,w)=>a+workOrderRemainingMinutes(order,w),0)
       loadMinutes+=minutes
       const from=order.start<today?today:order.start
       const to=order.due<from?from:order.due
-      const span=Math.max(1,daysBetween(from,to)+1)
-      for(let i=0;i<span;i++){
-        const day=addDays(from,i)
-        if(load.has(day))load.set(day,(load.get(day)??0)+minutes/span)
-      }
+      const window=Array.from({length:Math.max(1,daysBetween(from,to)+1)},(_,i)=>addDays(from,i))
+      const working=window.filter(d=>isWorkingDay(state,workCenter,d))
+      const targets=working.length?working:[to]
+      for(const day of targets)if(load.has(day))load.set(day,(load.get(day)??0)+minutes/targets.length)
     }
-    const perDay:CapacityDay[]=days.map((date,i)=>{
-      const capacity=down&&i===0?0:dailyCapacity
-      const l=load.get(date)??0
-      return {date,load:round(l),capacity,utilization:capacity>0?round(l/capacity*100):l>0?999:0}
+    const perDay:CapacityDay[]=calendar.map(c=>{
+      const l=load.get(c.date)??0
+      return {date:c.date,load:round(l),capacity:c.capacity,utilization:c.capacity>0?round(l/c.capacity*100):l>0?999:0,working:c.working,blocked:c.blocked}
     })
     const capacityMinutes=Math.max(1,perDay.reduce((a,d)=>a+d.capacity,0))
     const horizonLoad=perDay.reduce((a,d)=>a+d.load,0)
@@ -453,10 +594,14 @@ export function workCenterOee(state:ManufacturingState,workCenterId:string,windo
   const shift=Math.max(60,state.settings.policies.shiftMinutes||480)
   const plannedMinutes=runMinutes+downtimeMinutes>0?Math.max(days.size*shift,runMinutes+downtimeMinutes):0
   const idleMinutes=Math.max(0,plannedMinutes-runMinutes-downtimeMinutes)
-  const totalCount=orders.reduce((a,o)=>a+o.completed+o.scrap,0)
-  const goodCount=orders.reduce((a,o)=>a+o.completed,0)
-  const idealMinutes=orders.reduce((a,o)=>a+(o.bomSnapshot.operations.find(op=>op.workCenterId===workCenterId)?.runMin??0)*(o.completed+o.scrap),0)
-  const idealCycleMinutes=totalCount?idealMinutes/totalCount:0
+  // Output per operation run here: its job-card quantities when reported, else the order's reported output.
+  const runs=orders.flatMap(o=>o.workOrders.filter(w=>w.workCenterId===workCenterId&&w.actualMin>0).map(w=>{
+    const good=tracksQty(w)?w.goodQty||0:o.completed,scrap=tracksQty(w)?w.scrapQty||0:o.scrap
+    return {good,total:good+scrap,ideal:(o.bomSnapshot.operations.find(op=>op.id===w.operationId)?.runMin??0)*(good+scrap)}
+  }))
+  const totalCount=runs.reduce((a,r)=>a+r.total,0)
+  const goodCount=runs.reduce((a,r)=>a+r.good,0)
+  const idealCycleMinutes=totalCount?runs.reduce((a,r)=>a+r.ideal,0)/totalCount:0
   return {...calculateOEE({plannedMinutes,downtimeMinutes,idealCycleMinutes,totalCount,goodCount,runMinutes}),runMinutes,downtimeMinutes,idleMinutes,plannedMinutes,totalCount,goodCount}
 }
 
@@ -490,11 +635,36 @@ export function downtimeSummary(state:ManufacturingState,windowDays=7){
 
 /* ------------------------------------------------------------ Costing -- */
 
-export type CostBreakdown={material:number;labor:number;machine:number;overhead:number;total:number}
+/** Production cost = material + labor + machine + energy + overhead; scrap is inside it (shown as `waste`), rework is costed on its own orders. */
+export type CostBreakdown={material:number;labor:number;machine:number;energy:number;overhead:number;total:number}
 
 function componentCost(state:ManufacturingState,itemId:string){
   return state.rawMaterials.find(m=>m.id===itemId)?.standardCost??state.products.find(p=>p.id===itemId)?.standardCost??0
 }
+
+/**
+ * Value of one unit of an item at the moment it is issued (UZS per stock unit): a purchased lot at its PO line
+ * price, a produced lot at its order's frozen actual unit cost, anything else at the item's standard cost then.
+ */
+export function issueUnitCost(state:ManufacturingState,itemId:string,lot?:string){
+  const origin=lot?lotOrigin(state,lot,itemId):undefined
+  if(origin?.sourceType==='purchase'){
+    const price=state.purchaseOrders.find(p=>p.id===origin.sourceId)?.items.find(i=>i.materialId===itemId)?.price
+    if(price!==undefined&&price>0)return price
+  }
+  if(origin?.sourceType==='production'){
+    const mo=state.productionOrders.find(o=>o.id===origin.sourceId)
+    if(mo?.costSnapshot&&mo.completed>0)return mo.costSnapshot.actual.total/mo.completed
+  }
+  return componentCost(state,itemId)
+}
+
+/** Value of consumption rows: the cost frozen at issue, else (older rows) today's standard cost. */
+export const consumptionValue=(state:ManufacturingState,rows:MaterialConsumption[])=>rows.reduce((a,c)=>a+c.qty*(c.unitCost??componentCost(state,c.materialId)),0)
+
+const machineRateOf=(state:ManufacturingState,workCenterId:string)=>state.workCenters.find(c=>c.id===workCenterId)?.costPerHour??state.settings?.policies?.machineRatePerHour??0
+const energyRateOf=(state:ManufacturingState,workCenterId:string)=>state.workCenters.find(c=>c.id===workCenterId)?.energyCostPerHour??0
+export {machineRateOf,energyRateOf}
 
 /**
  * Planned hourly wage of an operation: the production staff of its work center, else all production staff,
@@ -510,14 +680,15 @@ function plannedWage(state:ManufacturingState,workCenterId:string){
 export function estimateOrderCost(state:ManufacturingState,order:Pick<ProductionOrder,'bomSnapshot'|'quantity'>):CostBreakdown{
   const policies=state.settings?.policies
   const material=order.bomSnapshot.components.reduce((a,c)=>a+perUnit(c)*order.quantity*componentCost(state,c.materialId),0)
-  let labor=0,machine=0
+  let labor=0,machine=0,energy=0
   for(const op of order.bomSnapshot.operations){
     const minutes=op.setupMin+op.runMin*order.quantity
     labor+=minutes/60*plannedWage(state,op.workCenterId)*Math.max(1,op.employeeCount)
-    machine+=minutes/60*(state.workCenters.find(w=>w.id===op.workCenterId)?.costPerHour??policies?.machineRatePerHour??0)
+    machine+=minutes/60*machineRateOf(state,op.workCenterId)
+    energy+=minutes/60*energyRateOf(state,op.workCenterId)
   }
-  const overhead=(material+labor+machine)*(policies?.overheadRate??0)/100
-  return {material,labor,machine,overhead,total:material+labor+machine+overhead}
+  const overhead=(material+labor+machine+energy)*(policies?.overheadRate??0)/100
+  return {material,labor,machine,energy,overhead,total:material+labor+machine+energy+overhead}
 }
 
 /** Standard cost roll-up: children first (by BOM level) so sub-assembly costs flow into parents. */
@@ -534,21 +705,40 @@ export function rollUpStandardCosts(state:ManufacturingState,referenceQty=100):M
   return next
 }
 
-/** Actual cost from what really happened: consumed materials, logged labor and machine minutes. */
+/**
+ * Actual cost from what really happened: consumed materials at their value when issued, logged labor at the wage
+ * frozen when each interval started, machine and energy at the rates frozen when each operation first started.
+ * Older records without frozen values fall back to today's rates (see `costInputGaps`).
+ */
 export function actualOrderCost(state:ManufacturingState,order:ProductionOrder):CostBreakdown{
   const policies=state.settings?.policies
-  const material=order.consumed.reduce((a,c)=>a+c.qty*componentCost(state,c.materialId),0)
-  const labor=state.timeLogs.filter(t=>t.orderId===order.id).reduce((a,t)=>a+t.minutes/60*(state.employees.find(e=>e.id===t.employeeId)?.hourlyCost??0),0)
-  const machine=order.workOrders.reduce((a,w)=>a+w.actualMin/60*(state.workCenters.find(c=>c.id===w.workCenterId)?.costPerHour??policies?.machineRatePerHour??0),0)
-  const overhead=(material+labor+machine)*(policies?.overheadRate??0)/100
-  return {material,labor,machine,overhead,total:material+labor+machine+overhead}
+  const material=consumptionValue(state,order.consumed)
+  const labor=state.timeLogs.filter(t=>t.orderId===order.id).reduce((a,t)=>a+t.minutes/60*(t.hourlyRate??state.employees.find(e=>e.id===t.employeeId)?.hourlyCost??0),0)
+  const machine=order.workOrders.reduce((a,w)=>a+w.actualMin/60*(w.machineRate??machineRateOf(state,w.workCenterId)),0)
+  const energy=order.workOrders.reduce((a,w)=>a+w.actualMin/60*(w.energyRate??energyRateOf(state,w.workCenterId)),0)
+  const overhead=(material+labor+machine+energy)*(policies?.overheadRate??0)/100
+  return {material,labor,machine,energy,overhead,total:material+labor+machine+energy+overhead}
+}
+
+/** Inputs an actual cost could not take from the order's own records — the figure is then partly estimated. */
+export function costInputGaps(state:ManufacturingState,order:ProductionOrder){
+  const gaps:string[]=[]
+  const unpriced=order.consumed.filter(c=>c.unitCost===undefined).length
+  if(unpriced)gaps.push(`Material: ${unpriced} ta chiqim bugungi standart narxda baholandi`)
+  const logs=state.timeLogs.filter(t=>t.orderId===order.id&&t.minutes>0)
+  if(logs.some(t=>t.hourlyRate===undefined))gaps.push('Mehnat: eski vaqt yozuvlari bugungi stavkada')
+  if(logs.some(t=>!(t.hourlyRate??state.employees.find(e=>e.id===t.employeeId)?.hourlyCost)))gaps.push('Mehnat: soatlik stavkasi kiritilmagan xodim bor')
+  const ran=order.workOrders.filter(w=>w.actualMin>0)
+  if(ran.some(w=>w.machineRate===undefined))gaps.push('Uskuna: bugungi soatlik stavkada')
+  if(ran.some(w=>!(w.energyRate??energyRateOf(state,w.workCenterId))))gaps.push('Energiya: work center tarifi kiritilmagan')
+  return gaps
 }
 
 export function orderCosting(state:ManufacturingState,order:ProductionOrder){
   // A completed order reports the cost frozen at completion; price changes afterwards do not rewrite it (BUG-08).
   const frozen=order.status==='Yakunlangan'?order.costSnapshot:undefined
-  const planned=frozen?.planned??estimateOrderCost(state,order)
-  const actual=frozen?.actual??actualOrderCost(state,order)
+  const planned:CostBreakdown=frozen?{...frozen.planned,energy:frozen.planned.energy??0}:estimateOrderCost(state,order)
+  const actual:CostBreakdown=frozen?{...frozen.actual,energy:frozen.actual.energy??0}:actualOrderCost(state,order)
   const produced=order.completed+order.scrap
   // Planned cost scaled to what has actually been produced so far gives a fair variance mid-run.
   const progressShare=order.quantity?Math.min(1,produced/order.quantity):0
@@ -557,7 +747,14 @@ export function orderCosting(state:ManufacturingState,order:ProductionOrder){
   const unitCost=order.completed>0?actual.total/order.completed:planned.total/Math.max(1,order.quantity)
   // Share of actual cost absorbed by scrapped units (already inside actual.total — shown, not added).
   const waste=produced>0?actual.total*order.scrap/produced:0
-  return {planned,actual,earned,variance,variancePct:earned?round(variance/earned*100):0,unitCost,waste}
+  // WIP: cost incurred minus what good output already took to finished stock at the planned unit cost (a closed order holds none).
+  const open=isOpenOrder(order)
+  const relieved=open?Math.min(actual.total,planned.total/Math.max(1,order.quantity)*order.completed):order.status==='Yakunlangan'?actual.total:0
+  const wip=open?Math.max(0,actual.total-relieved):0
+  // Rework is costed on the rework orders themselves; it is shown here, never added to this order's total.
+  const rework=state.productionOrders.filter(r=>r.reworkOf===order.id&&!isReturnRework(state,r)).reduce((a,r)=>a+(r.status==='Yakunlangan'&&r.costSnapshot?r.costSnapshot.actual.total:actualOrderCost(state,r).total),0)
+  return {planned,actual,earned,variance,variancePct:earned?round(variance/earned*100):0,unitCost,waste,wip,relieved,rework,
+    fullUnitCost:order.completed>0?(actual.total+rework)/order.completed:unitCost,incomplete:costInputGaps(state,order)}
 }
 
 /* ------------------------------------------------------- Traceability -- */
@@ -569,14 +766,21 @@ export function lotRemaining(lot:LotRecord){
 export function buildTraceability(state:ManufacturingState,orderId:string){
   const order=state.productionOrders.find(o=>o.id===orderId)
   if(!order)return {order:undefined,upstreamLots:[] as LotRecord[],qualityChecks:[] as ManufacturingState['qualityChecks'],movements:[] as ManufacturingState['stockMovements'],downstreamSales:[] as ManufacturingState['salesOrders'],outputLots:[] as LotRecord[],purchases:[] as ManufacturingState['purchaseOrders']}
-  const consumedLots=new Set(order.consumed.map(c=>c.lot).filter(Boolean) as string[])
-  const upstreamLots=state.lots.filter(l=>consumedLots.has(l.code)||l.consumedBy.includes(order.code))
-  const outputLots=state.lots.filter(l=>l.sourceType==='production'&&l.sourceId===order.id)
+  // Each consumed (material, lot) pair resolves to the record it was taken from, else to the lot's origin — never
+  // to a same-named lot of another item or to every transferred copy (P1-29).
+  const upstream=new Map<string,LotRecord>()
+  for(const c of order.consumed){
+    if(!c.lot)continue
+    const taken=state.lots.filter(l=>l.code===c.lot&&l.itemId===c.materialId&&l.consumedBy.includes(order.code))
+    for(const l of taken.length?taken:[lotOrigin(state,c.lot,c.materialId)].filter((x):x is LotRecord=>Boolean(x)))upstream.set(l.id,l)
+  }
+  const upstreamLots=[...upstream.values()]
+  const outputLots=state.lots.filter(l=>l.sourceType==='production'&&l.sourceId===order.id&&l.itemId===order.productId)
   const outputCodes=new Set(outputLots.map(l=>l.code))
   const qualityChecks=state.qualityChecks.filter(q=>q.sourceType==='production'&&q.sourceId===order.id)
   const movements=state.stockMovements.filter(m=>m.source===order.code||m.source===order.id)
-  const salesCodes=new Set(state.stockMovements.filter(m=>m.type==='Sale -'&&m.lot&&outputCodes.has(m.lot)).map(m=>m.source))
-  const downstreamSales=state.salesOrders.filter(s=>s.productionOrderId===order.id||salesCodes.has(s.code))
+  const salesCodes=new Set(state.stockMovements.filter(m=>m.type==='Sale -'&&m.itemId===order.productId&&m.lot&&outputCodes.has(m.lot)).map(m=>m.source))
+  const downstreamSales=state.salesOrders.filter(s=>s.productionOrderId===order.id||s.productionOrderIds?.includes(order.id)||salesCodes.has(s.code))
   const purchaseIds=new Set(upstreamLots.filter(l=>l.sourceType==='purchase').map(l=>l.sourceId))
   const purchases=state.purchaseOrders.filter(p=>purchaseIds.has(p.id))
   return {order,upstreamLots,qualityChecks,movements,downstreamSales,outputLots,purchases}
@@ -588,12 +792,70 @@ export function findTraceOrder(state:ManufacturingState,query:string){
   if(!q)return undefined
   const byCode=state.productionOrders.find(o=>o.code.toLowerCase()===q||o.lot?.toLowerCase()===q)
   if(byCode)return byCode
-  const lot=state.lots.find(l=>l.code.toLowerCase()===q||serialInRange(l,q))
+  const match=state.lots.find(l=>l.code.toLowerCase()===q||serialInRange(l,q))
+  const lot=match&&(lotOrigin(state,match.code,match.itemId)||match)
   if(lot?.sourceType==='production')return state.productionOrders.find(o=>o.id===lot.sourceId)
-  if(lot)return state.productionOrders.find(o=>o.consumed.some(c=>c.lot===lot.code))
+  // A material lot feeds several orders: the latest one that really consumed this item's lot is shown (P1-29).
+  if(lot)return state.productionOrders.filter(o=>o.consumed.some(c=>c.lot===lot.code&&c.materialId===lot.itemId)).sort((a,b)=>b.createdAt.localeCompare(a.createdAt)||b.code.localeCompare(a.code))[0]
   const product=state.products.find(p=>p.sku.toLowerCase()===q||p.name.toLowerCase().includes(q))
   if(product)return [...state.productionOrders].filter(o=>o.productId===product.id).sort((a,b)=>b.createdAt.localeCompare(a.createdAt))[0]
   return state.productionOrders.find(o=>o.code.toLowerCase().includes(q))
+}
+
+/**
+ * The record that tells where a lot came from. A transfer copies a lot into another warehouse under the same code;
+ * copies written before transfers kept the origin are marked "adjustment", so the production / purchase /
+ * return record is preferred and the oldest record decides among equals.
+ */
+export function lotOrigin(state:ManufacturingState,code:string,itemId?:string):LotRecord|undefined{
+  const rows=state.lots.filter(l=>l.code===code&&(!itemId||l.itemId===itemId))
+  const rank=(l:LotRecord)=>l.sourceType==='adjustment'&&!l.sourceId.startsWith('opening')?1:0
+  return [...rows].sort((a,b)=>rank(a)-rank(b)||a.createdAt.localeCompare(b.createdAt))[0]
+}
+
+/**
+ * Where returned units of one sales-order line come from (P1-26/29): the order's own "Sale −" movements of that
+ * product, grouped by warehouse and lot in shipping order, minus what earlier returns of the line already took back.
+ * Returns the allocations for `qty`, the warehouse that shipped most of them, and any part no shipment explains.
+ */
+export function returnSources(state:ManufacturingState,so:Pick<SalesOrder,'id'|'code'>,productId:string,qty:number,excludeReturnId?:string){
+  const shipped=new Map<string,{warehouseId:string;lot?:string;qty:number}>()
+  // The ledger is newest first; walking it backwards gives shipping order.
+  for(const m of [...state.stockMovements].reverse()){
+    if(m.type!=='Sale -'||m.source!==so.code||m.itemId!==productId)continue
+    const key=`${m.warehouseId}|${m.lot||''}`
+    const row=shipped.get(key)||{warehouseId:m.warehouseId,lot:m.lot,qty:0}
+    row.qty=q3(row.qty-m.qty);shipped.set(key,row)
+  }
+  const rows=[...shipped.values()]
+  for(const r of state.returns.filter(x=>x.salesOrderId===so.id&&x.productId===productId&&x.id!==excludeReturnId)){
+    const taken=r.allocations?.length?r.allocations.map(a=>({lot:a.lot,qty:a.qty,warehouseId:r.warehouseId})):[{lot:r.lot,qty:r.qty,warehouseId:r.warehouseId}]
+    for(const a of taken){
+      let left=a.qty
+      for(const row of rows.filter(x=>(x.lot||'')===(a.lot||'')&&(!a.warehouseId||x.warehouseId===a.warehouseId)).concat(rows)){
+        if(left<=1e-9)break
+        const take=Math.min(left,row.qty);row.qty=q3(row.qty-take);left=q3(left-take)
+      }
+    }
+  }
+  let left=Math.max(0,qty)
+  const allocations:{lot?:string;qty:number}[]=[],byWarehouse=new Map<string,number>()
+  for(const row of rows){
+    if(left<=1e-9)break
+    const take=q3(Math.min(left,row.qty))
+    if(take<=0)continue
+    const same=allocations.find(a=>(a.lot||'')===(row.lot||''))
+    if(same)same.qty=q3(same.qty+take);else allocations.push({lot:row.lot,qty:take})
+    byWarehouse.set(row.warehouseId,(byWarehouse.get(row.warehouseId)||0)+take)
+    left=q3(left-take)
+  }
+  const warehouseId=[...byWarehouse].sort((a,b)=>b[1]-a[1])[0]?.[0]
+  return {allocations,warehouseId,unexplained:left}
+}
+
+/** The finished-goods balance an unbuild takes from: the warehouse with the most available units of the product. */
+export function unbuildSource(state:ManufacturingState,productId:string){
+  return state.stockBalances.filter(b=>b.itemId===productId&&availableQuantity(b)>0).sort((a,b)=>availableQuantity(b)-availableQuantity(a))[0]
 }
 
 export function serialInRange(lot:LotRecord,query:string){
@@ -684,10 +946,10 @@ export function materialPegging(state:ManufacturingState,today=todayISO()){
     }
     return p
   }
-  type Open={line:MaterialPlanLine;order:ProductionOrder;rest:number;pool:{available:number;supply:IncomingSupply[]}}
+  type Open={line:MaterialPlanLine;order:ProductionOrder;rest:number;supply:IncomingSupply[]}
   const pending:Open[]=[]
   const take=(o:Open,eligible:(s:IncomingSupply)=>boolean)=>{
-    for(const s of o.pool.supply){
+    for(const s of o.supply){
       if(o.rest<=1e-9)break
       if(s.qty<=1e-9||!eligible(s))continue
       const qty=Math.min(o.rest,s.qty)
@@ -700,18 +962,19 @@ export function materialPegging(state:ManufacturingState,today=todayISO()){
   for(const order of orders){
     plan.set(order.id,orderRequirements(order,remainingQty(order)).map(({component,required}):MaterialPlanLine=>{
       const materialId=component.materialId,raw=!isProductItem(state,materialId)
-      const warehouseId=componentSourceWarehouse(state,order,materialId)
+      // Every store of the branch that may supply the order counts; other branches' stock needs a transfer.
+      const sources=componentSourceWarehouses(state,order,materialId),warehouseId=sources[0]||''
       const stockUnit=itemUnit(state,materialId),unitMismatch=Boolean(component.unit)&&component.unit!==stockUnit
-      const elsewhere=q3(state.stockBalances.filter(b=>b.itemId===materialId&&b.warehouseId!==warehouseId).reduce((a,b)=>a+Math.max(0,b.onHand-b.reserved-(b.quarantine||0)),0))
+      const elsewhere=q3(state.stockBalances.filter(b=>b.itemId===materialId&&!sources.includes(b.warehouseId)).reduce((a,b)=>a+Math.max(0,b.onHand-b.reserved-(b.quarantine||0)),0))
       const base={component,materialId,unit:component.unit,stockUnit,unitMismatch,purchasable:raw&&!unitMismatch,warehouseId,required:q3(required),reserved:order.materialReserved,supply:[],lateForDue:false,afterStart:false,overduePo:false,elsewhere}
       if(order.materialReserved)return {...base,covered:q3(required),incoming:0,shortage:0,toBuy:0}
       // Quantities in different units are never added: a mismatched BOM line stays uncovered until it is fixed.
       if(unitMismatch)return {...base,covered:0,incoming:0,shortage:q3(required),toBuy:q3(required)}
-      const p=pool(materialId,warehouseId,raw)
-      const covered=Math.min(required,p.available)
-      p.available-=covered
+      const pools=sources.map(w=>pool(materialId,w,raw))
+      let covered=0
+      for(const p of pools){const t=Math.min(required-covered,p.available);p.available-=t;covered+=t}
       const line:MaterialPlanLine={...base,covered:q3(covered),incoming:0,shortage:q3(required-covered),toBuy:0}
-      const open={line,order,rest:required-covered,pool:p}
+      const open={line,order,rest:required-covered,supply:pools.flatMap(p=>p.supply).sort((a,b)=>a.expectedDate.localeCompare(b.expectedDate)||a.code.localeCompare(b.code))}
       // Pass 1: POs raised for this order, then POs raised for no order in particular.
       take(open,s=>s.forOrders.includes(order.id))
       take(open,s=>!s.forOrders.length)

@@ -1,8 +1,9 @@
 import {useState} from 'react'
 import {useApp} from '../../../app/providers/AppProvider/AppContext'
-import {Confirm,Drawer,Empty,Field,Icon,InfoGrid,Input,Modal,Progress,SectionTitle,Select,StatusBadge,Tabs,Textarea,positive,useForm} from '../../../shared/ui'
+import {Checkbox,Confirm,Drawer,Empty,Field,Icon,InfoGrid,Input,Modal,Progress,SectionTitle,Select,StatusBadge,Tabs,Textarea,positive,useForm} from '../../../shared/ui'
 import type {ProductionOrder,ProductionStatus,WorkOrder} from '../../../types'
-import {activeBomFor,buildTraceability,deliveryRisk,materialReadiness,orderCosting,orderMaterialPlan,remainingQty,stockOf,workOrderRemainingMinutes} from '../../../domain/manufacturingEngine'
+import {activeBomFor,buildTraceability,deliveryRisk,finalWorkOrder,jobCard,materialReadiness,operationInput,orderCosting,orderMaterialPlan,remainingQty,stockOf,workOrderRemainingMinutes} from '../../../domain/manufacturingEngine'
+import {operatorScopeBlocker} from '../../../domain/access'
 import {compactMoney,money,num,qty} from '../../../utils/format'
 import {formatMinutes,minutesBetween,stamp,todayISO} from '../../../utils/dates'
 import {employeeName,itemUnitOf,lineName,materialName,productName,useNow,warehouseName,workCenterName} from '../../common/lookups'
@@ -33,13 +34,15 @@ export function OrderFormModal({order,onClose,defaults}:{order?:ProductionOrder;
     return {productId:!v.productId?'Mahsulot tanlang':!editing&&!bom?'Bu mahsulotda faol BOM yo‘q':undefined,quantity:positive(v.quantity,'Miqdor')||(Number(v.quantity)%1?'Butun son kiriting':undefined),due:v.due&&v.due<v.start?'Due sana boshlanishdan oldin bo‘lmasin':undefined}
   })
   const product=s.products.find(p=>p.id===form.values.productId)
-  const bom=editing?order!.bomSnapshot:activeBomFor(s,form.values.productId)
+  const [variantId,setVariantId]=useState(order?.variantId||'')
+  const variants=(product?.variants||[]).filter(v=>v.status==='Faol'||v.id===variantId)
+  const bom=editing?order!.bomSnapshot:activeBomFor(s,form.values.productId,variantId||undefined)
   const qtyNum=Number(form.values.quantity)||0
   const requirements=bom?bom.components.map(c=>({c,need:c.qty*(1+c.waste/100)*qtyNum,available:stockOf(s,c.materialId).available})):[]
   const submit=()=>form.submit(v=>{
     const r=editing
       ?app.updateProductionOrder(order!.id,{quantity:qtyLocked?undefined:Number(v.quantity),start:v.start,due:v.due||undefined,priority:v.priority as ProductionOrder['priority'],lineId:v.lineId,responsibleId:v.responsibleId})
-      :app.createProductionOrder({productId:v.productId,quantity:Number(v.quantity),lineId:v.lineId,start:v.start,due:v.due||undefined,priority:v.priority as ProductionOrder['priority'],responsibleId:v.responsibleId})
+      :app.createProductionOrder({productId:v.productId,variantId:variantId||undefined,quantity:Number(v.quantity),lineId:v.lineId,start:v.start,due:v.due||undefined,priority:v.priority as ProductionOrder['priority'],responsibleId:v.responsibleId})
     if(r.ok)onClose()
     return r.ok
   })
@@ -47,7 +50,8 @@ export function OrderFormModal({order,onClose,defaults}:{order?:ProductionOrder;
     footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Bekor qilish</button><button type="button" className="primary-glass-btn" onClick={submit}><Icon name="check" size={16}/>{editing?'Saqlash':'Yaratish'}</button></>}>
     <div className="form-grid">
       <div className="form-group-title">Asosiy</div>
-      <Field label="Mahsulot" required error={form.error('productId')}><Select value={form.values.productId} disabled={editing} onChange={v=>form.set('productId',v)}>{products.map(p=><option key={p.id} value={p.id}>{p.name} · {p.sku}</option>)}</Select></Field>
+      {variants.length>0&&<Field label="Variant" hint={variantId&&bom?.variantId===variantId?'Variantning o‘z BOM’i':'Variantda o‘z BOM bo‘lmasa umumiy BOM ishlatiladi'}><Select value={variantId} disabled={editing} onChange={setVariantId}><option value="">Umumiy (variantsiz)</option>{variants.map(v=><option key={v.id} value={v.id}>{v.code} · {v.attributes}</option>)}</Select></Field>}
+      <Field label="Mahsulot" required error={form.error('productId')}><Select value={form.values.productId} disabled={editing} onChange={v=>{form.set('productId',v);setVariantId('')}}>{products.map(p=><option key={p.id} value={p.id}>{p.name} · {p.sku}</option>)}</Select></Field>
       <Field label="Miqdor" required error={form.error('quantity')} hint={qtyLocked?'Rezervdan keyin miqdor o‘zgarmaydi':product?.unit}><Input type="number" inputMode="numeric" min="1" step="1" disabled={qtyLocked} {...form.input('quantity')}/></Field>
       <Field label="Due" error={form.error('due')} hint={!form.values.due?`Bo‘sh: +${product?.leadTime??1} kun`:undefined}><Input type="date" {...form.input('due')}/></Field>
       <Field label="Priority"><Select value={form.values.priority} onChange={v=>form.set('priority',v as ProductionOrder['priority'])}>{PRIORITIES.map(p=><option key={p} value={p}>{p}</option>)}</Select></Field>
@@ -121,6 +125,51 @@ export function ExtraIssueModal({order,onClose}:{order:ProductionOrder;onClose:(
 
 /* ------------------------------------------------------------ work orders -- */
 
+/**
+ * Job-card report of one operation: good and scrap up to what reached it. More needs a written reason; the final
+ * operation's report is the order's output (finished stock), an earlier operation's scrap is booked on the order.
+ */
+export function OperationOutputModal({order,workOrder,onClose}:{order:ProductionOrder;workOrder:WorkOrder;onClose:()=>void}){
+  const app=useApp(),unit=itemUnitOf(app.state,order.productId)
+  const input=operationInput(order,workOrder),done=(workOrder.goodQty||0)+(workOrder.scrapQty||0),allowed=Math.max(0,input-done)
+  const final=finalWorkOrder(order)?.id===workOrder.id
+  // One key per opened form: a double submit is posted once.
+  const [key]=useState(()=>`op-${workOrder.id}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,7)}`)
+  const form=useForm({good:'',scrap:'0',reason:'Operator xatosi',override:''},v=>{
+    const g=Number(v.good)||0,sc=Number(v.scrap)||0
+    return {good:g<0||sc<0?'Manfiy bo‘lmasin':g+sc<=0?'Tayyor yoki scrap miqdorini kiriting':(g%1||sc%1)?'Butun son kiriting':done+g+sc>order.quantity?`Buyurtma miqdori ${order.quantity} dan oshmasin`:undefined,
+      override:g+sc>allowed&&v.override.trim().length<3?`Ruxsat ${allowed} ${unit} — ortig‘i uchun sabab yozing`:undefined}
+  })
+  const over=(Number(form.values.good)||0)+(Number(form.values.scrap)||0)>allowed
+  const submit=()=>form.submit(v=>{const r=app.reportOperationOutput(order.id,workOrder.id,Number(v.good)||0,Number(v.scrap)||0,{reason:v.reason,override:v.override,key});if(r.ok)onClose();return r.ok})
+  return <Modal open onClose={onClose} title="Operatsiya natijasi" eyebrow={`${order.code} · ${workOrder.sequence}. ${workOrder.name}`} subtitle={`Kirdi ${input} · qayd etilgan ${done} · ruxsat ${allowed} ${unit}${final?' · oxirgi operatsiya: tayyor mahsulot omborga (backflush)':''}`} size="sm"
+    footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Bekor qilish</button><button type="button" className="primary-glass-btn" onClick={submit}><Icon name="check" size={16}/>Qayd etish</button></>}>
+    <div className="form-grid">
+      <Field label="Tayyor (yaroqli)" required error={form.error('good')} hint={`Ruxsat: ${allowed} ${unit}`}><Input type="number" inputMode="numeric" min="0" step="1" placeholder={String(allowed)} {...form.input('good')} autoFocus/></Field>
+      <Field label="Scrap"><Input type="number" inputMode="numeric" min="0" step="1" {...form.input('scrap')}/></Field>
+      {Number(form.values.scrap)>0&&<Field className="span-2" label="Scrap sababi"><Select value={form.values.reason} onChange={v=>form.set('reason',v)}>{['Material nuqsoni','Operator xatosi','Uskuna xatosi','O‘lcham mos emas','Qoplama nuqsoni','Boshqa'].map(x=><option key={x} value={x}>{x}</option>)}</Select></Field>}
+      {over&&<Field className="span-2" label="Ortiqcha miqdor sababi" required error={form.error('override')} hint="Audit jurnaliga yoziladi"><Textarea {...form.input('override')} placeholder="Masalan: oldingi operatsiya natijasi kam yozilgan"/></Field>}
+    </div>
+    {!final&&Number(form.values.scrap)>0&&<div className="inline-note warning"><Icon name="info"/>Scrap darhol MO’ga yoziladi: material sarflanadi, NCR ochiladi.</div>}
+  </Modal>
+}
+
+/** People who may run this operation (active, production right, inside their scope) — the engine re-checks on save. */
+export function AssignOperatorsModal({order,workOrder,onClose}:{order:ProductionOrder;workOrder:WorkOrder;onClose:()=>void}){
+  const app=useApp(),s=app.state
+  const [picked,setPicked]=useState<string[]>(workOrder.operatorIds||[])
+  const people=s.employees.filter(e=>e.status!=='Arxiv').map(e=>({e,blocked:operatorScopeBlocker(s,e,workOrder.workCenterId)}))
+  const eligible=people.filter(p=>!p.blocked)
+  const save=()=>{const r=app.assignWorkOrder(order.id,workOrder.id,picked);if(r.ok)onClose()}
+  return <Modal open onClose={onClose} title="Operator biriktirish" eyebrow={`${order.code} · ${workOrder.name}`} subtitle={`${workCenterName(s,workOrder.workCenterId)} · faqat shu ish markazida ishlay oladigan xodimlar`} size="sm"
+    footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Bekor qilish</button><button type="button" className="primary-glass-btn" onClick={save}><Icon name="check" size={16}/>Saqlash</button></>}>
+    {eligible.length?<div className="stack-list">{eligible.map(({e})=><div className="list-row" key={e.id}><Checkbox checked={picked.includes(e.id)} onChange={v=>setPicked(x=>v?[...x,e.id]:x.filter(i=>i!==e.id))} label={e.name} description={`${e.department} · ${workCenterName(s,e.workCenterId)} · ${e.shift}`}/></div>)}</div>:<Empty compact icon="users" title="Mos operator yo‘q" text="Rol ruxsati yoki ish markazi doirasi mos kelmaydi"/>}
+    {people.length>eligible.length&&<p className="soft-meta">{people.length-eligible.length} ta xodim doirasi yoki roli sabab ko‘rsatilmadi</p>}
+  </Modal>
+}
+
+const EVENT_LABEL:Record<string,string>={start:'Boshlandi',resume:'Davom ettirildi',pause:'Pauza',setup:'Setup tugadi',complete:'Yakunlandi',output:'Natija',assign:'Operator',cancel:'Bekor',split:'Split'}
+
 function CompleteOrderModal({order,onClose,onOutput}:{order:ProductionOrder;onClose:()=>void;onOutput:()=>void}){
   const app=useApp(),rest=remainingQty(order),unit=itemUnitOf(app.state,order.productId)
   return <Modal open onClose={onClose} title="Buyurtmani yakunlash" eyebrow={order.code} subtitle={`Qolgan ${num(rest)} ${unit} avtomatik ishlab chiqarilmaydi`} size="md">
@@ -134,27 +183,38 @@ function CompleteOrderModal({order,onClose,onOutput}:{order:ProductionOrder;onCl
 }
 
 export function WorkOrderList({order,compact}:{order:ProductionOrder;compact?:boolean}){
-  const app=useApp(),now=useNow(15000)
+  const app=useApp(),s=app.state,now=useNow(15000)
+  const [modal,setModal]=useState<{kind:'output'|'assign';wo:WorkOrder}|null>(null)
   const canRun=['Tasdiqlangan','Jarayonda','Pauzada'].includes(order.status)&&app.can('production','edit')
+  const canPlan=app.can('production','edit')&&!['Yakunlangan','Bekor qilingan'].includes(order.status)
   if(!order.workOrders.length)return <Empty compact icon="clock" title="Routing yo‘q"/>
-  return <ol className={`work-orders ${compact?'compact':''}`}>{order.workOrders.map(w=>{
-    const op=order.bomSnapshot.operations.find(o=>o.id===w.operationId)
-    const minutes=liveMinutes(w,now)
+  return <><ol className={`work-orders ${compact?'compact':''}`}>{order.workOrders.map(w=>{
+    const card=jobCard(s,order,w,now)
     const blocked=w.status==='Kutilmoqda'&&w.dependsOn.length>0
+    const open=w.status!=='Yakunlangan'&&w.status!=='Bekor qilingan'
+    const started=w.status==='Jarayonda'||w.status==='Pauzada'
     return <li key={w.id} className={`wo wo-${w.status==='Jarayonda'?'running':w.status==='Yakunlangan'?'done':w.status==='Pauzada'?'paused':'idle'}`}>
       <span className="wo-seq">{w.status==='Yakunlangan'?<Icon name="check" size={14}/>:w.sequence}</span>
       <div className="wo-body">
         <div className="wo-title"><b>{w.name}</b><StatusBadge>{w.status}</StatusBadge></div>
-        <small>{workCenterName(app.state,w.workCenterId)} · reja {formatMinutes(w.plannedMin)} · amalda <span className="num">{formatMinutes(minutes)}</span>{w.status!=='Yakunlangan'&&` · qolgan ~${formatMinutes(workOrderRemainingMinutes(order,w))}`}</small>
-        {!compact&&op?.instructions&&<p>{op.instructions}{op.worksheet&&<em> · {op.worksheet}</em>}</p>}
+        <small>{workCenterName(s,w.workCenterId)} · reja {formatMinutes(w.plannedMin)} · amalda <span className="num">{formatMinutes(card.actualMin)}</span>{card.setupMin?` (setup ${formatMinutes(card.setupMin)})`:''}{card.pausedMin?` · pauza ${formatMinutes(card.pausedMin)}`:''}{open&&` · qolgan ~${formatMinutes(workOrderRemainingMinutes(order,w))}`}</small>
+        {(card.tracksQty||started)&&<small>Kirdi {num(card.plannedQty)} · tayyor <b>{num(card.goodQty)}</b>{card.scrapQty?<> · <span className="negative">scrap {num(card.scrapQty)}</span></>:null} · ochiq {num(card.openQty)}</small>}
+        {card.operators.length>0&&<small>Operator: {card.operators.map(id=>employeeName(s,id)).join(', ')}</small>}
+        {!compact&&card.instructions&&<p>{card.instructions}{card.worksheet&&<em> · {card.worksheet}</em>}</p>}
         {blocked&&<small className="wo-blocked"><Icon name="lock" size={12}/>Kutmoqda: {order.workOrders.filter(x=>w.dependsOn.includes(x.operationId)).map(x=>x.name).join(', ')}</small>}
+        {!compact&&card.history.length>0&&<details className="wo-history"><summary>Tarix · {card.history.length}</summary><ul>{card.history.slice(-8).reverse().map((e,i)=><li key={i}><small>{e.at} · {EVENT_LABEL[e.action]||e.action}{e.minutes?` · ${formatMinutes(e.minutes)}`:''}{e.good!==undefined?` · ${e.good} tayyor`:''}{e.scrap?` · ${e.scrap} scrap`:''}{e.note?` · ${e.note}`:''} · {employeeName(s,e.by)}</small></li>)}</ul></details>}
       </div>
-      {canRun&&w.status!=='Yakunlangan'&&<div className="wo-actions">
-        {w.status==='Jarayonda'
+      {(canRun&&open||canPlan&&open&&!compact)&&<div className="wo-actions">
+        {canRun&&open&&(w.status==='Jarayonda'
           ?<><button type="button" className="secondary-glass-btn compact" onClick={()=>app.pauseWorkOrder(order.id,w.id)}><Icon name="pause" size={14}/>Pauza</button><button type="button" className="primary-glass-btn compact" onClick={()=>app.finishWorkOrder(order.id,w.id)}><Icon name="check" size={14}/>Tugatish</button></>
-          :<button type="button" className="primary-glass-btn compact" disabled={blocked} title={blocked?'Oldingi operatsiya tugamagan':undefined} onClick={()=>app.startWorkOrder(order.id,w.id)}><Icon name="play" size={14}/>{w.status==='Pauzada'?'Davom ettirish':'Boshlash'}</button>}
+          :<button type="button" className="primary-glass-btn compact" disabled={blocked} title={blocked?'Oldingi operatsiya tugamagan':undefined} onClick={()=>app.startWorkOrder(order.id,w.id)}><Icon name="play" size={14}/>{w.status==='Pauzada'?'Davom ettirish':'Boshlash'}</button>)}
+        {canRun&&started&&!compact&&<button type="button" className="secondary-glass-btn compact" onClick={()=>setModal({kind:'output',wo:w})}><Icon name="plus" size={14}/>Natija</button>}
+        {canPlan&&!compact&&<button type="button" className="ghost-btn compact" onClick={()=>setModal({kind:'assign',wo:w})}><Icon name="users" size={14}/>Operator</button>}
       </div>}
     </li>})}</ol>
+    {modal?.kind==='output'&&<OperationOutputModal order={order} workOrder={modal.wo} onClose={()=>setModal(null)}/>}
+    {modal?.kind==='assign'&&<AssignOperatorsModal order={order} workOrder={modal.wo} onClose={()=>setModal(null)}/>}
+  </>
 }
 
 /* ---------------------------------------------------------------- drawer -- */
@@ -226,12 +286,15 @@ function OrderDrawerBody({order,onClose}:{order:ProductionOrder;onClose:()=>void
     </div>}
     {tab==='costs'&&app.can('costs')&&<div className="cost-grid">
       <table className="fit cost-table"><thead><tr><th>Element</th><th className="align-right">Standart (to‘liq)</th><th className="align-right">Amalda</th></tr></thead><tbody>
-        {(['material','labor','machine','overhead'] as const).map(k=><tr key={k}><td>{{material:'Material',labor:'Mehnat (labor)',machine:'Uskuna vaqti',overhead:'Overhead'}[k]}</td><td className="align-right">{money(costing.planned[k])}</td><td className="align-right">{money(costing.actual[k])}</td></tr>)}
+        {(['material','labor','machine','energy','overhead'] as const).map(k=><tr key={k}><td>{{material:'Material',labor:'Mehnat (labor)',machine:'Uskuna vaqti',energy:'Energiya',overhead:'Overhead'}[k]}</td><td className="align-right">{money(costing.planned[k])}</td><td className="align-right">{money(costing.actual[k])}</td></tr>)}
         <tr><td>Waste (scrap) <span className="soft-meta">· jami ichida</span></td><td className="align-right muted">—</td><td className="align-right">{costing.waste?money(costing.waste):'—'}</td></tr>
         <tr className="total"><td>Jami</td><td className="align-right">{money(costing.planned.total)}</td><td className="align-right">{money(costing.actual.total)}</td></tr>
       </tbody></table>
-      <InfoGrid columns={2} items={[{label:'Earned (bajarilgan)',value:money(costing.earned)},{label:'Variance',value:`${costing.variance>0?'+':''}${compactMoney(costing.variance)} (${costing.variancePct>0?'+':''}${costing.variancePct}%)`,tone:costing.variancePct>5?'danger':costing.variancePct<-2?'success':undefined},{label:'Birlik tannarxi',value:money(costing.unitCost)},{label:'Standart tannarx',value:money(product?.standardCost||0)}]}/>
-      <p className="soft-meta">Material + mehnat + uskuna soati + {s.settings.policies.overheadRate}% overhead</p>
+      <InfoGrid columns={2} items={[{label:'Earned (bajarilgan)',value:money(costing.earned)},{label:'Variance',value:`${costing.variance>0?'+':''}${compactMoney(costing.variance)} (${costing.variancePct>0?'+':''}${costing.variancePct}%)`,tone:costing.variancePct>5?'danger':costing.variancePct<-2?'success':undefined},{label:'Birlik tannarxi',value:money(costing.unitCost)},{label:'Standart tannarx',value:money(product?.standardCost||0)},
+        {label:'WIP (tugallanmagan ish)',value:money(costing.wip)},{label:'Tayyor mahsulotga o‘tgan',value:money(costing.relieved)},
+        costing.rework>0&&{label:'Rework (alohida MO’larda)',value:money(costing.rework)},costing.rework>0&&{label:'Birlik tannarxi + rework',value:money(costing.fullUnitCost)}]}/>
+      <p className="soft-meta">Material (chiqim paytidagi narx) + mehnat (vaqt × stavka) + uskuna va energiya (ishlash soati × stavka) + {s.settings.policies.overheadRate}% overhead · scrap ulushi jami ichida</p>
+      {costing.incomplete.length>0&&<div className="inline-note warning"><Icon name="warning"/><span>Qisman taxminiy: {costing.incomplete.join(' · ')}</span></div>}
     </div>}
     {tab==='trace'&&<div className="two-col">
       <div><SectionTitle title="Upstream (sarflangan lotlar)"/>{trace.upstreamLots.length?<div className="stack-list">{trace.upstreamLots.map(l=><div className="list-row" key={l.id}><span className="list-row-copy"><b>{l.code}</b><small>{materialName(s,l.itemId)} · {l.sourceCode}</small></span><StatusBadge tone="info">{l.sourceType==='purchase'?'Xarid':l.sourceType==='production'?'Ishlab chiqarish':'Boshlang‘ich'}</StatusBadge></div>)}</div>:<Empty compact title="Hali material sarflanmagan"/>}</div>

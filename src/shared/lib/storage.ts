@@ -8,5 +8,13 @@ export const storage = {
   set<T>(key:string,value:T):boolean{ try{ localStorage.setItem(key,JSON.stringify(value)); return true }catch{ return false } },
   /** Writes already serialised text. Returns false when the write failed. */
   setRaw(key:string,text:string):boolean{ try{ localStorage.setItem(key,text); return true }catch{ return false } },
-  remove(key:string){ try{ localStorage.removeItem(key) }catch{} }
+  remove(key:string){ try{ localStorage.removeItem(key) }catch{} },
+  /** Characters held by `key` alone and by the whole origin (backups and archives count against the same quota). */
+  usage(key:string):{key:number;total:number}{
+    try{
+      let total=0
+      for(let i=0;i<localStorage.length;i++){const k=localStorage.key(i)||'';total+=k.length+(localStorage.getItem(k)?.length||0)}
+      return {key:localStorage.getItem(key)?.length||0,total}
+    }catch{ return {key:0,total:0} }
+  }
 }

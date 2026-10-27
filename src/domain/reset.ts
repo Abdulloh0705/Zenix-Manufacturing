@@ -48,9 +48,13 @@ export function clearTransactions(s:ManufacturingState,now=new Date()):Manufactu
   next.boms=boms.map(b=>{
     if(b.status!=='Arxiv'||boms.some(x=>x.productId===b.productId&&x.status==='Faol'))return b
     const latest=boms.filter(x=>x.productId===b.productId&&x.status==='Arxiv').sort((x,y)=>y.revision-x.revision)[0]
-    return latest.id===b.id?{...b,status:'Faol' as const}:b
+    if(latest.id!==b.id)return b
+    const {archivedAt:_a,...active}=b
+    return {...active,status:'Faol' as const}
   })
   next.boms=next.boms.map(b=>b.previousBomId&&!next.boms.some(x=>x.id===b.previousBomId)?{...b,previousBomId:undefined}:b)
+  // Engineering changes are transactions: a revision does not keep pointing at a removed one.
+  next.boms=next.boms.map(b=>{if(!b.ecoId)return b;const {ecoId:_e,...rest}=b;return rest})
   next.products=next.products.map(p=>p.defaultBomId&&!next.boms.some(b=>b.id===p.defaultBomId&&b.status==='Faol')
     ?{...p,defaultBomId:next.boms.find(b=>b.productId===p.id&&b.status==='Faol')?.id??''}:p)
 

@@ -14,7 +14,7 @@
 .table-scroll table{min-width:720px}
 .table-scroll table.fit{min-width:0}
 th,td{padding:var(--row-py) var(--cell-px);text-align:left;vertical-align:middle;border-bottom:1px solid var(--line)}
-th{position:sticky;top:0;z-index:1;height:38px;padding-top:0;padding-bottom:0;background:var(--surface-2);font-size:var(--fs-xs);font-weight:var(--fw-semibold);color:var(--text-3);white-space:nowrap;letter-spacing:0}
+th{position:sticky;top:0;z-index:1;height:var(--th-h);padding-top:0;padding-bottom:0;background:var(--surface-2);font-size:var(--fs-xs);font-weight:var(--fw-semibold);color:var(--text-3);white-space:nowrap;letter-spacing:0}
 .card th{background:transparent;position:static;height:34px}
 .card.flush th{background:var(--surface-2)}
 tbody tr:last-child td{border-bottom:0}
@@ -25,7 +25,7 @@ td b,td strong{font-weight:var(--fw-semibold)}
 .align-right{text-align:right}.align-center{text-align:center}
 td.align-right,th.align-right{font-variant-numeric:tabular-nums}
 th.align-right .th-sort{margin-left:auto}
-.th-sort{display:inline-flex;align-items:center;gap:3px;font:inherit;color:inherit;letter-spacing:inherit;text-transform:inherit;border-radius:var(--r-xs);padding:2px 4px;margin:-2px -4px}
+.th-sort{display:inline-flex;align-items:center;gap:3px;min-height:24px;font:inherit;color:inherit;letter-spacing:inherit;text-transform:inherit;border-radius:var(--r-xs);padding:2px 4px;margin:-2px -4px}
 .th-sort svg{opacity:0;flex:none;transition:opacity .12s ease}
 .th-sort:hover{color:var(--text)}.th-sort:hover svg,th:focus-within .th-sort svg{opacity:.6}
 .th-sort.active{color:var(--accent)}.th-sort.active svg{opacity:1}

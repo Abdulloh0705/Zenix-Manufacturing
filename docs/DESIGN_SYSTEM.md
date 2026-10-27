@@ -32,7 +32,7 @@ Og‘irlik: 500 / 600 / 620 (sarlavha) / 640. “Shrift o‘lchami” sozlamasi 
 
 ## Shakl, zichlik, soya
 - Radius: `--r-sm` 8 · `--r-md` 10 (boshqaruv) · `--r-lg` 14 (karta, jadval) · `--r-xl` 18 (modal).
-- Zichlik (yagona, Density sozlamasi yo‘q): `--control-h` 34px, `--control-h-sm` 28px, jadval qatori ≈ 40px, `--nav-h` 36px, topbar 58px.
+- Zichlik — ikki mustaqil sozlama (Sozlamalar → Ko‘rinish, telefon’da “Ko‘rinish” menyusi): **Interfeys** (`<html data-density>`: compact / standard / comfortable → `--control-h` 32/34/40, `--card-pad`, `--gap`, `--form-gap`, `--nav-h`) va **Jadval** (`data-table-density` → `--row-py` 4/8/13px, `--cell-px`, `--th-h` 32/38/44). Standart = avvalgi yagona zichlik. Shrift (`data-font-size`) alohida; 11px pastki chegara saqlanadi. Sensorli ekranda (`pointer:coarse`) har bir boshqaruv ≥ 36px, hamma joyda ≥ 24px (WCAG 2.5.8).
 - Soya: `--shadow-card` (POS kabi keng va juda yengil), popover/modal uchun `--shadow-lg`. Blur faqat sticky topbar va overlay fonida.
 
 ## Shell
@@ -56,8 +56,8 @@ Og‘irlik: 500 / 600 / 620 (sarlavha) / 640. “Shrift o‘lchami” sozlamasi 
 - **AI**: o‘ng chetdagi grafit tab (faqat Y bo‘yicha suriladi, joyi saqlanadi, ↑/↓ bilan) → sahifa ustidan ochiladigan panel; layout’da joy egallamaydi.
 
 ## Fon muhitlari
-Emerald · Amber · ZENIX Steel (default) · Violet · Crimson · Ocean · Graphite · Minimal — har biri light/dark juftligi.
-Fon faqat sahifaga juda yengil tekis tus va accent beradi; sirtlar neytral qoladi. Gradient, doira, blob yo‘q.
+Emerald · Amber · Sapphire (default, ZENIX steel) · Violet · Crimson · Neutral · Ocean · Minimal — har biri light/dark juftligi (`<html data-family>` + `data-bg`).
+Har bir oila o‘z accent rangi bilan sirt ierarxiyasini tekis bo‘yaydi: sahifa (`--bg`) eng ko‘p, `--surface-2/3` o‘rtacha, karta/raised eng kam, chiziqlar (`--line`) juda yengil — oilalar sezilarli farq qiladi, lekin tinch. Light doim light, dark — chuqur navy/charcoal asos. Minimal — tussiz oq / qora. Gradient, doira, blob, foto yo‘q. Eski saqlangan qiymatlar (`Graphite`, `emerald-night`, `ZENIX Steel` …) `normalizePrefs` orqali qo‘llab-quvvatlanadigan oilaga o‘tadi.
 
 ## Komponent qoidalari
 - Tugmalar: `primary / secondary / soft / warning / danger / ghost / icon` — bir xil balandlik va radius; primary’da POS kabi yengil vertikal nur va rangli soya.

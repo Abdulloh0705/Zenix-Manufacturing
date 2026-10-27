@@ -73,6 +73,7 @@ function MaterialFormModal({material,pickSupplier,onPicked,onClose,onCreated}:{m
     supplierId:v.supplierId&&!s.suppliers.some(x=>x.id===v.supplierId)?'Supplier topilmadi — boshqasini tanlang':undefined,
   }))
   // The handoff is single-use; the picked supplier is now in the form, so drop it from the URL.
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- runs once on mount: the handoff is consumed exactly once
   useEffect(()=>{clearHandoff();if(pickSupplier)onPicked?.()},[])
   const [ask,setAsk]=useState<{then:()=>boolean|void;forSupplier?:boolean}|null>(null),[draftError,setDraftError]=useState('')
   const leaving=useRef(false)
