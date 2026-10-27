@@ -5,7 +5,8 @@ import AppLayout from './layout/AppLayout/AppLayout'
 import {useApp} from './app/providers/AppProvider/AppContext'
 import {Icon} from './shared/ui'
 import {legacyRedirects} from './routes/navigation'
-import {ForcePasswordChange,LoginPage,SetupPage} from './features/auth/pages/AuthPages'
+import {ForcePasswordChange,LoginPage,RecoveryScreen,SetupPage} from './features/auth/pages/AuthPages'
+import {Toasts} from './layout/AppLayout/AppLayout'
 
 const Dashboard=lazy(()=>import('./features/dashboard/pages/Dashboard'))
 const Production=lazy(()=>import('./features/production/pages/Production'))
@@ -71,6 +72,13 @@ function Page({module,children}:{module?:string;children:ReactNode}){
 }
 
 export default function App(){
+  const app=useApp()
+  // Unreadable stored data: nothing else opens until the user has chosen how to recover (saving is suspended).
+  if(app.recovery)return <RecoveryScreen/>
+  return <><AppRoutes/><Toasts/></>
+}
+
+function AppRoutes(){
   return <Routes>
     <Route path="/login" element={<LoginPage/>}/>
     <Route path="/setup" element={<SetupPage/>}/>

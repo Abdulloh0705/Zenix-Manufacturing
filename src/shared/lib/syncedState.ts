@@ -4,12 +4,16 @@
 // so this narrows the window to one synchronous read-modify-write; it is not a transaction.
 
 export type RawStore={getRaw(key:string):string|null;setRaw(key:string,text:string):boolean}
-export type WriteResult='same'|'saved'|'failed'
+export type WriteResult='same'|'saved'|'failed'|'conflict'
 
 export type SyncedSlot<T>={
   /** The newest state: what another tab saved since this tab last read or wrote, otherwise `current`. */
   latest(current:T):{state:T;changed:boolean};
-  /** Saves now. 'same' when the text equals the last one read or written, 'failed' when storage refused it. */
+  /**
+   * Saves now. 'same' when the text equals the last one read or written, 'failed' when storage refused it,
+   * 'conflict' (nothing written) when another tab saved readable data this tab has not read yet — the caller
+   * continues from `latest()` instead of overwriting it.
+   */
   write(state:T):WriteResult;
   /** Accepts text that arrived from another tab (storage event); false when it is this tab's own or unreadable. */
   receive(raw:string|null):T|null;
@@ -31,6 +35,13 @@ export function createSyncedSlot<T>(store:RawStore,key:string,parse:(raw:string)
     write(state){
       const text=JSON.stringify(state)
       if(text===lastText)return 'same'
+      const stored=store.getRaw(key)
+      if(stored!==null&&stored!==lastText&&stored!==text){
+        // Unreadable text (a half-written value) is not worth keeping over this tab's state; readable data is.
+        let readable=false
+        try{readable=parse(stored)!==null}catch{readable=false}
+        if(readable)return 'conflict'
+      }
       if(!store.setRaw(key,text))return 'failed'
       lastText=text
       return 'saved'

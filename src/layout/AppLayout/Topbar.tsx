@@ -1,37 +1,28 @@
 import {useEffect,useMemo,useRef,useState} from 'react'
-import type {ReactNode,RefObject} from 'react'
+import type {CSSProperties,ReactNode,RefObject} from 'react'
 import {useNavigate} from 'react-router-dom'
 import {useApp} from '../../app/providers/AppProvider/AppContext'
 import {APPEARANCE_PAIRS,pairFor} from '../../app/theme/themeRegistry'
-import {Icon,Modal,Popover,Select} from '../../shared/ui'
+import {Icon,Modal,Popover,Segmented,Select} from '../../shared/ui'
+import {DENSITIES,DENSITY_LABEL} from '../../app/theme/preferences'
+import type {Density,FontSize} from '../../app/theme/preferences'
 import {useMediaQuery} from '../../shared/lib/useMediaQuery'
-import type {CurrencyCode,ManufacturingState,ThemeMode} from '../../types'
+import type {CurrencyCode,ThemeMode} from '../../types'
 import {CURRENCIES,cls,initials,num,relativeTime} from '../../utils/format'
 import {ChangePasswordForm} from '../../features/auth/pages/AuthPages'
+import {buildSearchIndex,searchRecords} from './searchIndex'
+import type {SearchResult} from './searchIndex'
+import {fallbackPath,isReadBy,unreadCount,visibleNotifications} from './notificationsView'
 
-type Result={type:string;title:string;subtitle:string;path:string;icon:string}
-
-function buildIndex(s:ManufacturingState,can:(m:string)=>boolean):Result[]{
-  const name=(id:string)=>s.products.find(p=>p.id===id)?.name||s.rawMaterials.find(m=>m.id===id)?.name||id
-  const rows:Result[]=[]
-  if(can('production'))rows.push(...s.productionOrders.map(o=>({type:'Ishlab chiqarish buyurtmasi',title:o.code,subtitle:`${name(o.productId)} · ${o.status}`,path:`/production?view=orders&id=${o.id}`,icon:'factory'})))
-  if(can('products'))rows.push(...s.products.map(p=>({type:'Mahsulot',title:p.name,subtitle:p.sku,path:`/products?view=all&id=${p.id}`,icon:'box'})),...s.boms.map(b=>({type:'BOM',title:`${b.code} ${b.version}`,subtitle:`${name(b.productId)} · ${b.status}`,path:`/products?view=bom&id=${b.id}`,icon:'layers'})),...s.engineeringChanges.map(e=>({type:'ECO',title:e.code,subtitle:e.title,path:`/products?view=plm&id=${e.id}`,icon:'refresh'})))
-  if(can('materials'))rows.push(...s.rawMaterials.map(m=>({type:'Xomashyo',title:m.name,subtitle:m.sku,path:`/materials?view=all&id=${m.id}`,icon:'layers'})))
-  if(can('warehouse')||can('reports'))rows.push(...s.lots.map(l=>({type:l.kind==='serial'?'Serial':'Lot',title:l.code,subtitle:`${name(l.itemId)} · ${l.sourceCode}`,path:`/reports?view=traceability&q=${encodeURIComponent(l.kind==='serial'?l.serialFrom||l.code:l.code)}`,icon:'barcode'})))
-  if(can('purchases'))rows.push(...s.purchaseOrders.map(p=>({type:'Purchase Order',title:p.code,subtitle:`${s.suppliers.find(x=>x.id===p.supplierId)?.name} · ${p.status}`,path:`/purchases?view=orders&id=${p.id}`,icon:'cart'})),...s.suppliers.map(x=>({type:'Yetkazib beruvchi',title:x.name,subtitle:x.phone,path:`/purchases?view=suppliers&id=${x.id}`,icon:'truck'})))
-  if(can('sales'))rows.push(...s.salesOrders.map(o=>({type:'Sales Order',title:o.code,subtitle:`${s.customers.find(c=>c.id===o.customerId)?.name} · ${o.status}`,path:`/sales?view=orders&id=${o.id}`,icon:'truck'})),...s.customers.map(c=>({type:'Mijoz',title:c.name,subtitle:c.phone,path:`/sales?view=customers&id=${c.id}`,icon:'users'})))
-  if(can('quality'))rows.push(...s.qualityAlerts.map(a=>({type:'Quality alert',title:a.title,subtitle:a.status,path:`/quality?view=alerts&id=${a.id}`,icon:'shield'})))
-  if(can('equipment'))rows.push(...s.equipment.map(e=>({type:'Uskuna',title:e.name,subtitle:`${e.model} · ${e.serial}`,path:`/equipment?view=equipment&id=${e.id}`,icon:'wrench'})),...s.maintenanceOrders.map(m=>({type:'Maintenance',title:m.code,subtitle:`${s.equipment.find(e=>e.id===m.equipmentId)?.name} · ${m.status}`,path:`/equipment?view=maintenance&id=${m.id}`,icon:'wrench'})))
-  if(can('employees'))rows.push(...s.employees.map(e=>({type:'Xodim',title:e.name,subtitle:e.department,path:`/employees?view=all&id=${e.id}`,icon:'user'})))
-  return rows
-}
+type Result=SearchResult
 
 function GlobalSearch({variant,onDone,autoFocus}:{variant:'inline'|'palette';onDone?:()=>void;autoFocus?:boolean}){
   const app=useApp(),navigate=useNavigate()
   const [query,setQuery]=useState(''),[active,setActive]=useState(0),[open,setOpen]=useState(false)
   const anchor=useRef<HTMLDivElement>(null),input=useRef<HTMLInputElement>(null)
-  const index=useMemo(()=>buildIndex(app.state,m=>app.can(m)),[app.state,app.can])
-  const results=useMemo(()=>{const terms=query.trim().toLowerCase().split(/\s+/).filter(Boolean);if(!terms.length)return [];return index.filter(r=>{const t=`${r.title} ${r.subtitle} ${r.type}`.toLowerCase();return terms.every(x=>t.includes(x))}).slice(0,20)},[index,query])
+  const appState=app.state,appCan=app.can
+  const index=useMemo(()=>buildSearchIndex(appState,m=>appCan(m)),[appState,appCan])
+  const results=useMemo(()=>searchRecords(index,query),[index,query])
   useEffect(()=>setActive(0),[query])
   useEffect(()=>{if(variant!=='inline')return;const key=(e:KeyboardEvent)=>{if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='k'&&window.innerWidth>760){e.preventDefault();e.stopImmediatePropagation();input.current?.focus();setOpen(true)}};window.addEventListener('keydown',key,true);return()=>window.removeEventListener('keydown',key,true)},[variant])
   const choose=(r?:Result)=>{if(!r)return;navigate(r.path);setOpen(false);setQuery('');input.current?.blur();onDone?.()}
@@ -55,6 +46,8 @@ function SearchResults({query,results,active,onActive,onChoose}:{query:string;re
   return <div className="search-results" role="listbox" id="global-search-results" aria-label="Qidiruv natijalari">{results.map((r,i)=>{
     const heading=r.type!==last;last=r.type
     return <div key={`${r.path}-${i}`} role="presentation">{heading&&<span className="search-group-label" role="presentation">{r.type}</span>}
+      {/* Options are chosen through the combobox input (aria-activedescendant); only pointer users click them. */}
+      {/* eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/interactive-supports-focus */}
       <div role="option" id={`gs-${i}`} aria-selected={active===i} className={cls('search-result',active===i&&'active')} onPointerMove={()=>active!==i&&onActive(i)} onPointerDown={e=>e.preventDefault()} onClick={()=>onChoose(r)}>
         <span className="result-icon"><Icon name={r.icon} size={15}/></span><span className="result-copy"><b>{r.title}</b><small>{r.subtitle}</small></span><Icon name="chevron" size={13}/>
       </div></div>
@@ -81,13 +74,24 @@ function ThemeOptions({onPick}:{onPick?:()=>void}){
     <Icon name={t.icon} size={16}/><span><b>{t.label}</b>{t.value==='system'&&<small>Hozir: {app.resolvedTheme==='dark'?'Dark':'Light'}</small>}</span>{app.state.settings.theme===t.value&&<Icon name="check" size={15}/>}
   </button>)}</div>
 }
-function BackgroundOptions({onPick}:{onPick?:()=>void}){
+/** Background family picker — shared by the topbar menu and Settings → Ko‘rinish. */
+export function BackgroundOptions({onPick,className=''}:{onPick?:()=>void;className?:string}){
   const app=useApp()
-  return <div className="swatch-grid" role="radiogroup" aria-label="Fon">{APPEARANCE_PAIRS.map(p=>{
+  return <div className={cls('swatch-grid',className)} role="radiogroup" aria-label="Fon">{APPEARANCE_PAIRS.map(p=>{
     const item=pairFor(p.id,app.resolvedTheme),active=app.state.settings.appearance===p.id
     return <button type="button" role="radio" aria-checked={active} key={p.id} className={cls('swatch',active&&'active')} onClick={()=>{app.setAppearance(p.id);onPick?.()}}>
-      <span className={`swatch-preview bg-${item.id}`}><i style={{background:item.accent}}/></span><span>{item.name}</span>{active&&<Icon name="check" size={13}/>}
+      <span className={`swatch-preview bg-${item.id}`} style={{'--sw':item.accent} as CSSProperties}><i style={{background:item.accent}}/></span><span>{item.name}</span>{active&&<Icon name="check" size={13}/>}
     </button>})}</div>
+}
+/** UI density, table density and font size — real app-wide preferences (tokens on <html>). */
+export function DensityOptions(){
+  const app=useApp(),s=app.state.settings
+  const items=DENSITIES.map(d=>({value:d,label:DENSITY_LABEL[d]}))
+  return <div className="density-options">
+    <div><span className="option-label">Interfeys zichligi</span><Segmented ariaLabel="Interfeys zichligi" items={items} value={s.uiDensity} onChange={v=>app.setPreferences({uiDensity:v as Density})}/></div>
+    <div><span className="option-label">Jadval zichligi</span><Segmented ariaLabel="Jadval zichligi" items={items} value={s.tableDensity} onChange={v=>app.setPreferences({tableDensity:v as Density})}/></div>
+    <div><span className="option-label">Shrift o‘lchami</span><Segmented ariaLabel="Shrift o‘lchami" items={[{value:'small',label:'Kichik'},{value:'standard',label:'Standart'},{value:'large',label:'Katta'}]} value={s.fontSize} onChange={v=>app.setPreferences({fontSize:v as FontSize})}/></div>
+  </div>
 }
 /** Display currency only — stored amounts stay in so‘m; every money value re-renders converted. */
 export function CurrencyOptions({onPick}:{onPick?:()=>void}){
@@ -129,6 +133,7 @@ function DisplayControls(){
       <div className="utility-section"><h4>Theme</h4><ThemeOptions/></div>
       <div className="utility-section"><h4>Fon</h4><BackgroundOptions/></div>
       <div className="utility-section"><h4>Valyuta</h4><CurrencyOptions/></div>
+      <div className="utility-section"><h4>Zichlik va shrift</h4><DensityOptions/></div>
       {fs.supported&&<button type="button" className="option-row" onClick={fs.toggle}><Icon name={fs.on?'minimize':'maximize'} size={16}/><span><b>{fs.on?'Fullscreen’dan chiqish':'Fullscreen'}</b></span></button>}
     </UtilityButton>
   </div>
@@ -140,17 +145,14 @@ function DisplayControls(){
   </div>
 }
 
-/** Module a notification belongs to, from its link (a notification without a link is general). */
-const notificationModule=(n:{path?:string;type:string})=>n.path?n.path.split('?')[0].replace(/^\//,'')||'dashboard':n.type.includes('low')?'materials':n.type.includes('quality')?'quality':n.type.includes('maintenance')?'equipment':n.type.includes('sales')?'sales':n.type.includes('purchase')?'purchases':'production'
-
 function Notifications(){
   const app=useApp(),navigate=useNavigate(),anchor=useRef<HTMLButtonElement>(null)
-  // Only notifications of modules this user may open, read state per user (A-L1 / A-M5).
+  // Only modules this user may open and categories kept on in Settings; read state per user (A-L1 / A-M5).
   const me=app.currentEmployee.id
-  const visible=app.state.notifications.filter(n=>app.can(notificationModule(n)))
-  const isRead=(n:typeof visible[number])=>n.readBy?n.readBy.includes(me):n.read
-  const unread=visible.filter(n=>!isRead(n)).length
-  const fallback=(type:string)=>type.includes('low')?'/materials?view=shortages':type.includes('quality')?'/quality?view=alerts':type.includes('maintenance')?'/equipment?view=maintenance':type.includes('sales')?'/sales?view=orders':type.includes('purchase')?'/purchases?view=orders':'/production?view=orders'
+  const visible=visibleNotifications(app.state.notifications,m=>app.can(m),app.state.settings.notifications)
+  const isRead=(n:typeof visible[number])=>isReadBy(n,me)
+  const unread=unreadCount(visible,me)
+  const fallback=fallbackPath
   return <>
     <button ref={anchor} type="button" className={cls('utility-btn icon-only',app.notifOpen&&'open')} onClick={()=>app.setNotifOpen(!app.notifOpen)} aria-label={`Bildirishnomalar${unread?`, ${unread} ta o‘qilmagan`:''}`} aria-expanded={app.notifOpen} aria-haspopup="dialog">
       <Icon name="bell" size={16}/>{unread>0&&<span className="count-badge">{unread>9?'9+':unread}</span>}
@@ -199,7 +201,8 @@ export function Topbar(){
   const compactSearch=useMediaQuery('(max-width: 760px)')
   const s=app.state
   const branch=s.branches.find(x=>x.id===s.settings.defaultBranchId),warehouse=s.warehouses.find(x=>x.id===s.settings.defaultWarehouseId),line=s.productionLines.find(x=>x.id===s.settings.defaultLineId)
-  useEffect(()=>{if(app.searchOpen){setPaletteOpen(true);app.setSearchOpen(false)}},[app.searchOpen])
+  const {searchOpen,setSearchOpen}=app
+  useEffect(()=>{if(searchOpen){setPaletteOpen(true);setSearchOpen(false)}},[searchOpen,setSearchOpen])
   return <header className="topbar">
     <button type="button" className="icon-ghost mobile-menu" onClick={()=>app.setSidebarMobile(true)} aria-label="Menyuni ochish" aria-controls="app-sidebar" aria-expanded={app.sidebarMobile}><Icon name="menu"/></button>
     {compactSearch?<button type="button" className="utility-btn icon-only" onClick={()=>setPaletteOpen(true)} aria-label="Qidirish"><Icon name="search" size={16}/></button>:<GlobalSearch variant="inline"/>}

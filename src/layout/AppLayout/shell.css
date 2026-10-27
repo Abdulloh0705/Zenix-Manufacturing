@@ -132,6 +132,10 @@
 .utility-section{display:grid;gap:4px;padding-bottom:var(--sp-2);border-bottom:1px solid var(--line)}
 .utility-section:last-of-type{border-bottom:0}
 .utility-section h4{font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:.06em;color:var(--text-3);padding:0 var(--sp-1)}
+.density-options{display:grid;gap:var(--sp-3);margin-bottom:var(--sp-2)}
+.density-options>div{display:grid;gap:6px}
+.density-options .option-label{font-size:var(--fs-xs);font-weight:var(--fw-medium);color:var(--text-2)}
+.density-options .segmented{width:100%}.density-options .segmented button{flex:1;justify-content:center}
 .option-list{display:grid;gap:1px}
 .option-row{display:flex;align-items:center;gap:10px;width:100%;min-height:36px;padding:5px var(--sp-2);border-radius:var(--r-sm);text-align:left;color:var(--text-2)}
 .option-row>span{display:grid;gap:1px;flex:1;min-width:0}
@@ -151,13 +155,9 @@
 .swatch-preview{position:relative;display:block;width:28px;height:28px;border-radius:var(--r-sm);border:1px solid var(--line-strong);overflow:hidden}
 .swatch-preview i{position:absolute;right:4px;bottom:4px;width:9px;height:9px;border-radius:50%;box-shadow:0 0 0 2px rgba(255,255,255,.7)}
 .swatch-preview::after{content:"";position:absolute;left:5px;top:5px;width:13px;height:9px;border-radius:3px;background:rgba(255,255,255,.85);box-shadow:0 0 0 1px rgba(31,35,40,.08)}
-.bg-emerald-mist{background:#f1f4f2}.bg-emerald-night{background:#0f1412}
-.bg-amber-mist{background:#f5f3ef}.bg-amber-night{background:#14120f}
-.bg-sapphire-mist{background:#f3f4f4}.bg-sapphire-night{background:#111315}
-.bg-violet-mist{background:#f3f3f6}.bg-violet-night{background:#121216}
-.bg-crimson-mist{background:#f6f2f3}.bg-crimson-night{background:#151112}
-.bg-ocean-mist{background:#f0f4f5}.bg-ocean-night{background:#0f1415}
-.bg-neutral-mist{background:#f2f2f1}.bg-neutral-night{background:#121212}
+/* Previews use the same mix as the page tint (tokens.css), from the family accent passed as --sw. */
+.swatch-preview{background:color-mix(in srgb,var(--sw,var(--accent)) 10%,#f2f3f3)}
+[class*="-night"].swatch-preview{background:color-mix(in srgb,var(--sw,var(--accent)) 9%,#0f1215)}
 [class*="-night"].swatch-preview::after,.bg-minimal-dark.swatch-preview::after{background:rgba(255,255,255,.1);box-shadow:none}
 .bg-minimal-light{background:#fff}.bg-minimal-dark{background:#0e0f11}
 /* Notifications: fixed compact width; the list (not the panel) scrolls so head/footer stay pinned. */
@@ -279,4 +279,15 @@
   .content{padding-top:14px}
   .subnav-link{height:40px;padding:0 9px}
   .brand-mark{width:30px;height:30px}
+}
+
+/* ---------- device safe areas (after the breakpoints, whose padding shorthands would reset them) ---------- */
+.app-shell{padding-left:var(--safe-left);padding-right:var(--safe-right)}
+.topbar,.brand{height:calc(var(--topbar-h) + var(--safe-top));padding-top:var(--safe-top)}
+.module-subnav{top:calc(var(--topbar-h) + var(--safe-top))}
+.content{padding-bottom:calc(var(--sp-8) + var(--safe-bottom))}
+.sidebar{padding-bottom:calc(10px + var(--safe-bottom))}
+.ai-dock{right:var(--safe-right)}
+@media (max-width:1024px){
+  .sidebar{width:calc(var(--sidebar-w) + var(--safe-left));padding-left:calc(10px + var(--safe-left))}
 }

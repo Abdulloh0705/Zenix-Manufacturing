@@ -133,10 +133,10 @@
 .toggle-row b{font-size:var(--fs-sm);font-weight:var(--fw-medium)}
 .toggle-row small{color:var(--text-3);line-height:1.45}
 .toggle-row.disabled{opacity:.6}
-.switch{position:relative;width:36px;height:21px;border-radius:var(--r-pill);background:color-mix(in srgb,var(--text-3) 38%,transparent);flex:none;transition:background-color .16s ease}
-.switch i{position:absolute;top:2.5px;left:3px;width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 2px 5px rgba(15,23,42,.2);transition:transform .18s ease}
+.switch{position:relative;width:40px;height:24px;border-radius:var(--r-pill);background:color-mix(in srgb,var(--text-3) 38%,transparent);flex:none;transition:background-color .16s ease}
+.switch i{position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:#fff;box-shadow:0 2px 5px rgba(15,23,42,.2);transition:transform .18s ease}
 .switch.on{background:var(--accent)}
-.switch.on i{transform:translateX(14px)}
+.switch.on i{transform:translateX(16px)}
 :root[data-theme="dark"] .switch.on i{background:var(--accent-contrast)}
 .switch:disabled{opacity:.5}
 .check-line{display:flex;align-items:flex-start;gap:var(--sp-2);min-width:0;cursor:pointer}
@@ -156,3 +156,10 @@
 .seg-count,.tab-count{display:inline-grid;place-items:center;min-width:18px;height:17px;padding:0 5px;border-radius:var(--r-pill);background:var(--neutral-soft);color:var(--text-2);font-size:var(--fs-2xs);font-weight:var(--fw-semibold);font-variant-numeric:tabular-nums}
 .segmented button.active .seg-count,.tabs button.active .tab-count{background:var(--accent-soft);color:var(--accent-ink)}
 .tabs{display:flex;width:max-content;margin-bottom:var(--sp-3)}
+
+/* Touch screens: every control reaches a comfortable finger target (≥ 36px; WCAG 2.5.8 asks ≥ 24px) whatever the density. */
+@media (pointer:coarse){
+  .segmented button,.tabs button,.compact,.icon-ghost,.filter-select .custom-select-trigger,.more-trigger,.filter-reset,.custom-select-wrap.is-sm .custom-select-trigger{min-height:36px!important}
+  .icon-ghost{min-width:36px}
+  .select-option{min-height:40px}
+}

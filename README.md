@@ -9,21 +9,35 @@ ZENIX Manufacturing — ishlab chiqarish korxonalari uchun ERP/MRP/MES frontend:
 - React 19 + TypeScript, Vite 7, React Router 7
 - Plain CSS design system (`scripts/build-styles.mjs` → generated `src/styles.css`)
 - Pure domain engine + actions (`src/domain`), localStorage adapter
-- Node built-in test runner (esbuild bundle) — 186 domain, workflow, RBAC, auth va regression test
+- Node built-in test runner (esbuild bundle): 263 domain / workflow / RBAC / auth / persistence testi + 46 UI testi (jsdom)
+- Playwright — brauzer smoke testlari (desktop + telefon), ESLint (TypeScript, React hooks, jsx-a11y)
 - WebCrypto (PBKDF2) — parol xeshlash; tashqi auth kutubxonasi yo‘q
 
 ## Buyruqlar
 
+Node 20+ (CI: Node 22).
+
 ```bash
-npm install
+npm ci               # lockfile bo‘yicha o‘rnatish
 npm run dev          # styles + Vite dev server (http://localhost:5173)
-npm run typecheck    # tsc -b
-npm run test:domain  # domain/RBAC/auth testlari (esbuild → node:test)
+npm run typecheck    # tsc -b (ilova + e2e)
+npm run lint         # ESLint
+npm test             # domain (node:test) + UI (jsdom) testlari
 npm run build        # styles + tsc -b + vite build → dist/
+npm run check        # typecheck + lint + test + build — CI bilan bir xil
+npm run test:e2e     # Playwright smoke (o‘zi build qilib vite preview’da ishga tushiradi)
 npm run preview      # dist/ ni lokal ko‘rish
 ```
 
 `src/styles.css` generatsiya qilinadi (`npm run styles`): CSS manbalarini tahrirlang, generated faylni emas.
+
+E2E birinchi marta: `npx playwright install chromium` yoki o‘rnatilgan Chrome bilan `PW_CHANNEL=chrome npm run test:e2e`. Testlar har safar toza brauzerda Super Admin’ni birinchi sozlash orqali yaratadi; parol har ishga tushishda generatsiya qilinadi va repozitoriyada saqlanmaydi.
+
+**CI** (`.github/workflows/ci.yml`, push `main` va pull request): `npm ci` → typecheck → lint → test → build → generated CSS commit qilinganini tekshirish; keyin Chromium bilan E2E (desktop + Pixel 7). Deploy va secret yo‘q.
+
+## Saqlash, migratsiya va tiklash
+
+Biznes ma’lumoti bitta localStorage kalitida (`zenix-manufacturing-v3-state`), akkauntlar va sessiya alohida. Har yuklashda: tuzilmaviy tekshiruv (`src/domain/persistence.ts`: yozuv bo‘lmagan elementlar chetga olinadi, yetishmayotgan ro‘yxat/miqdor to‘ldiriladi, takroriy ID xabar qilinadi) → versiyali migratsiya (`src/domain/migrations.ts`). Nimadir tuzatilsa yoki yangilansa, asl nusxa oldin saqlanadi va Tizim → **Tiklash nusxalari**dan yuklab olinadi. O‘qib bo‘lmaydigan ma’lumotda ilova **tiklash rejimida** ochiladi: hech narsa ustidan yozilmaydi, foydalanuvchi nusxani yuklab olib, keyin toza holatda ochishni tanlaydi. Saqlash muvaffaqiyatsiz bo‘lsa doimiy ogohlantirish chiqadi; boshqa tab yangiroq saqlagan bo‘lsa, uning ustidan yozilmaydi. Batafsil: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#saqlash-va-tiklash).
 
 ## Birinchi ishga tushirish
 
@@ -42,6 +56,7 @@ src/
 │  ├─ access.ts                 rollar, ruxsat qoidalari, qamrov (scope), huquq oshirishdan himoya
 │  ├─ auth.ts                   akkauntlar, parol siyosati, bloklash, sessiya, kirish jurnali
 │  ├─ migrations.ts             saqlangan ma’lumot sxemasi versiyalari (v4: 8 rol, tannarx muzlatish)
+│  ├─ persistence.ts            saqlangan matn → holat: tuzilmaviy tuzatish, standartlar, migratsiya, hisobot
 │  ├─ dashboard.ts              Boshqaruv paneli o‘qish qatlami (raqam = manzil sahifa qatorlari)
 │  ├─ productionControl.ts      Ishlab chiqarish → Umumiy nazorat markazi o‘qish qatlami
 │  ├─ supplierMaterials.ts      supplier ↔ material shartlari, supplier taqqoslash, buyurtma taklifi (MOQ, birlik)
@@ -54,7 +69,7 @@ src/
 └─ utils                        dates (lokal kalendar), format, export
 ```
 
-Batafsil: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/DESIGN_SYSTEM.md](docs/DESIGN_SYSTEM.md), [docs/AUTH.md](docs/AUTH.md), [docs/BUG_REGISTRY.md](docs/BUG_REGISTRY.md) (barcha topilmalar va holati), [docs/RELEASE_REPORT.md](docs/RELEASE_REPORT.md).
+Batafsil: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (qatlamlar, saqlash, backend integratsiya nuqtalari), [docs/DESIGN_SYSTEM.md](docs/DESIGN_SYSTEM.md), [docs/AUTH.md](docs/AUTH.md), [docs/BUG_REGISTRY.md](docs/BUG_REGISTRY.md) (barcha topilmalar va holati), [docs/FINAL_QA.md](docs/FINAL_QA.md) (Phase 5 yakuniy tekshiruv), [docs/RELEASE_REPORT.md](docs/RELEASE_REPORT.md).
 
 ## Manufacturing qamrovi
 

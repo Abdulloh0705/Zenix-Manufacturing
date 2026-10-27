@@ -31,6 +31,8 @@ export function ColumnChart({data,valueLabel,referenceLabel,unit='',height=220,t
       <div className="viz-columns" role="list">
         {data.map((d,i)=>{
           const h=d.value/max*100,ref=d.reference!==undefined?d.reference/max*100:undefined
+          // Focusable so keyboard users can reach each value (the focus shows the same detail as hover).
+          // eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex
           return <div key={d.label+i} role="listitem" tabIndex={0} className={`viz-col ${hover===i?'is-hover':''}`}
             aria-label={`${d.label}: ${valueLabel} ${num(d.value)} ${unit}${d.reference!==undefined?`, ${referenceLabel} ${num(d.reference)} ${unit}`:''}`}
             onPointerEnter={()=>setHover(i)} onPointerLeave={()=>setHover(h=>h===i?null:h)} onFocus={()=>setHover(i)} onBlur={()=>setHover(h=>h===i?null:h)}>
@@ -59,6 +61,8 @@ export function StackedBar({segments,total,title,unit='',format}:{segments:Segme
   const [hover,setHover]=useState<number|null>(null)
   return <figure className="viz stacked">
     <figcaption className="sr-only">{title}</figcaption>
+    {/* Each segment is focusable so keyboard users can reach its value (focus shows the same detail as hover). */}
+    {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex */}
     <div className="stacked-bar" role="list">{segments.filter(s=>s.value>0).map((s,i)=><span key={s.label} role="listitem" tabIndex={0} aria-label={`${s.label}: ${fmt(s.value)}`} className={`series-${s.slot} ${hover===i?'is-hover':''}`} style={{flexGrow:s.value}} onPointerEnter={()=>setHover(i)} onPointerLeave={()=>setHover(null)} onFocus={()=>setHover(i)} onBlur={()=>setHover(null)}/>)}
       {!sum&&<span className="empty-seg"/>}
     </div>

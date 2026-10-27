@@ -1,6 +1,6 @@
 import {parseDate} from './dates'
 
-const numberFormat=new Intl.NumberFormat('uz-UZ',{maximumFractionDigits:0})
+
 const decimalFormat=new Intl.NumberFormat('uz-UZ',{maximumFractionDigits:1})
 
 /* -------------------------------------------------------------------------------------------------

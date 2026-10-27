@@ -1,6 +1,6 @@
 // Supplier ↔ material sourcing: which supplier can deliver which material, on what terms, and how the
 // options for one material compare when a shortage has to be bought. Pure functions over state.
-import type {CurrencyCode,ManufacturingState,PurchaseOrder,SupplierMaterial} from '../types'
+import type {CurrencyCode,ManufacturingState,PurchaseOrder,PurchaseReceipt,QualityCheck,SupplierMaterial} from '../types'
 import {CURRENCIES} from '../utils/format'
 import {addDays,daysBetween,todayISO} from '../utils/dates'
 
@@ -58,6 +58,8 @@ export function orderProposal(link:Pick<SupplierMaterial,'unitFactor'|'moq'>,nee
 export type SupplierOption={
   link:SupplierMaterial;supplierName:string;blocked?:string;unitCost:number;proposal:ReturnType<typeof orderProposal>;total:number;
   expectedDate:string;onTime:boolean|null;preferred:boolean;cheapest:boolean;fastest:boolean;recommended:boolean;reason?:string;onTimePct:number|null;
+  /** Terms the comparison could not use (e.g. no quoted price) — shown, never guessed. */
+  missing?:string;
 }
 
 /**
@@ -74,9 +76,12 @@ export function supplierOptions(s:S,materialId:string,need:number,needBy?:string
     const proposal=orderProposal(link,need)
     const expectedDate=addDays(today,Math.max(0,link.leadTime))
     return {link,supplierName:s.suppliers.find(x=>x.id===link.supplierId)?.name||link.supplierId,blocked,unitCost,proposal,total:proposal.stockQty*unitCost,
-      expectedDate,onTime:needBy?expectedDate<=needBy:null,preferred:link.supplierId===preferred,cheapest:false,fastest:false,recommended:false,reason:undefined as string|undefined,onTimePct:supplierPerformance(s,link.supplierId).onTimePct}
+      expectedDate,onTime:needBy?expectedDate<=needBy:null,preferred:link.supplierId===preferred,cheapest:false,fastest:false,recommended:false,reason:undefined as string|undefined,onTimePct:supplierPerformance(s,link.supplierId,today).onTimePct,
+      missing:link.price>0?undefined:'Narx kiritilmagan'}
   })
-  const eligible=rows.filter(r=>!r.blocked)
+  // A link without a quoted price is not "cheapest": it is compared only when no supplier has a price.
+  const orderable=rows.filter(r=>!r.blocked),priced=orderable.filter(r=>!r.missing)
+  const eligible=priced.length?priced:orderable
   if(eligible.length>1){
     const minCost=Math.min(...eligible.map(r=>r.unitCost)),minLead=Math.min(...eligible.map(r=>r.link.leadTime))
     for(const r of eligible){r.cheapest=r.unitCost===minCost;r.fastest=r.link.leadTime===minLead}
@@ -90,20 +95,111 @@ export function supplierOptions(s:S,materialId:string,need:number,needBy?:string
       :[...eligible].sort((a,b)=>a.link.leadTime-b.link.leadTime||cost(a)-cost(b))[0]
     pick.recommended=true
     const cheapestText=need>0?'jami summa eng past (MOQ bilan)':'birlik narxi eng past'
-    pick.reason=eligible.length===1?'Yagona faol supplier':inTime.length?(needBy?`Muddatga ulguradi · ${cheapestText}`:cheapestText[0].toUpperCase()+cheapestText.slice(1)):'Hech biri muddatga ulgurmaydi — eng tez yetkazadi'
+    pick.reason=!priced.length?'Narx kiritilmagan — muddat bo‘yicha tanlandi':eligible.length===1?(orderable.length>1?'Yagona narxi kiritilgan supplier':'Yagona faol supplier'):inTime.length?(needBy?`Muddatga ulguradi · ${cheapestText}`:cheapestText[0].toUpperCase()+cheapestText.slice(1)):'Hech biri muddatga ulgurmaydi — eng tez yetkazadi'
   }
   return rows.sort((a,b)=>Number(Boolean(a.blocked))-Number(Boolean(b.blocked))||Number(b.recommended)-Number(a.recommended)||a.expectedDate.localeCompare(b.expectedDate)||a.total-b.total)
 }
 
-/** Delivery and incoming-quality track record of a supplier, from its POs and receipts. */
-export function supplierPerformance(s:S,supplierId:string){
+const q3=(n:number)=>Math.round(n*1000)/1000
+
+/**
+ * Inspection split of a receipt. Receipts saved before the split existed are read from their incoming check:
+ * none → released on receipt, Pending → waiting, Passed → all accepted, any rejecting result → all rejected.
+ */
+export function receiptQuantities(s:S,po:Pick<PurchaseOrder,'id'>,r:PurchaseReceipt){
+  const check:QualityCheck|undefined=s.qualityChecks.find(q=>q.sourceType==='purchase'&&q.sourceId===po.id&&(q.id===r.qualityCheckId||q.receiptId===r.id))
+  if(r.inspection){
+    const accepted=r.accepted??0,rejected=r.rejected??0
+    return {inspection:r.inspection,accepted,rejected,returned:r.returned??0,scrapped:r.scrapped??0,pending:q3(Math.max(0,r.qty-accepted-rejected)),check}
+  }
+  if(!check)return {inspection:'none' as const,accepted:r.qty,rejected:0,returned:0,scrapped:0,pending:0,check}
+  if(check.status==='Pending')return {inspection:'pending' as const,accepted:0,rejected:0,returned:0,scrapped:0,pending:r.qty,check}
+  if(check.status==='Passed')return {inspection:'accepted' as const,accepted:r.qty,rejected:0,returned:0,scrapped:0,pending:0,check}
+  const returned=check.returnedQty??(check.reason?.includes('Supplierga qaytarildi')?r.qty:0)
+  return {inspection:'rejected' as const,accepted:0,rejected:r.qty,returned,scrapped:check.status==='Scrap'?r.qty:0,pending:0,check}
+}
+
+/** Rejected units of a receipt still waiting for a return or scrap decision. */
+export function rejectedOpen(s:S,po:Pick<PurchaseOrder,'id'>,r:PurchaseReceipt){
+  const q=receiptQuantities(s,po,r)
+  return q3(Math.max(0,q.rejected-q.returned-q.scrapped))
+}
+
+/** Every PO line placed with a supplier (drafts and cancelled ones included, marked by status), newest first. */
+export function supplierPurchaseHistory(s:S,supplierId:string){
+  return s.purchaseOrders.filter(p=>p.supplierId===supplierId).flatMap(p=>p.items.map(i=>{
+    const receipts=p.receipts.filter(r=>r.materialId===i.materialId)
+    const split=receipts.map(r=>receiptQuantities(s,p,r))
+    return {po:p,line:i,date:p.createdAt.slice(0,10),lastReceipt:receipts.map(r=>r.date).sort().at(-1),
+      accepted:q3(split.reduce((a,x)=>a+x.accepted,0)),rejected:q3(split.reduce((a,x)=>a+x.rejected,0)),returned:q3(split.reduce((a,x)=>a+x.returned,0))}
+  })).sort((a,b)=>b.date.localeCompare(a.date)||b.po.code.localeCompare(a.po.code))
+}
+
+/**
+ * Supplier KPIs from recorded POs, receipts and inspections only (the stored rating is not used):
+ * - on time: PO lines that are due (expected date passed, closed short) or complete, fully received by the expected date;
+ * - lead time: days from the PO to the receipt that completed a line;
+ * - rejection: rejected / inspected quantity of decided incoming inspections;
+ * - price variance: ordered value at PO prices against the materials' standard cost;
+ * - fulfilment: received minus returned against ordered quantity on closed POs.
+ * A KPI without data is null and "missing" says what is lacking.
+ */
+export function supplierPerformance(s:S,supplierId:string,today=todayISO()){
   const pos=s.purchaseOrders.filter(p=>p.supplierId===supplierId&&p.status!=='Bekor')
-  const receipts=pos.flatMap(p=>p.receipts.map(r=>({...r,po:p})))
-  const onTime=receipts.filter(r=>r.date.slice(0,10)<=r.po.expectedDate).length
+  const placed=pos.filter(p=>p.status!=='Qoralama')
+  const receipts=placed.flatMap(p=>p.receipts.map(r=>({...r,po:p})))
+  const lines=placed.flatMap(p=>p.items.map(i=>{
+    const own=p.receipts.filter(r=>r.materialId===i.materialId).sort((a,b)=>a.date.localeCompare(b.date))
+    let sum=0,completedAt:string|undefined
+    for(const r of own){sum+=r.qty;if(!completedAt&&sum>=i.qty-1e-9)completedAt=r.date.slice(0,10)}
+    return {po:p,line:i,completedAt}
+  }))
+  const due=lines.filter(l=>l.completedAt||l.po.expectedDate<today||l.po.closedShort)
+  const onTime=due.filter(l=>l.completedAt&&l.completedAt<=l.po.expectedDate).length
+  const leads=lines.filter(l=>l.completedAt).map(l=>Math.max(0,daysBetween(l.po.createdAt,l.completedAt!)))
+  let inspected=0,rejected=0
+  for(const r of receipts){const q=receiptQuantities(s,r.po,r);if(q.inspection==='none'||q.inspection==='pending')continue;inspected+=q.accepted+q.rejected;rejected+=q.rejected}
   const checks=s.qualityChecks.filter(q=>q.sourceType==='purchase'&&pos.some(p=>p.id===q.sourceId)&&q.status!=='Pending')
   const passed=checks.filter(q=>q.status==='Passed').length
-  const leads=pos.filter(p=>p.receipts.length).map(p=>Math.max(0,daysBetween(p.createdAt,p.receipts[0].date)))
-  return {orders:pos.length,spend:pos.reduce((a,p)=>a+p.total,0),openValue:pos.filter(p=>OPEN_PO.includes(p.status)).reduce((a,p)=>a+p.items.reduce((x,i)=>x+(i.qty-i.received)*i.price,0),0),onTimePct:receipts.length?Math.round(onTime/receipts.length*100):null,qualityPct:checks.length?Math.round(passed/checks.length*100):null,avgLead:leads.length?Math.round(leads.reduce((a,b)=>a+b,0)/leads.length*10)/10:null,receipts:receipts.length}
+  let stdValue=0,priceValue=0
+  for(const l of lines){const std=s.rawMaterials.find(m=>m.id===l.line.materialId)?.standardCost||0;if(std<=0)continue;stdValue+=l.line.qty*std;priceValue+=l.line.qty*l.line.price}
+  const closed=placed.filter(p=>p.status==='Qabul qilindi')
+  let ordered=0,delivered=0
+  for(const p of closed)for(const i of p.items){
+    ordered+=i.qty
+    const returned=p.receipts.filter(r=>r.materialId===i.materialId).reduce((a,r)=>a+receiptQuantities(s,p,r).returned,0)
+    delivered+=Math.max(0,i.received-returned)
+  }
+  const pct=(a:number,b:number)=>b>0?Math.round(a/b*1000)/10:null
+  const missing:string[]=[]
+  if(!due.length)missing.push('Muddati kelgan PO qatori yo‘q — vaqtida yetkazish hisoblanmaydi')
+  if(!leads.length)missing.push('To‘liq qabul qilingan qator yo‘q — lead time hisoblanmaydi')
+  if(inspected<=0)missing.push('Kirish tekshiruvi qarori yo‘q — rad etish ulushi hisoblanmaydi')
+  if(stdValue<=0)missing.push('Materiallarning standart narxi yo‘q — narx farqi hisoblanmaydi')
+  if(ordered<=0)missing.push('Yopilgan PO yo‘q — bajarilish darajasi hisoblanmaydi')
+  return {orders:pos.length,spend:pos.reduce((a,p)=>a+p.total,0),openValue:pos.filter(p=>OPEN_PO.includes(p.status)).reduce((a,p)=>a+p.items.reduce((x,i)=>x+(i.qty-i.received)*i.price,0),0),
+    onTimePct:due.length?Math.round(onTime/due.length*100):null,dueLines:due.length,
+    qualityPct:checks.length?Math.round(passed/checks.length*100):null,
+    avgLead:leads.length?Math.round(leads.reduce((a,b)=>a+b,0)/leads.length*10)/10:null,
+    rejectionPct:pct(rejected,inspected),inspectedQty:q3(inspected),rejectedQty:q3(rejected),
+    priceVariancePct:stdValue>0?Math.round((priceValue-stdValue)/stdValue*1000)/10:null,
+    fulfillmentPct:pct(delivered,ordered),
+    receipts:receipts.length,missing}
+}
+
+/**
+ * The supplier MRP buys a material from for `need` stock units by `needBy`: the preferred ("Asosiy") supplier when it
+ * can be ordered, otherwise the comparison's recommendation (in time first, then lowest total with MOQ; unpriced
+ * links only when nobody has a price). Undefined when no supplier can be ordered from.
+ */
+export function chooseSupplier(s:S,materialId:string,need:number,needBy?:string,today=todayISO()){
+  const fixed=preferredSupplierId(s,materialId)
+  const options=supplierOptions(s,materialId,need,needBy,today)
+  if(fixed){
+    const o=options.find(x=>x.link.supplierId===fixed)
+    return o?{...o,reason:s.rawMaterials.find(m=>m.id===materialId)?.supplierId===fixed?'Asosiy supplier':'Yagona faol supplier'}:undefined
+  }
+  return options.find(o=>o.recommended)
 }
 
 export type LinkInput=Omit<SupplierMaterial,'id'|'createdAt'|'lastPrice'|'lastPurchaseDate'|'lastPurchaseOrderId'>

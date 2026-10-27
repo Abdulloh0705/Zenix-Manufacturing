@@ -365,21 +365,37 @@ test('P1-6/7: quantities are validated — zero, negative, fractional units and 
 
 /* ------------------------------------------------------------ 11 BOM snapshot -- */
 
+/** Releases a new revision of a BOM with every component mapped by `edit` (the master BOM changes). */
+function reviseBom(s,bomId,edit){
+  const bom=s.boms.find(b=>b.id===bomId)
+  // The demo data may already hold a draft under an engineering change: withdraw the change, reuse the draft.
+  let d=s.boms.find(b=>b.productId===bom.productId&&b.status==='Draft'&&!b.variantId)
+  const eco=d&&s.engineeringChanges.find(e=>e.newBomId===d.id&&['Draft','Review','Approved'].includes(e.status))
+  if(eco)s=ok(A.cancelEngineeringChange(s,ctx(s,eco.ownerId),eco.id,'test: master revision'))
+  if(!d){const draft=A.createBomDraft(s,ctx(s),bom.productId,bom.id);s=ok(draft);d=s.boms.find(b=>b.id===draft.result.id)}
+  s=ok(A.saveBom(s,ctx(s),{...d,components:d.components.map(edit)}))
+  s=ok(A.activateBom(s,ctx(s),d.id))
+  assert.notEqual(s.boms.find(b=>b.id===bomId).status,'Faol','the old revision is history now')
+  return s
+}
+
 test('P1-19: an existing order keeps its BOM snapshot after the master BOM changes',()=>{
   let s=fresh()
   const c=created(s,'p1',10);s=c.state
+  const old=created(s,'p1',5);s=old.state
   const snapshot=JSON.stringify(orderOf(s,c.id).bomSnapshot)
-  const master=s.boms.find(b=>b.id===orderOf(s,c.id).bomId)
-  s=ok(A.saveBom(s,ctx(s),{...master,components:master.components.map(k=>({...k,qty:k.qty*3}))}))
+  // The master changes through a new revision (active revisions are immutable since phase 3).
+  s=reviseBom(s,orderOf(s,c.id).bomId,k=>({...k,qty:k.qty*3}))
   assert.equal(JSON.stringify(orderOf(s,c.id).bomSnapshot),snapshot)
   const before=bal(s,'rm1','w1').reserved
   s=ok(A.transitionProduction(s,ctx(s),c.id,'Tasdiqlangan'))
   const k=orderOf(s,c.id).bomSnapshot.components.find(x=>x.materialId==='rm1')
   assert.equal(Math.round((bal(s,'rm1','w1').reserved-before)*1000)/1000,Math.round(perUnit(k)*10*1000)/1000,'reserved by the snapshot, not the new master')
-  // A new order uses the new master; the two cannot be merged into one recipe.
+  // A new order uses the new master; it cannot be merged with an order of the old recipe.
   const d=created(s,'p1',5);s=d.state
-  const old=created({...s,boms:s.boms.map(b=>b.id===master.id?master:b)},'p1',5)
-  refused(old.state,A.mergeProduction(old.state,ctx(old.state),[d.id,old.id]),/snapshot/)
+  assert.notEqual(orderOf(s,d.id).bomId,orderOf(s,old.id).bomId)
+  // Different revisions are different BOMs now; the snapshot check still guards legacy data edited in place.
+  refused(s,A.mergeProduction(s,ctx(s),[d.id,old.id]),/BOM|snapshot/)
 })
 
 test('P1-11: a BOM with a stale or archived component cannot start production',()=>{
@@ -455,8 +471,7 @@ test('P1-30: unbuild of a transferred lot uses the BOM snapshot of the order tha
   assert.equal(copy.sourceType,'production','the transferred copy keeps its origin')
   assert.equal(findTraceOrder(s,mo.lot).id,id)
   // The master BOM changes afterwards; the unbuild still returns what this order put in.
-  const master=s.boms.find(b=>b.id===mo.bomId)
-  s=ok(A.saveBom(s,ctx(s),{...master,components:master.components.map(k=>({...k,qty:k.qty*5}))}))
+  s=reviseBom(s,mo.bomId,k=>({...k,qty:k.qty*5}))
   const content=A.unbuildContent(s,'p1',[{lot:mo.lot,qty:2}])
   assert.ok(content.basis.some(b=>b.includes(mo.code)),content.basis.join('; '))
   const k=mo.bomSnapshot.components.find(x=>x.materialId==='rm1')

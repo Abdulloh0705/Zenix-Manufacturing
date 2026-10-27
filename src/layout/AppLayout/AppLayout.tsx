@@ -48,7 +48,8 @@ function useViewGuard(){
   },[location.pathname,location.search])
 }
 
-function Toasts(){
+/** Rendered by App for every route, so messages raised on the login and set-up pages are seen too. */
+export function Toasts(){
   const app=useApp()
   return <div className="toast-stack" role="region" aria-label="Xabarlar" aria-live="polite">
     {app.toasts.map(t=><div className={`toast toast-${t.tone}`} key={t.id} role={t.tone==='danger'?'alert':'status'}>
@@ -74,9 +75,9 @@ export default function AppLayout(){
     <div className="main-area">
       <Topbar/>
       <ModuleSubnav/>
+      {app.storageError&&<div className="storage-alert" role="alert"><Icon name="warning" size={16}/><span>Brauzer o‘zgarishlarni saqlamayapti (xotira to‘la yoki bloklangan). Ular faqat shu oynada turibdi — Tizim → Backup eksport qiling.</span></div>}
       <ExportPermission.Provider value={app.can(byPath[location.pathname]?.module||'dashboard','export')}><main id="main" className="content" tabIndex={-1}><Outlet/></main></ExportPermission.Provider>
     </div>
     <AiAssistant/>
-    <Toasts/>
   </div>
 }

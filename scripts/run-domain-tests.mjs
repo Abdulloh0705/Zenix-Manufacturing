@@ -11,6 +11,8 @@ fs.mkdirSync(out,{recursive:true})
 // Domain modules import each other (engine ← actions ← seed), so bundle each entry point.
 const entries={
   manufacturingEngine:'src/domain/manufacturingEngine.ts',
+  planning:'src/domain/planning.ts',
+  maintenance:'src/domain/maintenance.ts',
   actions:'src/domain/actions.ts',
   dashboard:'src/domain/dashboard.ts',
   productionControl:'src/domain/productionControl.ts',
@@ -24,6 +26,7 @@ const entries={
   migrations:'src/domain/migrations.ts',
   crypto:'src/shared/lib/crypto.ts',
   syncedState:'src/shared/lib/syncedState.ts',
+  persistence:'src/domain/persistence.ts',
 }
 for(const [name,file] of Object.entries(entries)){
   if(!fs.existsSync(path.join(root,file))){console.error(`Missing source under test: ${file}`);process.exit(1)}

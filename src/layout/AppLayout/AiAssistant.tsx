@@ -7,9 +7,16 @@ import {storage} from '../../shared/lib/storage'
 import {answerQuestion,buildInsights,SUGGESTED_QUESTIONS} from '../../domain/insights'
 import {cls} from '../../utils/format'
 
-const POSITION_KEY='zenix-ai-dock-position'
-const DOCK_H=44,TOP_SAFE=118,BOTTOM_SAFE=20
-const clamp=(v:number,min:number,max:number)=>Math.max(min,Math.min(max,v))
+import {DOCK_POSITION_KEY as POSITION_KEY,DEFAULT_RATIO,ratioFromTop,readRatio,topFromRatio} from './aiDock'
+
+/** Visible height (mobile browser bars excluded) and the bottom safe-area inset (home indicator). */
+const viewportHeight=()=>Math.round(window.visualViewport?.height??window.innerHeight)
+let probe:HTMLElement|null=null
+const safeBottom=()=>{
+  // env() is only resolved inside a real property, so a hidden probe reports the inset in px.
+  if(!probe){probe=document.createElement('div');probe.setAttribute('aria-hidden','true');probe.style.cssText='position:fixed;left:0;top:0;width:0;visibility:hidden;pointer-events:none;padding-bottom:env(safe-area-inset-bottom,0px)';document.body.appendChild(probe)}
+  return parseFloat(getComputedStyle(probe).paddingBottom)||0
+}
 
 /**
  * Edge-docked AI launcher: a slim tab that overlays the right edge (the content keeps only a few
@@ -21,16 +28,20 @@ export function AiAssistant(){
   const app=useApp()
   const dialogs=useOverlayCount()
   const enabled=app.can('ai')&&app.state.settings.ai.enabled
-  const [ratio,setRatioState]=useState(()=>{const saved=Number(storage.get(POSITION_KEY,.82));return clamp(Number.isFinite(saved)?saved:.82,0,1)})
+  const [ratio,setRatioState]=useState(()=>readRatio(storage.get<unknown>(POSITION_KEY,DEFAULT_RATIO)))
   const ratioRef=useRef(ratio)
   const setRatio=(next:number)=>{ratioRef.current=next;setRatioState(next)}
-  const [viewport,setViewport]=useState(()=>window.innerHeight)
+  const [viewport,setViewport]=useState(()=>({h:viewportHeight(),safe:safeBottom()}))
   const drag=useRef<{startY:number;startTop:number;moved:boolean}|null>(null)
-  useEffect(()=>{const fn=()=>setViewport(window.innerHeight);window.addEventListener('resize',fn);return()=>window.removeEventListener('resize',fn)},[])
+  useEffect(()=>{
+    // Re-derives the position from the stored ratio on resize / rotation / mobile browser bars.
+    const fn=()=>setViewport({h:viewportHeight(),safe:safeBottom()})
+    window.addEventListener('resize',fn);window.visualViewport?.addEventListener('resize',fn)
+    return()=>{window.removeEventListener('resize',fn);window.visualViewport?.removeEventListener('resize',fn)}
+  },[])
   useEffect(()=>{document.documentElement.classList.toggle('has-ai-dock',enabled);return()=>document.documentElement.classList.remove('has-ai-dock')},[enabled])
-  const min=TOP_SAFE,max=Math.max(min,viewport-DOCK_H-BOTTOM_SAFE)
-  const top=min+ratio*(max-min)
-  const setTop=(next:number)=>setRatio(max>min?(clamp(next,min,max)-min)/(max-min):0)
+  const top=topFromRatio(ratio,viewport.h,viewport.safe)
+  const setTop=(next:number)=>setRatio(ratioFromTop(next,viewport.h,viewport.safe))
   const persist=(r=ratioRef.current)=>storage.set(POSITION_KEY,Math.round(r*1000)/1000)
 
   const down=(e:PointerEvent<HTMLButtonElement>)=>{if(e.button!==0)return;drag.current={startY:e.clientY,startTop:top,moved:false};try{e.currentTarget.setPointerCapture(e.pointerId)}catch{/* capture is an enhancement; dragging still works without it */}}
@@ -40,7 +51,7 @@ export function AiAssistant(){
     if(e.key!=='ArrowUp'&&e.key!=='ArrowDown')return
     e.preventDefault()
     const step=(e.shiftKey?120:32)*(e.key==='ArrowUp'?-1:1)
-    const next=max>min?(clamp(top+step,min,max)-min)/(max-min):0
+    const next=ratioFromTop(top+step,viewport.h,viewport.safe)
     setRatio(next);persist(next)
   }
 

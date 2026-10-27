@@ -46,7 +46,20 @@ export const normalizeLogin=(login:string)=>normalizePhone(login)??login.trim().
 /** Reads whatever was stored; anything missing falls back to defaults so an older store keeps working. */
 export function normalizeAuthStore(raw:unknown):AuthStore{
   const r=(raw&&typeof raw==='object'?raw:{}) as Partial<AuthStore>
-  return {version:1,accounts:Array.isArray(r.accounts)?r.accounts:[],policy:{...DEFAULT_POLICY,...(r.policy||{})},events:Array.isArray(r.events)?r.events:[],attempts:r.attempts&&typeof r.attempts==='object'?r.attempts:{}}
+  // An entry that is not an account (null, a string) would break every lookup by id; it cannot sign in anyway.
+  const accounts=Array.isArray(r.accounts)?r.accounts.filter(a=>a&&typeof a==='object'&&typeof a.id==='string'&&typeof a.employeeId==='string'):[]
+  return {version:1,accounts,policy:{...DEFAULT_POLICY,...(r.policy&&typeof r.policy==='object'?r.policy:{})},events:Array.isArray(r.events)?r.events.filter(e=>e&&typeof e==='object'):[],attempts:r.attempts&&typeof r.attempts==='object'?r.attempts:{}}
+}
+
+const validTime=(v:unknown):v is string=>typeof v==='string'&&!Number.isNaN(Date.parse(v))
+
+/** A stored session as the app wrote it, or null: a partial or hand-edited one must not live without expiry. */
+export function normalizeSession(raw:unknown):Session|null{
+  if(!raw||typeof raw!=='object')return null
+  const r=raw as Partial<Session>
+  if(typeof r.id!=='string'||typeof r.accountId!=='string'||typeof r.employeeId!=='string')return null
+  if(!validTime(r.startedAt)||!validTime(r.lastActivity)||!validTime(r.expiresAt))return null
+  return {id:r.id,accountId:r.accountId,employeeId:r.employeeId,startedAt:r.startedAt,lastActivity:r.lastActivity,expiresAt:r.expiresAt,remember:r.remember===true}
 }
 
 export function logAuth(store:AuthStore,ctx:AuthCtx,e:Omit<AuthEvent,'id'|'at'|'actorId'|'actorName'>):AuthStore{
@@ -86,6 +99,20 @@ export function activeSuperAdmins(store:AuthStore,s:S,exceptAccountId?:string){
 
 /** After setup there must always be a Super Admin who can sign in; any change that would end that is refused. */
 export const superAdminInvariant=(store:AuthStore,s:S)=>!store.accounts.length||activeSuperAdmins(store,s).length>0
+
+/**
+ * Role assignments live in the business data, accounts outside it. When the business data had to be started
+ * clean (recovery of unreadable data), nobody would hold Super Admin and every action would be blocked: the
+ * employee of the oldest active account — the first-run administrator — gets the Super Admin role back.
+ * Returns the state unchanged when the invariant already holds or no such employee exists.
+ */
+export function restoreSuperAdmin(store:AuthStore,s:S):S{
+  if(superAdminInvariant(store,s))return s
+  const superRole=s.roles.find(r=>r.key==='super_admin')
+  const first=[...store.accounts].filter(a=>a.status==='active').sort((a,b)=>a.createdAt.localeCompare(b.createdAt)).find(a=>s.employees.some(e=>e.id===a.employeeId&&e.status!=='Arxiv'))
+  if(!superRole||!first)return s
+  return {...s,employees:s.employees.map(e=>e.id===first.employeeId?{...e,roleId:superRole.id}:e)}
+}
 
 /** Whether `actor` may manage the account of `employeeId`: never their own, only people ranked below them (Super Admin: anyone). */
 export function accountManageBlocker(s:S,actor:Employee|undefined,employeeId:string,allowSelf=false):string|null{
@@ -159,6 +186,8 @@ export type SessionProblem='missing'|'expired'|'idle'|'blocked'|'credentials'
 /** Whether a stored session still lets its user in; `idle` applies only to sessions without "remember me". */
 export function sessionProblem(session:Session|null,store:AuthStore,s:S,now:Date):SessionProblem|null{
   if(!session)return 'missing'
+  // Times that cannot be read would never expire: such a session is treated as expired.
+  if(!validTime(session.expiresAt)||!validTime(session.lastActivity)||!validTime(session.startedAt))return 'expired'
   const account=store.accounts.find(a=>a.id===session.accountId)
   if(!account||account.employeeId!==session.employeeId)return 'missing'
   if(signInBlocker(s,account))return 'blocked'

@@ -4,7 +4,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import * as A from '../.test-dist/actions.mjs'
 import {createSeedState,createInitialState} from '../.test-dist/mockData.mjs'
-import {orderCosting,estimateOrderCost,remainingQty,stockOf,orderQcHold} from '../.test-dist/manufacturingEngine.mjs'
+import {orderCosting,estimateOrderCost,remainingQty,orderQcHold} from '../.test-dist/manufacturingEngine.mjs'
 import {toCsv,neutralize} from '../.test-dist/exportData.mjs'
 import {isoDate,addDays} from '../.test-dist/dates.mjs'
 
@@ -142,7 +142,10 @@ test('BUG-11: maintenance can start while a breakdown stop is open and ends that
 test('BUG-12: an item unit cannot change once quantities exist in it, and BOM lines use the stock unit',()=>{
   let s=fresh()
   refused(A.updateEntity(s,ctx(s),'rawMaterials','rm1',{unit:'g'},'Xomashyo'),/birligini/)
-  const bom=s.boms.find(b=>b.id==='bom1')
+  // Units are checked on a draft revision (an active revision is never edited in place — phase 3).
+  s=createInitialState()
+  const draft=A.createBomDraft(s,ctx(s),'p1');s=ok(draft)
+  const bom=s.boms.find(b=>b.id===draft.result.id)
   refused(A.saveBom(s,ctx(s),{...bom,components:bom.components.map(c=>c.materialId==='rm1'?{...c,unit:'g'}:c)}),/birligi/)
 })
 

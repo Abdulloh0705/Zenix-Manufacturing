@@ -6,6 +6,8 @@ import {Empty} from './DataDisplay'
 import {SearchBox,Select} from './Forms'
 import {Popover} from './Overlays'
 import {downloadCsv} from '../../utils/exportData'
+import {paginate,sortRows} from './tableSort'
+import type {SortValue} from './tableSort'
 
 /**
  * Whether the current page may export its tables (the module's "export" permission). Provided by the app
@@ -36,14 +38,24 @@ export function nodeText(node:ReactNode):string{
 }
 
 const INTERACTIVE='button,a,input,select,textarea,label,[role="button"],[role="switch"],[role="checkbox"],[role="option"]'
-const collator=new Intl.Collator('uz',{numeric:true,sensitivity:'base'})
 
+/** What the user sees in the cell — used for search and export. */
 function cellValue<T>(row:T,c:Column<T>){
   if(c.value)return c.value(row)
   if(c.sort)return c.sort(row)
   const raw=(row as Record<string,unknown>)[c.key]
   if(c.render)return nodeText(c.render(row))
   return typeof raw==='number'||typeof raw==='string'?raw:raw==null?'':String(raw)
+}
+
+/** What the column sorts by: the explicit value, else the raw number / ISO date behind a formatted cell. */
+export function sortValueOf<T>(row:T,c:Column<T>):SortValue{
+  if(c.value)return c.value(row)
+  if(c.sort)return c.sort(row)
+  const raw=(row as Record<string,unknown>)[c.key]
+  if(typeof raw==='number')return raw
+  if(typeof raw==='string'&&/^\d{4}-\d{2}-\d{2}/.test(raw))return raw
+  return cellValue(row,c)
 }
 
 export function ResourceTable<T extends {id:string}>({rows,columns,query,onQuery,placeholder='Qidirish...',actions,filters,onRow,rowLabel,emptyTitle='Ma’lumot yo‘q',emptyText,emptyAction,pageSize:initialPageSize=10,filtersActive=false,onResetFilters,exportName,initialSort,rowClassName,resetKey}:{
@@ -55,20 +67,15 @@ export function ResourceTable<T extends {id:string}>({rows,columns,query,onQuery
   const [sortKey,setSortKey]=useState(initialSort?.key||''),[dir,setDir]=useState<1|-1>(initialSort?.dir||1)
   const [page,setPage]=useState(1),[pageSize,setPageSize]=useState(initialPageSize)
   const q=query.trim().toLowerCase()
+  // Searchable text per row is built only while a query is typed, from the searchable columns (what the user sees).
   const filtered=useMemo(()=>{
     const terms=q.split(/\s+/).filter(Boolean)
     const list=terms.length?rows.filter(r=>{const text=columns.filter(c=>c.searchable!==false).map(c=>String(cellValue(r,c)??'')).join(' ').toLowerCase();return terms.every(t=>text.includes(t))}):rows
     const c=columns.find(x=>x.key===sortKey)
-    if(!c)return list
-    return [...list].sort((a,b)=>{
-      const av=cellValue(a,c),bv=cellValue(b,c)
-      if(typeof av==='number'&&typeof bv==='number')return (av-bv)*dir
-      return collator.compare(String(av??''),String(bv??''))*dir
-    })
+    return c?sortRows(list,r=>sortValueOf(r,c),dir):list
   },[rows,columns,q,sortKey,dir])
   useEffect(()=>{setPage(1)},[q,sortKey,dir,pageSize,resetKey,rows.length])
-  const pages=Math.max(1,Math.ceil(filtered.length/pageSize)),safe=Math.min(page,pages)
-  const from=(safe-1)*pageSize,slice=filtered.slice(from,from+pageSize)
+  const {pages,page:safe,from,slice}=paginate(filtered,page,pageSize)
   const toggleSort=(key:string)=>{
     if(sortKey!==key){setSortKey(key);setDir(1);return}
     if(dir===1){setDir(-1);return}

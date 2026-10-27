@@ -1,13 +1,16 @@
 import {useMemo,useRef,useState} from 'react'
 import {useNavigate,useSearchParams} from 'react-router-dom'
 import {useApp} from '../../../app/providers/AppProvider/AppContext'
-import {APPEARANCE_PAIRS,pairFor} from '../../../app/theme/themeRegistry'
+import {pairFor} from '../../../app/theme/themeRegistry'
+import {BackgroundOptions,DensityOptions} from '../../../layout/AppLayout/Topbar'
 import type {CurrencyCode,ThemeMode} from '../../../types'
 import {CURRENCIES} from '../../../utils/format'
 import {Card,Confirm,Field,Icon,InfoGrid,Input,Modal,MoneyInput,PageHeader,Segmented,Select,StatusBadge,Toggle,required,useForm} from '../../../shared/ui'
 import {downloadText} from '../../../utils/exportData'
 import {fileSize} from '../../../utils/format'
 import {todayISO} from '../../../utils/dates'
+import {DEFAULT_WORKING_DAYS} from '../../../domain/manufacturingEngine'
+import {WorkingDaysPicker} from '../../common/WorkingDays'
 
 export default function Settings(){
   const [sp]=useSearchParams(),view=sp.get('view')||'business'
@@ -63,6 +66,7 @@ function Policies({focus}:{focus:string}){
           <Field label="Ikki kishilik tasdiq chegarasi" error={form.error('poDualApprovalFrom')} hint="PO summasi shundan boshlab"><MoneyInput min="0" disabled={!canEdit||p.poDualApproval!==true} {...form.money('poDualApprovalFrom')}/></Field>
           <Field label="Smena davomiyligi (min)" error={form.error('shiftMinutes')}><Input type="number" min="60" disabled={!canEdit} {...form.input('shiftMinutes')}/></Field>
           <Field label="Default liniya"><Select value={s.settings.defaultLineId} disabled={!canEdit} onChange={v=>app.saveSettings({defaultLineId:v})}>{s.productionLines.map(l=><option key={l.id} value={l.id}>{l.name}</option>)}</Select></Field>
+          <div className="field span-2"><label>Ish kunlari (kompaniya kalendari)</label><WorkingDaysPicker value={p.workingDays?.length?p.workingDays:DEFAULT_WORKING_DAYS} disabled={!canEdit} onChange={days=>setPolicy({workingDays:days})}/><small className="field-hint">Capacity, Gantt va finite rejalashtirish shu kunlarni ishlatadi; work center o‘z kalendarini belgilashi mumkin</small></div>
         </div>
         {canEdit&&<div className="form-actions"><button type="button" className="primary-glass-btn" disabled={!form.dirty} onClick={()=>form.submit(v=>{setPolicy({overheadRate:Number(v.overheadRate),machineRatePerHour:Number(v.machineRatePerHour),shiftMinutes:Number(v.shiftMinutes),poDualApprovalFrom:Number(v.poDualApprovalFrom)});form.reset(v)})}>Saqlash</button></div>}
       </Card>
@@ -94,13 +98,11 @@ function Appearance(){
       <Card title="Theme" subtitle={`Hozir: ${app.resolvedTheme==='dark'?'Dark':'Light'}`}><Segmented ariaLabel="Theme" items={[{value:'light',label:'Light'},{value:'dark',label:'Dark'},{value:'system',label:'System'}]} value={s.settings.theme} onChange={v=>app.setTheme(v as ThemeMode)}/></Card>
       <Card title="Valyuta" subtitle="Faqat ko‘rinish — ma’lumotlar so‘mda saqlanadi"><Segmented ariaLabel="Valyuta" items={(['UZS','USD','RUB'] as CurrencyCode[]).map(c=>({value:c,label:`${c} · ${CURRENCIES[c].symbol}`}))} value={s.settings.currency||'UZS'} onChange={v=>app.setCurrency(v as CurrencyCode)}/></Card>
     </div>
-    <Card title="Fon">
-      <div className="swatch-grid wide">{APPEARANCE_PAIRS.map(p=>{const item=pairFor(p.id,app.resolvedTheme),active=s.settings.appearance===p.id;return <button type="button" key={p.id} role="radio" aria-checked={active} className={`swatch ${active?'active':''}`} onClick={()=>app.setAppearance(p.id)}><span className={`swatch-preview bg-${item.id}`}><i style={{background:item.accent}}/></span><span>{item.name}</span>{active&&<Icon name="check" size={13}/>}</button>})}</div>
+    <Card title="Fon" subtitle={`${pairFor(s.settings.appearance,app.resolvedTheme).name} · ${app.resolvedTheme==='dark'?'Dark':'Light'} rejimida`}>
+      <BackgroundOptions className="wide"/>
     </Card>
-    <Card title="O‘qilishi">
-      <div className="form-grid">
-        <Field label="Shrift o‘lchami"><Select value={s.settings.fontSize} onChange={v=>app.setPreferences({fontSize:v as 'small'|'standard'|'large'})}><option value="small">Kichik</option><option value="standard">Standart</option><option value="large">Katta</option></Select></Field>
-      </div>
+    <Card title="Zichlik va o‘qilishi" subtitle="Butun ilova: forma, karta, jadval va menyular">
+      <DensityOptions/>
       <Toggle checked={s.settings.reducedMotion} onChange={v=>app.setPreferences({reducedMotion:v})} label="Animatsiyalarni kamaytirish" description="OS sozlamasi ham hisobga olinadi"/>
     </Card>
   </div>
@@ -110,14 +112,14 @@ function Notifications(){
   const app=useApp(),n=app.state.settings.notifications,canEdit=app.can('settings','edit')
   const set=(k:keyof typeof n,v:boolean)=>app.saveSettings({notifications:{...n,[k]:v}})
   return <div className="page-stack">
-    <PageHeader title="Bildirishnomalar" subtitle="O‘chirilgan tur uchun yangi xabar yaratilmaydi"/>
+    <PageHeader title="Bildirishnomalar" subtitle="O‘chirilgan tur uchun yangi xabar yaratilmaydi, eskilari ham qo‘ng‘iroqchada ko‘rinmaydi"/>
     {readOnlyNote(canEdit)}
     <Card>
       <Toggle checked={n.lowStock} disabled={!canEdit} onChange={v=>set('lowStock',v)} label="Xomashyo kamayishi" description="Reorder’dan past yoki MO material kutsa"/>
       <Toggle checked={n.quality} disabled={!canEdit} onChange={v=>set('quality',v)} label="Sifat muammolari" description="Failed / Scrap, qaytarishlar"/>
       <Toggle checked={n.maintenance} disabled={!canEdit} onChange={v=>set('maintenance',v)} label="Uskuna va maintenance" description="Downtime, servis"/>
-      <Toggle checked={n.delay} disabled={!canEdit} onChange={v=>set('delay',v)} label="Muddat kechikishi"/>
-      <Toggle checked={n.ai} disabled={!canEdit} onChange={v=>set('ai',v)} label="AI tavsiyalari"/>
+      <Toggle checked={false} disabled onChange={()=>undefined} label="Muddat kechikishi" description="Hozircha alohida xabar yaratilmaydi — kechikkan MOlar Boshqaruv paneli va Ishlab chiqarish → Umumiy’da ko‘rinadi" disabledReason="Bu tur uchun bildirishnoma manbai hali yo‘q"/>
+      <Toggle checked={false} disabled onChange={()=>undefined} label="AI tavsiyalari" description="Hozircha alohida xabar yaratilmaydi — tavsiyalar ZENIX AI panelida" disabledReason="Bu tur uchun bildirishnoma manbai hali yo‘q"/>
     </Card>
   </div>
 }
@@ -170,8 +172,13 @@ function System(){
   // Parsed only when the data changes (a restore or reset writes a new copy), not on every render.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const backup=useMemo(()=>app.lastBackup(),[s])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const copies=useMemo(()=>app.recoveryCopies(),[s])
   const fileRef=useRef<HTMLInputElement>(null)
-  const size=new Blob([JSON.stringify(s)]).size
+  // Backups, archives and recovery copies share the browser quota with the working data, so the meter shows both.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const usage=useMemo(()=>app.storageUsage(),[s])
+  const size=usage.total
   const canEdit=app.can('settings','edit')
   const exportBackup=()=>{if(!app.can('settings','export')){app.toast('Backup eksport uchun ruxsat yo‘q','danger');return}downloadText(`zenix-backup-${todayISO()}.json`,JSON.stringify(s,null,2),'application/json');app.toast('Backup fayli yuklab olindi')}
   const onFile=async(file?:File)=>{if(!file)return;try{setImportData(JSON.parse(await file.text()));setImportName(file.name)}catch{app.toast('Fayl JSON formatida emas','danger')}finally{if(fileRef.current)fileRef.current.value=''}}
@@ -181,7 +188,7 @@ function System(){
       <Card title="Holat">
         <div className="stack-list">
           <div className="list-row"><span className="list-row-copy"><b>Frontend</b><small>React 19 · client rendering</small></span><StatusBadge tone="success">Ishlamoqda</StatusBadge></div>
-          <div className="list-row"><span className="list-row-copy"><b>Brauzer xotirasi (localStorage)</b><small>{fileSize(size)} / ~5 MB</small></span><StatusBadge tone={size>4e6?'danger':size>2.5e6?'warning':'success'}>{Math.round(size/5e6*100)}%</StatusBadge></div>
+          <div className="list-row"><span className="list-row-copy"><b>Brauzer xotirasi (localStorage)</b><small>Ish ma’lumoti {fileSize(usage.data)} · jami (zaxiralar bilan) {fileSize(size)} / ~5 MB</small></span><StatusBadge tone={size>4e6?'danger':size>2.5e6?'warning':'success'}>{Math.round(size/5e6*100)}%</StatusBadge></div>
           <div className="list-row"><span className="list-row-copy"><b>Backend API</b><small>Integratsiya nuqtasi: domain/actions.ts → REST</small></span><StatusBadge tone="neutral">Ulanmagan</StatusBadge></div>
         </div>
         <InfoGrid columns={3} items={[{label:'MO',value:s.productionOrders.length},{label:'Harakatlar',value:s.stockMovements.length},{label:'Audit yozuvlari',value:s.activity.length}]}/>
@@ -196,6 +203,10 @@ function System(){
         </div>
         {backup?.savedAt&&<div className="list-row"><span className="list-row-copy"><b>Oxirgi avtomatik zaxira</b><small>{backup.savedAt} · {BACKUP_REASON[backup.reason||'']||backup.reason}</small></span><button type="button" className="secondary-glass-btn compact" disabled={!canEdit} onClick={()=>setRestore(true)}><Icon name="undo" size={14}/>Tiklash</button></div>}
       </Card>
+      {copies.length>0&&<Card title="Tiklash nusxalari">
+        <p className="soft-meta">Ilova ma’lumotni tiklash yoki yangilashdan oldin saqlagan asl nusxalar. Faylni yuklab olib, kerak bo‘lsa Backup import qiling.</p>
+        <div className="stack-list">{copies.map(c=><div key={c.key} className="list-row"><span className="list-row-copy"><b>{c.label}</b><small>{c.savedAt||'—'} · {fileSize(new Blob([c.text]).size)}</small></span><button type="button" className="secondary-glass-btn compact" disabled={!app.can('settings','export')} onClick={()=>downloadText(`zenix-${c.key}-${todayISO()}.json`,c.text,'application/json')}><Icon name="download" size={14}/>Yuklab olish</button></div>)}</div>
+      </Card>}
     </div>
     <Confirm open={reset} onClose={()=>setReset(false)} onConfirm={app.resetTransactions} danger title="Tranzaksiyalar tozalansinmi?" text="Buyurtmalar, qoldiq va harakatlar, xaridlar, savdo, sifat, servis, xarajatlar, bildirishnomalar va audit tarixi o‘chiriladi. Mahsulot, BOM, xomashyo, supplier, ombor, uskuna, xodim, rol va sozlamalar saqlanadi. Avval Backup eksport qiling." confirmText="Tozalash"/>
     <Confirm open={restore} onClose={()=>setRestore(false)} onConfirm={app.restoreLastBackup} danger title="Oxirgi zaxira tiklansinmi?" text="Joriy ma’lumot zaxira bilan almashtiriladi; hozirgi holat esa yangi zaxira sifatida saqlanadi (qaytarish mumkin)." confirmText="Tiklash"/>

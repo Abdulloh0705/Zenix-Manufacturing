@@ -2,17 +2,18 @@ import {useRef,useState} from 'react'
 import type {CSSProperties} from 'react'
 import {useNavigate,useSearchParams} from 'react-router-dom'
 import {useApp} from '../../../app/providers/AppProvider/AppContext'
-import {Card,Checkbox,Confirm,Drawer,Empty,Field,FilterSelect,Icon,InfoGrid,Input,KPI,Modal,MoneyInput,PageHeader,Progress,ResourceTable,SectionTitle,Select,StatusBadge,Tabs,required,useForm,useRecordParam,useSearchParamState} from '../../../shared/ui'
+import {Card,Checkbox,Confirm,Drawer,Empty,Field,FilterSelect,Icon,InfoGrid,Input,KPI,Modal,MoneyInput,PageHeader,Progress,ResourceTable,Select,StatusBadge,Tabs,required,useForm,useRecordParam,useSearchParamState} from '../../../shared/ui'
 import type {CurrencyCode,PurchaseOrder,SubcontractOrder,Supplier,SupplierMaterial} from '../../../types'
 import {activeBomFor,createMrpPlan,perUnit,stockOf} from '../../../domain/manufacturingEngine'
 import {needsSecondApprover,referenceBlocker} from '../../../domain/actions'
-import {SUPPLY_CURRENCIES,linkBlock,linksOfSupplier,supplierPerformance} from '../../../domain/supplierMaterials'
+import {SUPPLY_CURRENCIES,linkBlock,linksOfSupplier,receiptQuantities,rejectedOpen,supplierPerformance,supplierPurchaseHistory} from '../../../domain/supplierMaterials'
+import {QualityResolveModal} from '../../common/QualityResolveModal'
 import {CURRENCIES,quoteMoney} from '../../../utils/format'
 import {LinkTermsTable,PurchasePlanModal,SourcingModal,SupplierMaterialModal,conversionText,quoteText} from '../components/Sourcing'
 import type {SourcingNeed} from '../components/Sourcing'
 import {addDays,todayISO} from '../../../utils/dates'
 import {compactMoney,money,num,qty} from '../../../utils/format'
-import {materialName,productName,supplierName,warehouseName} from '../../common/lookups'
+import {employeeName,materialName,productName,supplierName,warehouseName} from '../../common/lookups'
 import {ActivityPanel,AttachmentsPanel} from '../../common/RecordPanels'
 import {BarList} from '../../common/charts'
 
@@ -48,7 +49,7 @@ function Overview(){
         {open.length?<div className="stack-list">{[...open].sort((a,b)=>a.expectedDate.localeCompare(b.expectedDate)).map(p=><button type="button" className="list-row is-clickable" key={p.id} onClick={()=>navigate(`/purchases?view=orders&id=${p.id}`)}><span className="list-row-copy"><b>{p.code} · {supplierName(s,p.supplierId)}</b><small>{p.items.map(i=>`${materialName(s,i.materialId)} ${num(i.qty-i.received)}`).join(', ')} · {p.expectedDate}</small></span><span className="list-row-meta"><StatusBadge tone={late.includes(p)?'danger':undefined}>{late.includes(p)?'Kechikmoqda':p.status}</StatusBadge></span></button>)}</div>:<Empty compact title="Ochiq xarid yo‘q"/>}
       </Card>
       <Card title="Supplier performance" subtitle="vaqtida yetkazish" actions={<button type="button" className="ghost-btn" onClick={()=>navigate('/purchases?view=suppliers')}>Supplierlar <Icon name="chevron" size={13}/></button>}>
-        <BarList rows={s.suppliers.map(x=>{const p=supplierPerformance(s,x.id);return {label:x.name,sub:`${p.receipts} qabul · sifat ${p.qualityPct??'—'}% · lead ${p.avgLead??'—'} kun`,value:p.onTimePct??0,tone:(p.onTimePct===null?undefined:p.onTimePct>=90?'success':p.onTimePct>=70?'warning':'danger') as 'success'|'warning'|'danger'|undefined}})} unit="%" max={100}/>
+        <BarList rows={s.suppliers.map(x=>{const p=supplierPerformance(s,x.id);return {label:x.name,sub:`${p.receipts} qabul · rad ${p.rejectionPct??'—'}% · lead ${p.avgLead??'—'} kun`,value:p.onTimePct??0,tone:(p.onTimePct===null?undefined:p.onTimePct>=90?'success':p.onTimePct>=70?'warning':'danger') as 'success'|'warning'|'danger'|undefined}})} unit="%" max={100}/>
       </Card>
     </div>
   </div>
@@ -105,19 +106,24 @@ function Orders(){
 }
 
 type Line={linkId:string;units:string;price:string}
-/** Manual PO: only materials linked to the chosen supplier, in its purchase units, currency and MOQ. */
-function PurchaseFormModal({onClose,onCreated,supplierId}:{onClose:()=>void;onCreated?:(id:string)=>void;supplierId?:string}){
+/** Manual PO: only materials linked to the chosen supplier, in its purchase units, currency and MOQ. With `po` it edits a draft. */
+function PurchaseFormModal({onClose,onCreated,supplierId,po}:{onClose:()=>void;onCreated?:(id:string)=>void;supplierId?:string;po?:PurchaseOrder}){
   const app=useApp(),s=app.state
-  const suppliers=s.suppliers.filter(x=>x.status==='Faol'||x.id===supplierId)
+  const fixedSupplier=po?.supplierId||supplierId
+  const suppliers=s.suppliers.filter(x=>x.status==='Faol'||x.id===fixedSupplier)
   const orderable=(sid:string)=>linksOfSupplier(s,sid).filter(l=>!linkBlock(s,l))
   const defaultUnits=(l:{moq:number;unitFactor:number})=>String(l.moq>0?l.moq:l.unitFactor===1?100:1)
   const lineFor=(l?:ReturnType<typeof orderable>[number]):Line=>({linkId:l?.id||'',units:l?defaultUnits(l):'',price:l?String(l.price):''})
-  const [sid,setSid]=useState(()=>supplierId||suppliers.find(x=>orderable(x.id).length)?.id||suppliers[0]?.id||'')
+  const [sid,setSid]=useState(()=>fixedSupplier||suppliers.find(x=>orderable(x.id).length)?.id||suppliers[0]?.id||'')
   const links=orderable(sid)
   const lead=(ls:Line[])=>Math.max(0,...ls.map(l=>s.supplierMaterials.find(x=>x.id===l.linkId)?.leadTime??0))
-  const [lines,setLines]=useState<Line[]>(()=>{const first=orderable(sid)[0];return first?[lineFor(first)]:[]})
-  const [expectedDate,setExpectedDate]=useState(()=>addDays(todayISO(),lead(lines)||s.suppliers.find(x=>x.id===sid)?.leadTime||4))
-  const [warehouseId,setWarehouseId]=useState(()=>rawStores(s).find(w=>w.id===s.settings.defaultWarehouseId)?.id||rawStores(s)[0]?.id||'')
+  // A draft's lines come back in purchase units and the supplier's currency, as they were entered.
+  const [lines,setLines]=useState<Line[]>(()=>{
+    if(po)return po.items.map(i=>{const link=s.supplierMaterials.find(l=>l.id===i.linkId)||links.find(l=>l.materialId===i.materialId);return {linkId:link?.id||'',units:String(Math.round(i.qty/(i.unitFactor||link?.unitFactor||1)*1000)/1000),price:String(i.unitPrice??link?.price??i.price)}})
+    const first=orderable(sid)[0];return first?[lineFor(first)]:[]
+  })
+  const [expectedDate,setExpectedDate]=useState(()=>po?.expectedDate||addDays(todayISO(),lead(lines)||s.suppliers.find(x=>x.id===sid)?.leadTime||4))
+  const [warehouseId,setWarehouseId]=useState(()=>po?.warehouseId||rawStores(s).find(w=>w.id===s.settings.defaultWarehouseId)?.id||rawStores(s)[0]?.id||'')
   const [draft,setDraft]=useState(false),[belowMoq,setBelowMoq]=useState(false),[submitted,setSubmitted]=useState(false)
   const changeSupplier=(v:string)=>{setSid(v);const first=orderable(v)[0];const next=first?[lineFor(first)]:[];setLines(next);setExpectedDate(addDays(todayISO(),lead(next)||s.suppliers.find(x=>x.id===v)?.leadTime||4))}
   const rows=lines.map(l=>{
@@ -135,14 +141,17 @@ function PurchaseFormModal({onClose,onCreated,supplierId}:{onClose:()=>void;onCr
   const submit=()=>{
     setSubmitted(true)
     if(hasErrors)return
-    const r=app.createPurchaseOrder({supplierId:sid,lines:rows.map(x=>({materialId:x.link!.materialId,qty:x.stockQty,price:Math.round(x.perStock*100)/100})),expectedDate,warehouseId,status:draft||draftOnly?'Qoralama':'Tasdiqlangan',allowBelowMoq:belowMoq})
+    const payload=rows.map(x=>({materialId:x.link!.materialId,qty:x.stockQty,price:Math.round(x.perStock*100)/100}))
+    const r=po
+      ?app.updatePurchaseDraft(po.id,{lines:payload,expectedDate,warehouseId,allowBelowMoq:belowMoq})
+      :app.createPurchaseOrder({supplierId:sid,lines:payload,expectedDate,warehouseId,status:draft||draftOnly?'Qoralama':'Tasdiqlangan',allowBelowMoq:belowMoq})
     if(r.ok){onCreated?.(r.id!);onClose()}
   }
-  return <Modal open onClose={onClose} title="Yangi Purchase Order" subtitle="Faqat supplierga biriktirilgan materiallar · tasdiqlangan PO “yo‘lda” bo‘ladi" size="lg"
-    footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Bekor qilish</button><span className="spacer"/><span className="soft-meta">Jami: <b>{money(total)}</b></span><button type="button" className="primary-glass-btn" disabled={!links.length} onClick={submit}><Icon name="check" size={16}/>{draft?'Qoralama saqlash':'Yaratish va tasdiqlash'}</button></>}>
+  return <Modal open onClose={onClose} title={po?`${po.code} — qoralamani tahrirlash`:'Yangi Purchase Order'} subtitle={po?'Qatorlar, ombor va sana tasdiqlanguncha o‘zgaradi':'Faqat supplierga biriktirilgan materiallar · tasdiqlangan PO “yo‘lda” bo‘ladi'} size="lg"
+    footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Bekor qilish</button><span className="spacer"/><span className="soft-meta">Jami: <b>{money(total)}</b></span><button type="button" className="primary-glass-btn" disabled={!links.length} onClick={submit}><Icon name="check" size={16}/>{po?'Saqlash':draft?'Qoralama saqlash':'Yaratish va tasdiqlash'}</button></>}>
     <div className="form-stack">
       <div className="form-grid">
-        <Field label="Supplier" required><Select value={sid} onChange={changeSupplier}>{suppliers.map(x=><option key={x.id} value={x.id}>{x.name} · {orderable(x.id).length} material</option>)}</Select></Field>
+        <Field label="Supplier" required><Select value={sid} disabled={Boolean(po)} onChange={changeSupplier}>{suppliers.map(x=><option key={x.id} value={x.id}>{x.name} · {orderable(x.id).length} material</option>)}</Select></Field>
         <Field label="Expected date" hint={lines.length?`Lead time ${lead(lines)} kun`:undefined}><Input type="date" value={expectedDate} onChange={e=>setExpectedDate(e.target.value)}/></Field>
         <Field label="Qabul ombori"><Select value={warehouseId} onChange={setWarehouseId}>{rawStores(s).map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</Select></Field>
       </div>
@@ -158,7 +167,7 @@ function PurchaseFormModal({onClose,onCreated,supplierId}:{onClose:()=>void;onCr
         {submitted&&rows.some(r=>r.error)&&<small className="field-error">Har bir qatorda material, musbat (butun xarid birligidagi) miqdor va narx bo‘lishi kerak; material takrorlanmasin.</small>}
       </section>:<Empty compact icon="truck" title="Bu supplierga faol material biriktirilmagan" text="Supplier → Materiallar bo‘limida material biriktiring yoki boshqa supplier tanlang."/>}
       {anyBelow&&<div className="inline-note warning"><Icon name="warning"/><span>Ba’zi qatorlar MOQ’dan kam.<Checkbox checked={belowMoq} onChange={setBelowMoq} label="Supplier bilan kelishilgan — MOQ’dan kam buyurtma"/></span></div>}
-      <Checkbox checked={draft||Boolean(draftOnly)} disabled={Boolean(draftOnly)} onChange={setDraft} label="Qoralama (RFQ)" description={draftOnly||'Tasdiqlanmaguncha incoming’ga qo‘shilmaydi'}/>
+      {!po&&<Checkbox checked={draft||Boolean(draftOnly)} disabled={Boolean(draftOnly)} onChange={setDraft} label="Qoralama (RFQ)" description={draftOnly||'Tasdiqlanmaguncha incoming’ga qo‘shilmaydi'}/>}
     </div>
   </Modal>
 }
@@ -167,12 +176,13 @@ function rawStores(s:ReturnType<typeof useApp>['state']){
   return s.warehouses.filter(w=>w.status==='Faol'&&(w.type==='Raw'||w.type==='Mixed'))
 }
 
-/** Receipt state: stock is usable only once incoming QC (if any) has passed. */
-function receiptStatus(s:ReturnType<typeof useApp>['state'],poId:string,receiptId:string):{label:string;tone:'success'|'warning'|'danger'|'neutral'}{
-  const q=s.qualityChecks.find(x=>x.sourceType==='purchase'&&x.sourceId===poId&&x.receiptId===receiptId)
-  if(!q||q.status==='Passed')return {label:'Omborda',tone:'success'}
-  if(q.status==='Pending')return {label:'QC kutilmoqda',tone:'warning'}
-  return {label:q.reason?.includes('Supplierga qaytarildi')?'Qaytarildi':`QC: ${q.status}`,tone:'danger'}
+/** Receipt state: stock is usable only once incoming QC (if any) has passed; rejected units wait for return / scrap. */
+function receiptStatus(s:ReturnType<typeof useApp>['state'],po:PurchaseOrder,r:PurchaseOrder['receipts'][number]):{label:string;tone:'success'|'warning'|'danger'|'neutral'}{
+  const q=receiptQuantities(s,po,r),open=rejectedOpen(s,po,r)
+  if(q.inspection==='pending')return {label:'QC kutilmoqda',tone:'warning'}
+  if(q.inspection==='none'||q.inspection==='accepted')return {label:'Omborda',tone:'success'}
+  if(open>0)return {label:q.inspection==='partial'?'Qisman rad · qaror kutilmoqda':'Rad · qaror kutilmoqda',tone:'danger'}
+  return {label:q.returned>0?'Rad etilgan qism qaytarildi':'Rad etilgan qism yopildi',tone:'neutral'}
 }
 
 function PurchaseDrawer({poId,onClose}:{poId:string|null;onClose:()=>void}){
@@ -198,7 +208,7 @@ function CloseRestModal({po,onClose}:{po:PurchaseOrder;onClose:()=>void}){
 
 function PurchaseDrawerBody({po,onClose}:{po:PurchaseOrder;onClose:()=>void}){
   const app=useApp(),s=app.state,navigate=useNavigate()
-  const [tab,setTab]=useState('lines'),[cancel,setCancel]=useState(false),[closeRest,setCloseRest]=useState(false)
+  const [tab,setTab]=useState('lines'),[cancel,setCancel]=useState(false),[closeRest,setCloseRest]=useState(false),[edit,setEdit]=useState(false),[check,setCheck]=useState<string|null>(null)
   const canEdit=app.can('purchases','edit')
   const receivable=['Tasdiqlangan','Yo‘lda','Qisman qabul'].includes(po.status)
   const checks=s.qualityChecks.filter(q=>q.sourceType==='purchase'&&q.sourceId===po.id)
@@ -209,6 +219,7 @@ function PurchaseDrawerBody({po,onClose}:{po:PurchaseOrder;onClose:()=>void}){
       {canEdit&&!['Bekor','Qabul qilindi'].includes(po.status)&&!po.items.some(i=>i.received>0)&&<button type="button" className="ghost-btn" onClick={()=>setCancel(true)}><Icon name="x" size={15}/>Bekor qilish</button>}
       {canEdit&&receivable&&po.items.some(i=>i.received>0)&&<button type="button" className="ghost-btn" onClick={()=>setCloseRest(true)}><Icon name="x" size={15}/>Qoldiqni yopish</button>}
       <span className="spacer"/>
+      {po.status==='Qoralama'&&canEdit&&<button type="button" className="secondary-glass-btn" onClick={()=>setEdit(true)}><Icon name="edit" size={15}/>Tahrirlash</button>}
       {po.status==='Qoralama'&&app.can('purchases','approve')&&<button type="button" className="primary-glass-btn" disabled={po.createdBy===app.currentEmployee.id&&needsSecondApprover(app.state,po.total)} title={po.createdBy===app.currentEmployee.id&&needsSecondApprover(app.state,po.total)?'Ikki kishilik tasdiq: o‘zingiz yaratgan PO’ni boshqa xodim tasdiqlaydi':undefined} onClick={()=>app.confirmPurchase(po.id)}><Icon name="check" size={16}/>Tasdiqlash</button>}
       {po.status==='Tasdiqlangan'&&canEdit&&<button type="button" className="secondary-glass-btn" onClick={()=>app.markPurchaseInTransit(po.id)}><Icon name="truck" size={16}/>Yo‘lda</button>}
       {receivable&&(canEdit||app.can('warehouse','edit'))&&<button type="button" className="primary-glass-btn" onClick={()=>navigate(`/purchases?view=receiving&po=${po.id}`)}><Icon name="download" size={16}/>Qabul qilish</button>}
@@ -217,16 +228,28 @@ function PurchaseDrawerBody({po,onClose}:{po:PurchaseOrder;onClose:()=>void}){
     {po.closedShort&&<div className="inline-note warning"><Icon name="info"/><span>Qoldiq yopilgan ({po.closedShort.date}): {po.closedShort.open} · {po.closedShort.reason}</span></div>}
     {(po.productionOrderIds||[]).length>0&&<div className="inline-note"><Icon name="factory"/><span>Ishlab chiqarish uchun: {(po.productionOrderIds||[]).map((id,i)=>{const o=s.productionOrders.find(x=>x.id===id);return o?<span key={id}>{i?', ':''}<button type="button" className="link-btn" onClick={()=>navigate(`/production?view=orders&id=${id}`)}>{o.code}</button> <small className="muted">({o.status})</small></span>:null})}</span></div>}
     {tab==='lines'&&<div className="table-scroll"><table className="fit"><thead><tr><th>Material</th><th className="align-right">Buyurtma</th><th className="align-right">Qabul</th><th className="align-right">Qolgan</th><th className="align-right">Narx</th><th className="align-right">Summa</th><th>Progress</th></tr></thead><tbody>{po.items.map(i=>{const m=s.rawMaterials.find(x=>x.id===i.materialId);const conv=i.purchaseUnit&&i.unitFactor&&(i.purchaseUnit!==m?.unit||i.unitFactor!==1);return <tr key={i.materialId}><td><div className="cell-main"><b>{m?.name}</b><small>{m?.sku}{conv?` · ${num(i.qty/i.unitFactor!,3)} ${i.purchaseUnit} × ${num(i.unitFactor!,3)} ${m?.unit}`:''}</small></div></td><td className="align-right">{qty(i.qty,m?.unit)}</td><td className="align-right">{num(i.received,1)}</td><td className="align-right">{i.qty-i.received>0?<b>{num(i.qty-i.received,1)}</b>:<span className="muted">—</span>}</td><td className="align-right"><div className="cell-main"><b>{money(i.price)}/{m?.unit}</b>{i.currency&&i.currency!=='UZS'&&i.unitPrice!==undefined&&<small>{quoteMoney(i.unitPrice,i.currency)}/{i.purchaseUnit}</small>}</div></td><td className="align-right">{money(i.qty*i.price)}</td><td><div className="progress-cell"><Progress value={i.received/Math.max(1e-9,i.qty)*100}/><small>{Math.round(i.received/Math.max(1e-9,i.qty)*100)}%</small></div></td></tr>})}<tr className="total"><td>Jami</td><td/><td/><td/><td/><td className="align-right">{money(po.total)}</td><td/></tr></tbody></table></div>}
-    {tab==='receipts'&&(po.receipts.length?<div className="stack-list">{po.receipts.map(r=>{const st=receiptStatus(s,po.id,r.id);return <div className="list-row" key={r.id}><span className="list-row-copy"><b>{materialName(s,r.materialId)} · {qty(r.qty,s.rawMaterials.find(m=>m.id===r.materialId)?.unit)}</b><small>{r.date} · {warehouseName(s,r.warehouseId||po.warehouseId)}{r.lot?` · ${r.lot}`:''}</small></span><span className="list-row-meta"><StatusBadge tone={st.tone}>{st.label}</StatusBadge>{r.lot&&<button type="button" className="ghost-btn" onClick={()=>navigate(`/reports?view=traceability&q=${encodeURIComponent(r.lot)}`)}>Trace</button>}</span></div>})}</div>:<Empty compact title="Hali qabul qilinmagan"/>)}
+    {tab==='receipts'&&(po.receipts.length?<div className="table-scroll"><table className="fit"><thead><tr><th>Qabul</th><th className="align-right">Qabul qilingan</th><th className="align-right">Omborga</th><th className="align-right">Rad</th><th className="align-right">Qaytarilgan / scrap</th><th>Holat</th><th><span className="sr-only">Amal</span></th></tr></thead><tbody>{po.receipts.map(r=>{
+      const st=receiptStatus(s,po,r),q=receiptQuantities(s,po,r),unit=s.rawMaterials.find(m=>m.id===r.materialId)?.unit
+      return <tr key={r.id}>
+        <td><div className="cell-main"><b>{materialName(s,r.materialId)}</b><small>{r.date} · {warehouseName(s,r.warehouseId||po.warehouseId)}{r.location?` / ${r.location}`:''}{r.lot?` · ${r.lot}`:''}{r.supplierLot?` · supplier lot ${r.supplierLot}`:''}{r.receivedBy?` · ${employeeName(s,r.receivedBy)}`:''}</small></div></td>
+        <td className="align-right">{qty(r.qty,unit)}</td>
+        <td className="align-right">{q.inspection==='pending'?<span className="muted">—</span>:num(q.accepted,3)}</td>
+        <td className="align-right">{q.rejected?<span className="negative">{num(q.rejected,3)}</span>:<span className="muted">—</span>}</td>
+        <td className="align-right">{q.returned||q.scrapped?`${num(q.returned,3)} / ${num(q.scrapped,3)}`:<span className="muted">—</span>}</td>
+        <td><StatusBadge tone={st.tone}>{st.label}</StatusBadge></td>
+        <td className="align-right"><span className="badge-row">{q.check&&<button type="button" className="ghost-btn" onClick={()=>setCheck(q.check!.id)}>{q.check.status==='Pending'?'Tekshirish':'QC'}</button>}{r.lot&&<button type="button" className="ghost-btn" onClick={()=>navigate(`/reports?view=traceability&q=${encodeURIComponent(r.lot)}`)}>Trace</button>}</span></td>
+      </tr>})}</tbody></table></div>:<Empty compact title="Hali qabul qilinmagan"/>)}
     {tab==='finance'&&<div className="form-grid">
       <Field label="Invoice holati"><Select value={po.invoiceStatus} disabled={!canEdit} onChange={v=>app.updatePurchaseMeta(po.id,{invoiceStatus:v})}>{['Kutilmoqda','Qabul qilindi','Tekshirildi','Yo‘q'].map(x=><option key={x} value={x}>{x}</option>)}</Select></Field>
       <Field label="To‘lov holati"><Select value={po.paymentStatus} disabled={!canEdit} onChange={v=>app.updatePurchaseMeta(po.id,{paymentStatus:v})}>{['To‘lanmagan','Qisman','To‘langan'].map(x=><option key={x} value={x}>{x}</option>)}</Select></Field>
       <InfoGrid items={[{label:'PO summasi',value:money(po.total)},{label:'Qabul qilingan qiymat',value:money(po.items.reduce((a,i)=>a+i.received*i.price,0))},{label:'Supplier qarzi',value:money(s.suppliers.find(x=>x.id===po.supplierId)?.debt||0)}]}/>
     </div>}
-    {tab==='quality'&&(checks.length?<div className="stack-list">{checks.map(q=><div className="list-row" key={q.id}><span className="list-row-copy"><b>{materialName(s,q.itemId)}{q.lot?` · ${q.lot}`:''}</b><small>{q.date}{q.reason?` · ${q.reason}`:''}</small></span><StatusBadge>{q.status}</StatusBadge></div>)}</div>:<Empty compact title="Incoming tekshiruv yo‘q"/>)}
+    {tab==='quality'&&(checks.length?<div className="stack-list">{checks.map(q=><button type="button" className="list-row is-clickable" key={q.id} onClick={()=>setCheck(q.id)}><span className="list-row-copy"><b>{materialName(s,q.itemId)}{q.lot?` · ${q.lot}`:''}</b><small>{q.date}{q.acceptedQty!==undefined?` · ${num(q.acceptedQty,3)} qabul / ${num(q.rejectedQty||0,3)} rad`:''}{q.reason?` · ${q.reason}`:''}</small></span><StatusBadge>{q.status}</StatusBadge></button>)}</div>:<Empty compact title="Incoming tekshiruv yo‘q"/>)}
     {tab==='docs'&&<AttachmentsPanel entityType="purchase" entityId={po.id} canEdit={canEdit}/>}
     {tab==='history'&&<ActivityPanel sources={[po.code]}/>}
     {closeRest&&<CloseRestModal po={po} onClose={()=>setCloseRest(false)}/>}
+    {edit&&<PurchaseFormModal po={po} onClose={()=>setEdit(false)}/>}
+    <QualityResolveModal checkId={check} onClose={()=>setCheck(null)}/>
     <Confirm open={cancel} onClose={()=>setCancel(false)} onConfirm={()=>app.cancelPurchase(po.id)} danger title={`${po.code} bekor qilinsinmi?`} text="Incoming miqdor zaxiradan olib tashlanadi." confirmText="PO’ni bekor qilish"/>
   </Drawer>
 }
@@ -336,13 +359,24 @@ function SupplierDrawer({supplier,onClose,onEdit}:{supplier:Supplier;onClose:()=
   const canLink=app.can('purchases','edit')||app.can('materials','edit')
   return <Drawer open onClose={onClose} title={supplier.name} eyebrow="Yetkazib beruvchi" icon="truck" subtitle={`${supplier.phone}${supplier.email?` · ${supplier.email}`:''}`} size="xl" headerExtra={<StatusBadge>{supplier.status}</StatusBadge>}
     actions={<>{app.can('purchases','delete')&&<button type="button" className="ghost-btn" onClick={()=>setRemove(true)}><Icon name="trash" size={15}/>O‘chirish</button>}<span className="spacer"/>{app.can('purchases','create')&&supplier.status==='Faol'&&<button type="button" className="secondary-glass-btn" onClick={()=>setPo(true)}><Icon name="cart" size={15}/>Yangi PO</button>}{app.can('purchases','edit')&&<button type="button" className="primary-glass-btn" onClick={onEdit}><Icon name="edit" size={16}/>Tahrirlash</button>}</>}>
-    <Tabs items={[{value:'materials',label:'Materiallar',count:links.length},{value:'orders',label:'Purchase Orders',count:pos.length},{value:'overview',label:'Ko‘rsatkichlar'},{value:'docs',label:'Hujjatlar'}]} active={tab} onChange={setTab}/>
+    <Tabs items={[{value:'materials',label:'Materiallar',count:links.length},{value:'orders',label:'Purchase Orders',count:pos.length},{value:'history',label:'Xarid tarixi'},{value:'overview',label:'Ko‘rsatkichlar'},{value:'docs',label:'Hujjatlar'}]} active={tab} onChange={setTab}/>
     {tab==='materials'&&<div className="stack-list">
       {supplier.status!=='Faol'&&<div className="inline-note warning"><Icon name="warning"/>Supplier nofaol — uning materiallari xarid tavsiyalarida va yangi PO’da qatnashmaydi.</div>}
       {links.length?<LinkTermsTable links={links} side="supplier" onEdit={canLink?l=>setLinkEdit(l):undefined} onRemove={canLink?l=>setUnlink(l):undefined} onBuy={app.can('purchases','create')?l=>setBuy({materialId:l.materialId,need:0,source:supplier.name}):undefined}/>:<Empty compact icon="layers" title="Material biriktirilmagan" text="Biriktirilgan materiallar MO yetishmovchiligida shu supplierni taklif qiladi."/>}
       {canLink&&<div className="row-actions"><button type="button" className="secondary-glass-btn compact" onClick={()=>setLinkEdit('new')}><Icon name="plus" size={14}/>Material biriktirish</button></div>}
     </div>}
-    {tab==='overview'&&<InfoGrid items={[{label:'Vaqtida yetkazish',value:perf.onTimePct===null?'Ma’lumot yo‘q':`${perf.onTimePct}%`,tone:perf.onTimePct!==null&&perf.onTimePct<80?'warning':undefined},{label:'Incoming sifat',value:perf.qualityPct===null?'Ma’lumot yo‘q':`${perf.qualityPct}%`,tone:perf.qualityPct!==null&&perf.qualityPct<90?'danger':undefined},{label:'O‘rtacha lead time',value:perf.avgLead===null?`${supplier.leadTime} kun (reja)`:`${perf.avgLead} kun`},{label:'Xarid hajmi',value:money(perf.spend)},{label:'Ochiq PO qiymati',value:money(perf.openValue)},{label:'Qarz',value:money(supplier.debt)},{label:'Faol materiallar',value:`${links.filter(l=>!linkBlock(s,l)).length} / ${links.length}`}]}/>}
+    {tab==='overview'&&<>
+      <InfoGrid items={[
+        {label:'Vaqtida yetkazish',value:perf.onTimePct===null?'Ma’lumot yo‘q':`${perf.onTimePct}% · ${perf.dueLines} qator`,tone:perf.onTimePct!==null&&perf.onTimePct<80?'warning':undefined},
+        {label:'O‘rtacha lead time (amalda)',value:perf.avgLead===null?'Ma’lumot yo‘q':`${perf.avgLead} kun`},
+        {label:'Rad etish ulushi',value:perf.rejectionPct===null?'Ma’lumot yo‘q':`${perf.rejectionPct}% · ${num(perf.rejectedQty,1)} / ${num(perf.inspectedQty,1)}`,tone:perf.rejectionPct!==null&&perf.rejectionPct>5?'danger':undefined},
+        {label:'Narx farqi (standartga)',value:perf.priceVariancePct===null?'Ma’lumot yo‘q':`${perf.priceVariancePct>0?'+':''}${perf.priceVariancePct}%`,tone:perf.priceVariancePct!==null&&perf.priceVariancePct>5?'warning':undefined},
+        {label:'Bajarilish darajasi',value:perf.fulfillmentPct===null?'Ma’lumot yo‘q':`${perf.fulfillmentPct}%`,tone:perf.fulfillmentPct!==null&&perf.fulfillmentPct<95?'warning':undefined},
+        {label:'Xarid hajmi',value:money(perf.spend)},{label:'Ochiq PO qiymati',value:money(perf.openValue)},{label:'Qarz',value:money(supplier.debt)},{label:'Faol materiallar',value:`${links.filter(l=>!linkBlock(s,l)).length} / ${links.length}`}]}/>
+      {perf.missing.length>0&&<div className="inline-note"><Icon name="info"/><span>{perf.missing.join(' · ')}</span></div>}
+      <p className="soft-meta">Ko‘rsatkichlar faqat qayd etilgan PO, qabul va kirish tekshiruvlaridan hisoblanadi; reja lead time: {supplier.leadTime} kun.</p>
+    </>}
+    {tab==='history'&&<SupplierHistory supplierId={supplier.id}/>}
     {tab==='orders'&&(pos.length?<div className="stack-list">{pos.map(p=><button type="button" className="list-row is-clickable" key={p.id} onClick={()=>navigate(`/purchases?view=orders&id=${p.id}`)}><span className="list-row-copy"><b>{p.code}</b><small>{p.items.map(i=>`${materialName(s,i.materialId)} ${num(i.qty)}`).join(', ')} · {p.createdAt} → {p.expectedDate}{p.receivedAt?` · qabul ${p.receivedAt.slice(0,10)}`:''}</small></span><span className="list-row-meta"><b>{money(p.total)}</b><StatusBadge>{p.status}</StatusBadge></span></button>)}</div>:<Empty compact title="PO yo‘q"/>)}
     {tab==='docs'&&<AttachmentsPanel entityType="supplier" entityId={supplier.id} canEdit={app.can('purchases','edit')}/>}
     {po&&<PurchaseFormModal supplierId={supplier.id} onClose={()=>setPo(false)}/>}
@@ -351,6 +385,24 @@ function SupplierDrawer({supplier,onClose,onEdit}:{supplier:Supplier;onClose:()=
     <Confirm open={Boolean(unlink)} onClose={()=>setUnlink(null)} onConfirm={()=>{if(unlink)app.removeSupplierMaterial(unlink.id)}} danger title="Material aloqasi o‘chirilsinmi?" text={unlink?`${supplier.name} → ${materialName(s,unlink.materialId)}. Ochiq PO bo‘lsa o‘chirilmaydi — nofaol qiling. PO tarixi saqlanadi.`:''} confirmText="Aloqani o‘chirish"/>
     <Confirm open={remove} onClose={()=>setRemove(false)} onConfirm={()=>{if(app.deleteEntity('suppliers',supplier.id).ok)onClose()}} danger title="Supplier o‘chirilsinmi?" text={blocker?`O‘chirib bo‘lmaydi: ${blocker}. Status’ni “Arxiv” qiling.`:'Supplier va uning material aloqalari butunlay o‘chiriladi.'} confirmText="O‘chirish"/>
   </Drawer>
+}
+
+/** Every PO line placed with the supplier, with what arrived, was accepted, rejected and returned. */
+function SupplierHistory({supplierId}:{supplierId:string}){
+  const app=useApp(),s=app.state,navigate=useNavigate()
+  const rows=supplierPurchaseHistory(s,supplierId)
+  if(!rows.length)return <Empty compact title="Xarid tarixi yo‘q"/>
+  return <div className="table-scroll"><table className="fit is-interactive"><thead><tr><th>PO</th><th>Material</th><th className="align-right">Buyurtma</th><th className="align-right">Narx</th><th className="align-right">Qabul</th><th className="align-right">Rad / qaytarilgan</th><th>Status</th></tr></thead><tbody>
+    {rows.map(r=>{const m=s.rawMaterials.find(x=>x.id===r.line.materialId);return <tr key={`${r.po.id}-${r.line.materialId}`} tabIndex={0} onClick={()=>navigate(`/purchases?view=orders&id=${r.po.id}`)} onKeyDown={e=>{if(e.key==='Enter')navigate(`/purchases?view=orders&id=${r.po.id}`)}}>
+      <td><div className="cell-main"><b>{r.po.code}</b><small>{r.date}{r.lastReceipt?` → ${r.lastReceipt.slice(0,10)}`:''} · exp {r.po.expectedDate}</small></div></td>
+      <td>{m?.name}</td>
+      <td className="align-right">{qty(r.line.qty,m?.unit)}</td>
+      <td className="align-right">{money(r.line.price)}</td>
+      <td className="align-right">{num(r.line.received,3)}</td>
+      <td className="align-right">{r.rejected||r.returned?`${num(r.rejected,3)} / ${num(r.returned,3)}`:<span className="muted">—</span>}</td>
+      <td><StatusBadge>{r.po.status}</StatusBadge></td>
+    </tr>})}
+  </tbody></table></div>
 }
 
 function Receiving(){
@@ -371,23 +423,28 @@ function ReceiveLine({po,item}:{po:PurchaseOrder;item:PurchaseOrder['items'][num
   const app=useApp(),s=app.state
   const m=s.rawMaterials.find(x=>x.id===item.materialId)
   const remaining=Math.round((item.qty-item.received)*1000)/1000
-  const [amount,setAmount]=useState(String(remaining)),[lot,setLot]=useState(''),[expiry,setExpiry]=useState(''),[warehouseId,setWarehouseId]=useState(po.warehouseId)
+  const [amount,setAmount]=useState(String(remaining)),[lot,setLot]=useState(''),[supplierLot,setSupplierLot]=useState(''),[location,setLocation]=useState(''),[expiry,setExpiry]=useState(''),[warehouseId,setWarehouseId]=useState(po.warehouseId)
+  const locations=s.warehouses.find(w=>w.id===warehouseId)?.locations||[]
   // One key per receipt form: a repeated submit of the same receipt is refused by the domain, never double-posted.
   const [key]=useState(()=>`${po.id}-${item.materialId}-${item.received}-${Date.now().toString(36)}`)
   const value=Number(amount)
   const error=remaining<=0?undefined:!(value>0)?'Miqdor kiriting':value>remaining?`Maksimum ${num(remaining,3)}`:undefined
   const expiryError=m?.expiryTracking&&!expiry?'Expiry sanasini kiriting':undefined
-  const needsQc=s.settings.policies.autoQualityChecks&&s.qualityControlPoints.some(c=>c.active&&c.scope==='Incoming'&&(!c.productId||c.productId===item.materialId))
+  const points=s.qualityControlPoints.filter(c=>c.active&&c.scope==='Incoming'&&(!c.productId||c.productId===item.materialId))
+  const mandatory=points.some(c=>c.blocking)
+  const needsQc=mandatory||(s.settings.policies.autoQualityChecks&&points.length>0)
   const conv=item.purchaseUnit&&item.unitFactor&&(item.purchaseUnit!==m?.unit||item.unitFactor!==1)
-  const fields=2+(m?.lotTracking!==false?1:0)+(m?.expiryTracking?1:0)
+  const fields=3+(m?.lotTracking!==false?2:0)+(m?.expiryTracking?1:0)
   return <div className="receive-line receive-line-wh" style={{'--receive-fields':remaining>0?fields:0} as CSSProperties}>
-    <div className="receive-copy"><b>{m?.name}</b><small>{m?.sku} · {num(item.received,3)}/{num(item.qty,3)} {m?.unit} · qolgan {num(remaining,3)}{conv?` · ${num(remaining/item.unitFactor!,3)} ${item.purchaseUnit}`:''}{needsQc?' · incoming QC':''}</small><Progress value={item.received/Math.max(1e-9,item.qty)*100}/></div>
+    <div className="receive-copy"><b>{m?.name}</b><small>{m?.sku} · {num(item.received,3)}/{num(item.qty,3)} {m?.unit} · qolgan {num(remaining,3)}{conv?` · ${num(remaining/item.unitFactor!,3)} ${item.purchaseUnit}`:''}{needsQc?mandatory?' · majburiy kirish QC (karantin)':' · incoming QC':''}</small><Progress value={item.received/Math.max(1e-9,item.qty)*100}/></div>
     {remaining>0?<>
       <Field label={`Miqdor (${m?.unit||''})`} error={error}><Input type="number" min="0" step="any" max={remaining} value={amount} onChange={e=>setAmount(e.target.value)}/></Field>
-      <Field label="Ombor"><Select value={warehouseId} onChange={setWarehouseId}>{rawStores(s).map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</Select></Field>
-      {m?.lotTracking!==false&&<Field label="Supplier lot"><Input value={lot} onChange={e=>setLot(e.target.value)} placeholder="Bo‘sh — avtomatik" title="Bo‘sh qoldirilsa lot raqami avtomatik beriladi"/></Field>}
+      <Field label="Ombor"><Select value={warehouseId} onChange={v=>{setWarehouseId(v);setLocation('')}}>{rawStores(s).map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</Select></Field>
+      <Field label="Joy"><Select value={location} onChange={setLocation}><option value="">—</option>{locations.map(l=><option key={l} value={l}>{l}</option>)}</Select></Field>
+      {m?.lotTracking!==false&&<Field label="Supplier lot"><Input value={supplierLot} onChange={e=>setSupplierLot(e.target.value)} placeholder="Supplier hujjatidagi lot"/></Field>}
+      {m?.lotTracking!==false&&<Field label="Ichki lot"><Input value={lot} onChange={e=>setLot(e.target.value)} placeholder="Bo‘sh — avtomatik" title="Bo‘sh qoldirilsa ichki lot raqami avtomatik beriladi"/></Field>}
       {m?.expiryTracking&&<Field label="Expiry" required error={expiryError}><Input type="date" value={expiry} onChange={e=>setExpiry(e.target.value)}/></Field>}
-      <button type="button" className="primary-glass-btn receive-btn" disabled={Boolean(error||expiryError)||!(app.can('purchases','edit')||app.can('warehouse','edit'))} onClick={()=>app.receivePurchase(po.id,item.materialId,value,lot,expiry,{warehouseId,key})}><Icon name="download" size={16}/>{value<remaining?'Qisman qabul':'Qabul'}</button>
+      <button type="button" className="primary-glass-btn receive-btn" disabled={Boolean(error||expiryError)||!(app.can('purchases','edit')||app.can('warehouse','edit'))} onClick={()=>app.receivePurchase(po.id,item.materialId,value,lot,expiry,{warehouseId,key,supplierLot,location})}><Icon name="download" size={16}/>{value<remaining?'Qisman qabul':'Qabul'}</button>
     </>:<StatusBadge tone="success">To‘liq qabul qilingan</StatusBadge>}
   </div>
 }

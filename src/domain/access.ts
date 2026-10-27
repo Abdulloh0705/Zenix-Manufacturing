@@ -2,7 +2,7 @@
 // The app enforces them in AppContext before any domain action runs; this frontend-only enforcement is a
 // usability and integrity guard, not a security boundary (anyone with DevTools can change browser storage).
 import type {Employee,ManufacturingState,PermissionAction,PermissionMap,Role,SystemRoleKey} from '../types'
-import {unbuildSource} from './manufacturingEngine'
+import {rawWarehouseFor,unbuildSource} from './manufacturingEngine'
 
 type S=ManufacturingState
 export type Rule=[module:string,action:PermissionAction]
@@ -76,16 +76,27 @@ export const ACTION_RULES:Record<string,Rules|((args:unknown[])=>Rules)>={
   reportOutput:PROD_RUN,recordScrap:PROD_RUN,issueExtraMaterial:[['production','edit']],startWorkOrder:PROD_RUN,pauseWorkOrder:PROD_RUN,finishWorkOrder:PROD_RUN,recordMaterialScan:PROD_RUN,
   splitProduction:[['production','edit']],mergeProduction:[['production','edit']],createBackorder:[['production','edit']],unbuildProduct:[['production','edit']],checkAvailability:[['production','edit']],
   setForecast:[['production','edit']],rollUpCosts:[['products','edit']],
+  // Job cards: operators run and report their operation; assigning people and moving dates is planning.
+  reportOperationOutput:PROD_RUN,markSetupDone:PROD_RUN,assignWorkOrder:[['production','edit']],rescheduleProductionOrder:[['production','edit']],
+  // An MRP suggestion becomes a draft PO (purchases.create) or a draft MO (production.create).
+  confirmMrpSuggestion:args=>String(args[0]).startsWith('buy:')?[['purchases','create']]:[['production','create']],
   createReworkOrder:[['quality','edit'],['production','create']],createQualityCheck:[['quality','create'],...PROD_RUN],resolveQuality:[['quality','edit']],createQualityAlert:[['quality','create']],
   // A PO that skips the draft stage is an approval, so it needs the approve right (A-M6).
   createPurchaseOrder:args=>isDraftPo(args[0])?[['purchases','create']]:[['purchases','approve']],
   createPurchaseOrders:args=>Array.isArray(args[0])&&args[0].every(isDraftPo)?[['purchases','create']]:[['purchases','approve']],
   linkSupplierMaterial:[['purchases','edit'],['materials','edit']],updateSupplierMaterial:[['purchases','edit'],['materials','edit']],removeSupplierMaterial:[['purchases','edit'],['materials','edit']],setPreferredSupplier:[['materials','edit'],['purchases','edit']],
   confirmPurchase:[['purchases','approve']],markPurchaseInTransit:[['purchases','edit']],cancelPurchase:[['purchases','edit']],closePurchaseShort:[['purchases','edit']],updatePurchaseMeta:[['purchases','edit']],receivePurchase:[['purchases','edit'],['warehouse','edit']],returnPurchaseToSupplier:[['purchases','edit'],['warehouse','edit']],advanceSubcontract:[['purchases','edit']],
+  // Draft lines are purchasing work; an inspection decision and the write-off of rejected goods are quality decisions.
+  updatePurchaseDraft:[['purchases','edit']],inspectReceipt:[['quality','edit']],scrapRejectedReceipt:[['quality','edit']],
   createSalesOrder:[['sales','create']],reserveSalesOrder:[['sales','edit']],deliverSalesOrder:[['sales','edit'],['warehouse','edit']],cancelSalesOrder:[['sales','edit']],updateSalesMeta:[['sales','edit']],createReturn:[['sales','create'],['quality','edit']],dispositionReturn:[['quality','edit']],
   transferStock:[['warehouse','edit']],adjustStock:[['warehouse','edit']],countStock:[['warehouse','edit']],
   startDowntime:[['equipment','edit'],...PROD_RUN],endDowntime:[['equipment','edit'],...PROD_RUN],approveMaintenanceRequest:[['equipment','approve']],startMaintenance:[['equipment','edit']],completeMaintenance:[['equipment','edit']],cancelMaintenance:[['equipment','edit']],planPreventiveMaintenance:[['equipment','edit']],advanceRepair:[['equipment','edit']],
-  createBomDraft:[['products','create']],saveBom:[['products','edit']],deleteBomDraft:[['products','delete']],activateBom:[['products','approve']],createEngineeringChange:[['products','create']],setEcoStatus:[['products','approve']],applyEngineeringChange:[['products','approve']],
+  // Operators hold equipment.create to raise requests; planning an order is maintenance planning work.
+  createMaintenanceOrder:[['equipment','edit']],updateMaintenanceOrder:[['equipment','edit']],saveMaintenancePlan:[['equipment','edit']],recordEquipmentRuntime:[['equipment','edit']],
+  createBomDraft:[['products','create']],saveBom:[['products','edit']],deleteBomDraft:[['products','delete']],activateBom:[['products','approve']],createEngineeringChange:[['products','create']],applyEngineeringChange:[['products','approve']],
+  // Sending a change to review is engineering work; approving or rejecting it is the approver's decision.
+  setEcoStatus:args=>args[1]==='Review'?[['products','edit'],['products','approve']]:[['products','approve']],
+  cancelEngineeringChange:[['products','edit'],['products','approve']],archiveBom:[['products','approve']],saveRouting:[['products','edit']],copyRouting:[['products','edit']],saveVariant:[['products','edit']],
   createRole:[['roles','create']],duplicateRole:[['roles','create']],updateRole:[['roles','edit']],deleteRole:[['roles','delete']],updateRolePermission:[['roles','edit']],
 }
 
@@ -202,7 +213,13 @@ export function scopeTargets(s:S,name:string,args:unknown[]):ScopeTargets{
   const addLine=(lineId:unknown)=>{const line=s.productionLines.find(l=>l.id===lineId);if(line)t.branches.push(line.branchId)}
   switch(name){
     case 'reportOutput':case 'recordScrap':case 'recordMaterialScan':case 'transitionProduction':case 'issueExtraMaterial':
-    case 'shortCloseProduction':case 'splitProduction':case 'createBackorder':case 'checkAvailability':case 'createReworkOrder':addOrder(order(args[0]));break
+    case 'shortCloseProduction':case 'splitProduction':case 'createBackorder':case 'checkAvailability':case 'createReworkOrder':case 'rescheduleProductionOrder':addOrder(order(args[0]));break
+    case 'confirmMrpSuggestion':{
+      // A buy suggestion becomes a PO into the default raw store; a make suggestion an MO on the default line.
+      if(String(args[0]).startsWith('buy:'))t.warehouses.push(rawWarehouseFor(s,s.settings.defaultWarehouseId))
+      else addLine(s.settings.defaultLineId)
+      break
+    }
     case 'updateProductionOrder':{addOrder(order(args[0]));const patch=args[1] as {lineId?:string}|undefined;if(patch?.lineId)addLine(patch.lineId);break}
     case 'mergeProduction':for(const id of Array.isArray(args[0])?args[0]:[])addOrder(order(id));break
     case 'createProductionOrder':{
@@ -221,7 +238,8 @@ export function scopeTargets(s:S,name:string,args:unknown[]):ScopeTargets{
       if(q?.sourceType==='return')t.warehouses.push(...returnWarehouses(s,q.sourceId))
       break
     }
-    case 'returnPurchaseToSupplier':{
+    case 'updatePurchaseDraft':{addPo(args[0]);const p=args[1] as {warehouseId?:string}|undefined;if(p?.warehouseId)t.warehouses.push(p.warehouseId);break}
+    case 'returnPurchaseToSupplier':case 'inspectReceipt':case 'scrapRejectedReceipt':{
       const q=s.qualityChecks.find(x=>x.id===args[0]),po=s.purchaseOrders.find(x=>x.id===q?.sourceId)
       const wh=po?.receipts.find(r=>r.id===q?.receiptId)?.warehouseId||po?.warehouseId
       if(wh)t.warehouses.push(wh)
@@ -250,12 +268,20 @@ export function scopeTargets(s:S,name:string,args:unknown[]):ScopeTargets{
       if(['maintenanceOrders','maintenanceRequests','repairOrders'].includes(key))for(const eq of field('equipmentId')){const e=s.equipment.find(x=>x.id===eq);if(e)t.workCenters.push(e.workCenterId)}
       break
     }
-    case 'startWorkOrder':case 'pauseWorkOrder':case 'finishWorkOrder':{
+    case 'startWorkOrder':case 'pauseWorkOrder':case 'finishWorkOrder':case 'reportOperationOutput':case 'markSetupDone':case 'assignWorkOrder':{
       const o=order(args[0]),wo=o?.workOrders.find(w=>w.id===args[1])
       if(wo){t.workCenters.push(wo.workCenterId);if(o?.warehouseId)t.warehouses.push(o.warehouseId)}else addOrder(o)
       break
     }
-    case 'startDowntime':{const e=s.equipment.find(x=>x.id===args[0]);if(e)t.workCenters.push(e.workCenterId);break}
+    case 'startDowntime':case 'saveMaintenancePlan':case 'recordEquipmentRuntime':{const e=s.equipment.find(x=>x.id===args[0]);if(e)t.workCenters.push(e.workCenterId);break}
+    case 'createMaintenanceOrder':{const p=args[0] as {equipmentId?:string}|undefined,e=s.equipment.find(x=>x.id===p?.equipmentId);if(e)t.workCenters.push(e.workCenterId);break}
+    case 'updateMaintenanceOrder':case 'startMaintenance':case 'completeMaintenance':case 'cancelMaintenance':{
+      // Maintenance of a machine belongs to that machine's work center (and so its branch).
+      const m=s.maintenanceOrders.find(x=>x.id===args[0]),e=s.equipment.find(x=>x.id===m?.equipmentId)
+      if(e)t.workCenters.push(e.workCenterId)
+      break
+    }
+    case 'approveMaintenanceRequest':{const r=s.maintenanceRequests.find(x=>x.id===args[0]),e=s.equipment.find(x=>x.id===r?.equipmentId);if(e)t.workCenters.push(e.workCenterId);break}
     case 'endDowntime':{const ev=s.downtimeEvents.find(x=>x.id===args[0]);if(ev)t.workCenters.push(ev.workCenterId);break}
     case 'createQualityCheck':{const p=args[0] as {sourceType?:string;sourceId?:string}|undefined;if(p?.sourceType==='production')addOrder(order(p.sourceId));break}
     case 'transferStock':t.warehouses.push(String(args[1]),String(args[2]));break
@@ -293,6 +319,25 @@ export function scopeBlocker(s:S,actor:Employee|undefined,name:string,args:unkno
     const mine=s.branches.find(b=>b.id===home.branchId)?.name||home.branchId
     return `Bu amal boshqa filialga tegishli — “${role.name}” roli faqat ${mine} filialida ishlaydi`
   }
+  return null
+}
+
+/**
+ * Whether `employee` may be put to work at a work center (job-card assignment / operator of a start): an active
+ * person whose role may run production, inside their role's scope — own work center for "workcenter", own branch
+ * for "branch" / "warehouse"; "all" and Super Admin anywhere.
+ */
+export function operatorScopeBlocker(s:S,employee:Employee|undefined,workCenterId:string):string|null{
+  if(!employee)return 'Operator topilmadi'
+  if(employee.status==='Arxiv')return `${employee.name} arxivlangan — ishga biriktirib bo‘lmaydi`
+  const role=roleOf(s,employee.id)
+  if(!allowedBy(role,PROD_RUN))return `${employee.name}: “${role?.name||'—'}” roli ishlab chiqarish operatsiyasini bajara olmaydi`
+  if(!role||isSuperAdminRole(role)||!role.scope||role.scope==='all')return null
+  const center=s.workCenters.find(w=>w.id===workCenterId)
+  if(!center)return 'Work center topilmadi'
+  const home=homeOf(s,employee)
+  if(role.scope==='workcenter'&&home.workCenter?.id!==center.id)return `${employee.name} faqat ${home.workCenter?.name||'o‘z ish markazida'} ishlaydi — ${center.name} uning doirasida emas`
+  if(home.branchId!==center.branchId)return `${employee.name} boshqa filialga biriktirilgan — ${center.name} uning doirasida emas`
   return null
 }
 

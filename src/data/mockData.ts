@@ -45,7 +45,7 @@ const employees:Employee[]=[
 
 function baseState():ManufacturingState{
   return {
-    settings:{theme:'system',appearance:'blue',accent:'#3B78E7',currency:'UZS',fontSize:'standard',reducedMotion:false,defaultBranchId:'b1',defaultWarehouseId:'w1',defaultLineId:'l1',language:'uz',
+    settings:{theme:'system',appearance:'blue',accent:'#3B78E7',currency:'UZS',fontSize:'standard',reducedMotion:false,uiDensity:'standard',tableDensity:'standard',defaultBranchId:'b1',defaultWarehouseId:'w1',defaultLineId:'l1',language:'uz',
       notifications:{lowStock:true,quality:true,maintenance:true,delay:true,ai:true},ai:{enabled:true,credits:20},
       company:{name:'ZENIX Industrial Demo',currency:'UZS',timezone:'Asia/Tashkent',taxId:'305 441 882'},
       policies:{requireFinalQc:true,autoQualityChecks:true,overheadRate:12,machineRatePerHour:90000,shiftMinutes:480,poDualApproval:false,poDualApprovalFrom:50000000}},

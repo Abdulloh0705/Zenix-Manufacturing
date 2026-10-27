@@ -94,12 +94,14 @@ export function Select({value,onChange,children,className='',placeholder='Tanlan
     }
   }
   return <div className={`custom-select-wrap ${size==='sm'?'is-sm':''} ${className}`}>
-    <button ref={triggerRef} id={id} type="button" className={`custom-select-trigger ${open?'open':''}`} disabled={disabled} onClick={()=>setOpen(v=>!v)} onKeyDown={key}
+    <button ref={triggerRef} id={id} type="button" role="combobox" className={`custom-select-trigger ${open?'open':''}`} disabled={disabled} onClick={()=>setOpen(v=>!v)} onKeyDown={key}
       aria-haspopup="listbox" aria-expanded={open} aria-controls={open?listId:undefined} aria-label={ariaLabel} aria-activedescendant={open?`${uid}-opt-${active}`:undefined}>
       <span className={!selected&&!triggerLabel?'placeholder':''}>{triggerLabel??selected?.label??placeholder}</span><Icon name="chevron" size={14} className="select-chevron"/>
     </button>
     <Popover open={open} onClose={()=>setOpen(false)} anchorRef={triggerRef} className="custom-select-menu" placement="bottom-start" matchWidth minWidth={160} role="presentation" autoFocus={false}>
       <div role="listbox" id={listId} aria-label={ariaLabel}>
+        {/* Options are chosen with the trigger's keyboard handling (aria-activedescendant); only pointer users click them. */}
+        {/* eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/interactive-supports-focus */}
         {options.length?options.map((o,i)=><div role="option" id={`${uid}-opt-${i}`} key={String(o.key)} aria-selected={o.value===String(value)} aria-disabled={o.disabled||undefined}
           className={`select-option ${o.value===String(value)?'selected':''} ${active===i?'active-option':''} ${o.disabled?'disabled':''}`}
           onPointerMove={()=>active!==i&&setActive(i)} onPointerDown={e=>e.preventDefault()} onClick={()=>choose(i)}>
@@ -113,15 +115,40 @@ export function Select({value,onChange,children,className='',placeholder='Tanlan
 /* ------------------------------------------------------------------ forms -- */
 
 type Errors<T>=Partial<Record<keyof T,string>>
+/** After a failed submit, move focus to the first field showing an error (in the top-most dialog, if any). */
+export function focusFirstInvalid(){
+  const schedule=typeof requestAnimationFrame==='function'?requestAnimationFrame:(fn:()=>void)=>setTimeout(fn,0)
+  schedule(()=>{
+    const dialogs=document.querySelectorAll<HTMLElement>('[role="dialog"][aria-modal="true"]')
+    const root:ParentNode=dialogs[dialogs.length-1]??document
+    root.querySelector<HTMLElement>('[aria-invalid="true"]')?.focus()
+  })
+}
+
+/** A second submit this soon after a successful one is a double click / repeated Enter, not a new intent. */
+export const DUPLICATE_SUBMIT_MS=600
+
 /**
  * Minimal form state: values, validation, touched/submitted error visibility and reset.
  * `submit(fn)` validates first; fn may return false to keep the form open (e.g. action failed).
+ * `resetKey`: the record being edited. When it changes while the form stays mounted (a drawer switching
+ * records), values, touched state and errors start over from the new record instead of keeping the old one.
  */
-export function useForm<T extends Record<string,unknown>>(initial:T|(()=>T),validate:(values:T)=>Errors<T>=()=>({})){
-  const initialRef=useRef<T>(typeof initial==='function'?(initial as ()=>T)():initial)
+export function useForm<T extends Record<string,unknown>>(initial:T|(()=>T),validate:(values:T)=>Errors<T>=()=>({}),resetKey?:string|number|null){
+  const resolve=()=>typeof initial==='function'?(initial as ()=>T)():initial
+  const initialRef=useRef<T>(null as unknown as T)
+  if(initialRef.current===null)initialRef.current=resolve()
   const [values,setValues]=useState<T>(initialRef.current)
   const [touched,setTouched]=useState<Partial<Record<keyof T,boolean>>>({})
   const [submitted,setSubmitted]=useState(false)
+  const [key,setKey]=useState(resetKey)
+  const lastSuccess=useRef(0)
+  if(key!==resetKey){
+    // Adjusting state during render (React's documented pattern for "reset when a prop changes").
+    const next=resolve()
+    initialRef.current=next
+    setKey(resetKey);setValues(next);setTouched({});setSubmitted(false);lastSuccess.current=0
+  }
   const errors=validate(values)
   const valid=!Object.values(errors).some(Boolean)
   const set=<K extends keyof T>(key:K,value:T[K])=>setValues(v=>({...v,[key]:value}))
@@ -129,7 +156,14 @@ export function useForm<T extends Record<string,unknown>>(initial:T|(()=>T),vali
   const error=(key:keyof T)=>submitted||touched[key]?errors[key]:undefined
   const dirty=JSON.stringify(values)!==JSON.stringify(initialRef.current)
   const reset=(next?:T)=>{if(next)initialRef.current=next;setValues(initialRef.current);setTouched({});setSubmitted(false)}
-  const submit=(fn:(values:T)=>boolean|void)=>{setSubmitted(true);if(!valid)return false;return fn(values)!==false}
+  const submit=(fn:(values:T)=>boolean|void)=>{
+    setSubmitted(true)
+    if(!valid){focusFirstInvalid();return false}
+    if(Date.now()-lastSuccess.current<DUPLICATE_SUBMIT_MS)return false
+    const ok=fn(values)!==false
+    if(ok)lastSuccess.current=Date.now()
+    return ok
+  }
   const input=(key:keyof T)=>({value:String(values[key]??''),onChange:(e:ChangeEvent<HTMLInputElement|HTMLTextAreaElement>)=>set(key,e.target.value as T[keyof T]),onBlur:()=>touch(key)})
   /** Props for <MoneyInput>: the stored value stays in base currency. */
   const money=(key:keyof T)=>({value:String(values[key]??''),onValue:(v:string)=>set(key,v as T[keyof T]),onBlur:()=>touch(key)})

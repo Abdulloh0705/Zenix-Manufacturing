@@ -390,6 +390,7 @@ export function Overview({open}:{open:(id:string)=>void}){
   const [create,setCreate]=useState(false),[attempt,setAttempt]=useState(0)
   const canCreate=app.can('production','create')
   // `attempt` re-runs the calculation after a failure ("Qayta hisoblash").
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- `attempt` is the deliberate retry trigger
   const c=useMemo(()=>{try{return productionControl(s,now)}catch(error){console.error('Nazorat markazi hisoblanmadi',error);return null}},[s,now,attempt])
   const header=<PageHeader title="Ishlab chiqarish" subtitle={`Nazorat markazi · ${longDate(now)} · ${stamp(now).slice(11)}`}
     actions={canCreate&&<button type="button" className="primary-glass-btn" onClick={()=>setCreate(true)}><Icon name="plus"/>Yangi buyurtma</button>}/>

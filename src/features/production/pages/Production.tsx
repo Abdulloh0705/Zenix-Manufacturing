@@ -5,11 +5,13 @@ import {useApp} from '../../../app/providers/AppProvider/AppContext'
 import {unbuildPreview} from '../../../domain/actions'
 import {Card,Checkbox,Confirm,Empty,Field,FilterSelect,Icon,InfoGrid,Input,KPI,Modal,MoreFilters,PageHeader,Progress,ResourceTable,Segmented,Select,StatusBadge,positive,useForm,useRecordParam,useSearchParamState} from '../../../shared/ui'
 import type {DowntimeReason,ProductionOrder} from '../../../types'
-import {calculateCapacityLoads,createMpsRows,createMrpPlan,deliveryRisk,isOpenOrder,mpsCapacityByWeek,operationQueues,orderBlocker,remainingQty,stockOf,weeklyProductionPlan} from '../../../domain/manufacturingEngine'
+import {calculateCapacityLoads,createMpsRows,createMrpPlan,deliveryRisk,isOpenOrder,issuedQty,jobCard,mpsCapacityByWeek,operationQueues,orderBlocker,plannedIssue,remainingQty,stockOf,weeklyProductionPlan} from '../../../domain/manufacturingEngine'
+import {runMrp,scheduleOperations} from '../../../domain/planning'
+import type {MrpSuggestion} from '../../../domain/planning'
 import {addDays,daysBetween,formatMinutes,shortDate,stamp,todayISO} from '../../../utils/dates'
-import {cls,num,qty} from '../../../utils/format'
+import {cls,money,num,qty} from '../../../utils/format'
 import {employeeName,materialName,productName,supplierName,useNow,workCenterCode,workCenterName} from '../../common/lookups'
-import {BLOCKER_LABEL,OPEN_STATUSES,OrderDrawer,OrderFormModal,OutputModal,PRIORITIES,ScrapModal,WorkOrderList,liveMinutes} from '../components/OrderParts'
+import {BLOCKER_LABEL,OPEN_STATUSES,OperationOutputModal,OrderDrawer,OrderFormModal,OutputModal,PRIORITIES,ScrapModal,WorkOrderList,liveMinutes} from '../components/OrderParts'
 import {Overview} from './Overview'
 import {PurchasePlanModal,SourcingModal} from '../../purchases/components/Sourcing'
 import type {SourcingNeed} from '../../purchases/components/Sourcing'
@@ -85,10 +87,15 @@ function Planning({open}:{open:Open}){
   const capacity=loads.filter(c=>(!line||c.workCenter.lineId===line)&&(load!=='over'||c.overloaded)&&(load!=='high'||c.utilization>85))
   const dayTotal=(i:number)=>{const l=capacity.reduce((a,c)=>a+c.days[i].load,0),cap=capacity.reduce((a,c)=>a+c.days[i].capacity,0);return {l,cap,pct:cap?Math.round(l/cap*100):0}}
   const horizon=capacity.reduce((a,c)=>({l:a.l+c.days.reduce((x,d)=>x+d.load,0),cap:a.cap+c.days.reduce((x,d)=>x+d.capacity,0)}),{l:0,cap:0})
-  const reschedule=(o:ProductionOrder,day:string)=>{const duration=Math.max(0,daysBetween(o.start,o.due));if(day===o.start)return;app.updateProductionOrder(o.id,{start:day,due:addDays(day,duration)})}
+  // Finite schedule on the work-center calendars: when each order really finishes with the capacity it gets.
+  const schedule=useMemo(()=>scheduleOperations(s),[s])
+  const [conflict,setConflict]=useState<{o:ProductionOrder;day:string;message:string}|null>(null)
+  // Moves are validated by the engine (past dates, running orders, unavailable resources need an explicit override).
+  const reschedule=(o:ProductionOrder,day:string)=>{if(day===o.start)return;const r=app.rescheduleProductionOrder(o.id,day);if(!r.ok&&r.code==='needs-override')setConflict({o,day,message:r.message})}
   const onDrop=(e:DragEvent,day:string)=>{e.preventDefault();const o=orders.find(x=>x.id===e.dataTransfer.getData('text/plain'));if(o)reschedule(o,day)}
+  const finish=(o:ProductionOrder)=>{const p=schedule.orders.get(o.id);return p?.unscheduled?`rejaga sig‘madi: ${p.unscheduled}`:p?.end?`sig‘im bo‘yicha tugash ${p.end}${p.late?' — muddatdan kech':''}`:'operatsiyalar yakunlangan'}
   return <div className="page-stack">
-    <PageHeader title="Rejalashtirish" subtitle="Sudrab ko‘chiring — davomiylik saqlanadi"
+    <PageHeader title="Rejalashtirish" subtitle="Sudrab ko‘chiring — davomiylik saqlanadi · kalendar, texnik xizmat va to‘xtashlar tekshiriladi"
       actions={<Segmented ariaLabel="Ko‘rinish" items={['Gantt','Calendar','Capacity']} value={mode} onChange={setMode}/>}/>
     <div className="filter-strip">
       <FilterSelect label="Liniya" value={line} onChange={setLine} options={s.productionLines.map(l=>({value:l.id,label:l.name}))}/>
@@ -97,12 +104,12 @@ function Planning({open}:{open:Open}){
     </div>
     {mode==='Capacity'?<div className="card flush"><div className="table-scroll"><table className="capacity-table"><thead><tr><th>Work center</th>{capacity[0]?.days.map(d=><th key={d.date} className="align-center">{shortDate(d.date)}</th>)}<th className="align-right">7 kun</th></tr></thead><tbody>{!capacity.length&&<tr><td colSpan={9} className="muted">Filtrga mos work center yo‘q</td></tr>}{capacity.map(c=><tr key={c.workCenter.id}>
       <td><div className="cell-main"><b>{c.workCenter.name}</b><small>{c.workCenter.code} · eff {c.workCenter.efficiency}%{c.down?' · to‘xtagan':''}</small></div></td>
-      {c.days.map(d=><td key={d.date} className="align-center"><span className={cls('load-cell',d.utilization>100?'over':d.utilization>85?'high':d.load>0?'ok':'idle')} title={`${num(d.load)} / ${num(d.capacity)} min`}>{d.capacity===0?'Stop':d.load?`${Math.min(d.utilization,999)}%`:'—'}</span></td>)}
+      {c.days.map(d=><td key={d.date} className="align-center"><span className={cls('load-cell',d.utilization>100?'over':d.utilization>85?'high':d.load>0?'ok':'idle')} title={d.working===false?'Ish kuni emas (kalendar)':`${num(d.load)} / ${num(d.capacity)} min${d.blocked?` · band ${num(d.blocked)} min (texnik xizmat / to‘xtash)`:''}`}>{d.working===false?(d.load?`${Math.min(d.utilization,999)}%`:'Dam'):d.capacity===0?'Stop':d.load?`${Math.min(d.utilization,999)}%`:'—'}</span></td>)}
       <td className="align-right"><b className={c.utilization>100?'negative':undefined}>{c.utilization}%</b></td>
-    </tr>)}</tbody>{capacity.length>0&&<tfoot><tr className="total"><td>Jami</td>{capacity[0].days.map((d,i)=>{const x=dayTotal(i);return <td key={d.date} className="align-center" title={`${num(x.l)} / ${num(x.cap)} min`}>{x.cap?`${x.pct}%`:'—'}</td>})}<td className="align-right"><b className={horizon.cap&&horizon.l/horizon.cap>1?'negative':undefined}>{horizon.cap?Math.round(horizon.l/horizon.cap*100):0}%</b></td></tr></tfoot>}</table></div><p className="table-note">Qolgan setup + run vaqti, start→due oralig‘iga taqsimlangan · 100%+ = overload</p></div>
+    </tr>)}</tbody>{capacity.length>0&&<tfoot><tr className="total"><td>Jami</td>{capacity[0].days.map((d,i)=>{const x=dayTotal(i);return <td key={d.date} className="align-center" title={`${num(x.l)} / ${num(x.cap)} min`}>{x.cap?`${x.pct}%`:'—'}</td>})}<td className="align-right"><b className={horizon.cap&&horizon.l/horizon.cap>1?'negative':undefined}>{horizon.cap?Math.round(horizon.l/horizon.cap*100):0}%</b></td></tr></tfoot>}</table></div><p className="table-note">Qolgan setup + run vaqti, start→due oralig‘idagi ish kunlariga taqsimlangan · sig‘im = smenalar × smena × samaradorlik − texnik xizmat / to‘xtash · 100%+ = overload</p></div>
     :mode==='Calendar'?<div className="calendar-grid">{days.slice(0,7).map(d=><div key={d} className={cls('calendar-day',d===today&&'today')} onDragOver={e=>e.preventDefault()} onDrop={e=>onDrop(e,d)}>
       <div className="calendar-day-head"><b>{shortDate(d)}</b><small>{orders.filter(o=>o.start===d).length} MO</small></div>
-      {orders.filter(o=>o.start===d).map(o=><button type="button" key={o.id} draggable={app.can('production','edit')} onDragStart={e=>e.dataTransfer.setData('text/plain',o.id)} className={`calendar-task p-${o.priority.toLowerCase()}`} onClick={()=>open(o.id)}><b>{o.code}</b><span>{productName(s,o.productId)}</span><small>{num(o.quantity)} · {o.status}</small></button>)}
+      {orders.filter(o=>o.start===d).map(o=><button type="button" key={o.id} draggable={app.can('production','edit')} onDragStart={e=>e.dataTransfer.setData('text/plain',o.id)} className={`calendar-task p-${o.priority.toLowerCase()}`} title={finish(o)} onClick={()=>open(o.id)}><b>{o.code}</b><span>{productName(s,o.productId)}</span><small>{num(o.quantity)} · {o.status}</small></button>)}
     </div>)}</div>
     :<div className="card flush gantt"><div className="gantt-scroll"><div className="gantt-grid" style={{['--days' as string]:span}}>
       <div className="gantt-head"><span>Buyurtma</span>{days.map(d=><b key={d} className={cls(d===today&&'today')}>{shortDate(d)}</b>)}</div>
@@ -112,11 +119,12 @@ function Planning({open}:{open:Open}){
         return <div className="gantt-row" key={o.id}>
           <button type="button" className="gantt-label" onClick={()=>open(o.id)}><b>{o.code}</b><small>{productName(s,o.productId)} · {workCenterCode(s,o.workCenterId)}</small></button>
           {days.map(d=><div key={d} className={cls('gantt-cell',d===today&&'today')} onDragOver={e=>e.preventDefault()} onDrop={e=>onDrop(e,d)}/>)}
-          {visible&&<button type="button" draggable={app.can('production','edit')} onDragStart={e=>e.dataTransfer.setData('text/plain',o.id)} onClick={()=>open(o.id)} className={cls('gantt-bar',`p-${o.priority.toLowerCase()}`,deliveryRisk(s,o)&&'risk')} style={{gridColumn:`${startIdx+2} / ${endIdx+3}`}} title={`${o.code}: ${o.start} → ${o.due} · ${o.progress}%`}>
+          {visible&&<button type="button" draggable={app.can('production','edit')} onDragStart={e=>e.dataTransfer.setData('text/plain',o.id)} onClick={()=>open(o.id)} className={cls('gantt-bar',`p-${o.priority.toLowerCase()}`,(deliveryRisk(s,o)||schedule.orders.get(o.id)?.late)&&'risk')} style={{gridColumn:`${startIdx+2} / ${endIdx+3}`}} title={`${o.code}: ${o.start} → ${o.due} · ${o.progress}% · ${finish(o)}${o.scheduleOverride?` · override: ${o.scheduleOverride.reason}`:''}`}>
             <span className="gantt-progress" style={{width:`${o.progress}%`}}/><span className="gantt-text">{o.code} · {o.progress}%</span>
           </button>}
         </div>}):<Empty compact title="Rejada buyurtma yo‘q"/>}
     </div></div></div>}
+    <Confirm open={!!conflict} onClose={()=>setConflict(null)} onConfirm={()=>{if(conflict)app.rescheduleProductionOrder(conflict.o.id,conflict.day,{override:true})}} title="Resurs mavjud emas — baribir rejalashtirilsinmi?" text={conflict?.message||''} confirmText="Override bilan rejalashtirish"/>
   </div>
 }
 
@@ -128,7 +136,8 @@ const MPS_LINES:Array<{key:'forecast'|'sales'|'demand'|'scheduled'|'suggested'|'
 
 function MPS(){
   const app=useApp(),s=app.state
-  const rows=createMpsRows(s)
+  const [horizon,setHorizon]=useSearchParamState('weeks','4')
+  const rows=createMpsRows(s,Number(horizon)||4)
   const capacity=mpsCapacityByWeek(s,rows)
   const thisWeek=weeklyProductionPlan(s,rows)
   const [create,setCreate]=useState<{productId:string;quantity:number;due:string}|null>(null)
@@ -137,7 +146,8 @@ function MPS(){
   const canCreate=app.can('production','create')
   const loadClass=(u:number)=>u>100?'over':u>85?'high':u>0?'ok':'idle'
   return <div className="page-stack">
-    <PageHeader title="Master Production Schedule" subtitle={`${weeks.length} hafta · talab = max(forecast, sotuv) · butun songa yaxlitlanadi${toPlan.length?` · ${toPlan.length} mahsulotga MO kerak`:''}`}/>
+    <PageHeader title="Master Production Schedule" subtitle={`${weeks.length} hafta · talab = max(forecast, MTS sotuv) + MTO sotuv · butun songa yaxlitlanadi${toPlan.length?` · ${toPlan.length} mahsulotga MO kerak`:''}`}
+      actions={<Segmented ariaLabel="Rejalashtirish ufqi" items={[{value:'4',label:'4 hafta'},{value:'8',label:'8 hafta'},{value:'12',label:'12 hafta'}]} value={horizon} onChange={setHorizon}/>}/>
     <div className="card flush"><div className="table-scroll"><table className="mps-grid">
       <thead><tr><th>Mahsulot</th><th>Qator</th>{weeks.map(w=><th key={w} className="align-right">{shortDate(w)}</th>)}<th className="align-right">Jami</th><th className="action-cell"><span className="sr-only">Amal</span></th></tr></thead>
       <tbody>{rows.map(r=>MPS_LINES.map((line,li)=>{
@@ -152,7 +162,7 @@ function MPS(){
           {li===0&&<td rowSpan={MPS_LINES.length} className="action-cell align-right">{r.suggested>0&&canCreate?<button type="button" className="primary-glass-btn compact" onClick={()=>setCreate({productId:r.product.id,quantity:r.suggested,due:addDays(r.weeks.find(w=>w.suggested>0)?.week||todayISO(),4)})}><Icon name="plus" size={14}/>MO · {num(r.suggested)}</button>:<StatusBadge tone="success">Qoplangan</StatusBadge>}</td>}
         </tr>}))}</tbody>
       <tfoot><tr className="group-start capacity-row"><td>Sig‘im yuklamasi</td><td className="mps-line">Routing / smena</td>{capacity.map(c=><td key={c.week} className="align-right"><span className={cls('load-cell',loadClass(c.utilization))} title={`${num(c.load)} / ${num(c.capacity)} min`}>{c.load?`${c.utilization}%`:'—'}</span></td>)}<td className="align-right soft-meta">{num(capacity[0]?.capacity||0)} min/hafta</td><td/></tr></tfoot>
-    </table></div><p className="table-note">Tavsiya = proyeksiya manfiy bo‘lganda 50 lik lot · sig‘im = rejada + tavsiya miqdorlarining routing vaqti ÷ work center smenalari (5 kun)</p></div>
+    </table></div><p className="table-note">Tavsiya = proyeksiya manfiy bo‘lganda yetishmagan miqdor (butun birlik) · sig‘im = rejada + tavsiya miqdorlarining routing vaqti ÷ work center kalendari (ish kunlari × smenalar × samaradorlik − texnik xizmat)</p></div>
     {create&&<OrderFormModal defaults={create} onClose={()=>setCreate(null)}/>}
   </div>
 }
@@ -174,8 +184,11 @@ function MRP({open}:{open:Open}){
   const shortages=plan.purchases.filter(p=>p.shortage>0)
   const [short,setShort]=useSearchParamState('short')
   const purchases=short==='1'?shortages:plan.purchases
-  const [picked,setPicked]=useState<{productId:string;quantity:number}|null>(null)
   const [sourcing,setSourcing]=useState<SourcingNeed|null>(null),[planBuy,setPlanBuy]=useState(false)
+  const [horizon,setHorizon]=useSearchParamState('h','8w')
+  const options=horizon==='14d'?{bucket:'day' as const,horizonDays:14}:{bucket:'week' as const,horizonWeeks:Number(horizon.replace('w',''))||8}
+  const phased=useMemo(()=>runMrp(s,horizon==='14d'?{bucket:'day',horizonDays:14}:{bucket:'week',horizonWeeks:Number(horizon.replace('w',''))||8}),[s,horizon])
+  const makes=phased.suggestions.filter(x=>x.type==='make'),buysTp=phased.suggestions.filter(x=>x.type==='buy')
   const needOf=(p:typeof buys[number]):SourcingNeed=>({materialId:p.materialId,need:p.suggested,needBy:p.needBy,source:'MRP'})
   const waiting=s.productionOrders.filter(o=>o.status==='Material kutilmoqda')
   const canBuy=app.can('purchases','create')
@@ -183,12 +196,12 @@ function MRP({open}:{open:Open}){
     <PageHeader title="MRP" subtitle="Ko‘p bosqichli netting: talab → rezerv → available → yo‘lda → yetishmovchilik → amal"
       actions={buys.length>0&&canBuy?<button type="button" className="primary-glass-btn" onClick={()=>setPlanBuy(true)}><Icon name="cart"/>Xarid rejasi ({buys.length})</button>:undefined}/>
     <div className="kpi-grid">
-      <KPI label="Make tavsiyalari" value={plan.planned.length} tone="mfg" icon={<Icon name="factory"/>}/>
+      <KPI label="Make tavsiyalari" value={makes.length} sub={`${buysTp.length} ta xarid · ${phased.periods.length} ${phased.bucket==='day'?'kun':'hafta'}`} tone="mfg" icon={<Icon name="factory"/>}/>
       <KPI label="Yetishmovchilik" value={shortages.length} sub={`${buys.length} ta xarid tavsiyasi`} tone={shortages.length?'pink':'mint'} icon={<Icon name="warning"/>} onClick={()=>navigate('/materials?view=shortages')}/>
       <KPI label="Material kutayotgan MO" value={waiting.length} sub={waiting.map(o=>o.code).join(', ')||undefined} tone="orange" icon={<Icon name="clock"/>} onClick={()=>navigate('/production?view=orders&status=Material kutilmoqda')}/>
       <KPI label="Yo‘ldagi xarid" value={num(s.purchaseOrders.filter(p=>['Tasdiqlangan','Yo‘lda','Qisman qabul'].includes(p.status)).length)} tone="purple" icon={<Icon name="truck"/>} onClick={()=>navigate('/purchases?view=orders&status=Yo‘lda')}/>
     </div>
-    <Card className="flush" title="Buy · xomashyo" subtitle="talab + safety − available − yo‘lda · butun birlikka yaxlitlanadi" actions={<Segmented ariaLabel="Material filtri" items={[{value:'',label:'Barchasi',count:plan.purchases.length},{value:'1',label:'Yetishmaydi',count:shortages.length}]} value={short==='1'?'1':''} onChange={setShort}/>}>
+    <Card className="flush" title="Xomashyo balansi (jami)" subtitle="talab + safety − available − yo‘lda · butun birlikka yaxlitlanadi · vaqt bo‘yicha emas" actions={<Segmented ariaLabel="Material filtri" items={[{value:'',label:'Barchasi',count:plan.purchases.length},{value:'1',label:'Yetishmaydi',count:shortages.length}]} value={short==='1'?'1':''} onChange={setShort}/>}>
       {!purchases.length?<Empty compact icon="check" title="Material yetishmovchiligi yo‘q" text="Talab va safety stock available + yo‘ldagi xarid bilan qoplangan"/>:<div className="table-scroll"><table className="mrp-table"><thead><tr><th>Material</th><th className="align-right">Talab</th><th className="align-right">Rezerv</th><th className="align-right">Available</th><th className="align-right">Yo‘lda</th><th className="align-right">Safety</th><th className="align-right">Yetishmaydi</th><th className="align-right">Tavsiya</th><th>Supplier · kerak</th><th className="align-right">Amal</th></tr></thead><tbody>{purchases.map(p=>{const m=s.rawMaterials.find(x=>x.id===p.materialId)!,st=stockOf(s,p.materialId);return <tr key={p.materialId} className={p.shortage>0?'row-danger':p.suggested>0?'row-warning':undefined}>
         <td><div className="cell-main"><b>{m.name}</b><small>{m.sku} · {m.unit}</small></div></td>
         <td className="align-right">{num(p.required)}</td>
@@ -202,17 +215,59 @@ function MRP({open}:{open:Open}){
         <td className="align-right">{p.suggested>0&&<button type="button" className="soft-glass-btn compact" disabled={!canBuy} onClick={()=>setSourcing(needOf(p))}><Icon name="truck" size={14}/>Supplier</button>}</td>
       </tr>})}</tbody></table></div>}
     </Card>
-    <Card className="flush" title="Make · ishlab chiqarish" subtitle="L0 mustaqil talab · L1+ sub-assembly">
-      {plan.planned.length?<div className="table-scroll"><table className="fit"><thead><tr><th>Mahsulot</th><th>Level</th><th>Sabab</th><th className="align-right">Miqdor</th><th className="align-right">Available</th><th className="align-right">Amal</th></tr></thead><tbody>{plan.planned.map(p=><tr key={p.productId+p.level}>
-        <td><div className="cell-main"><b>{productName(s,p.productId)}</b><small>{s.products.find(x=>x.id===p.productId)?.sku}</small></div></td><td><StatusBadge tone={p.level?'purple':'mfg'}>L{p.level}</StatusBadge></td><td>{p.reason}</td><td className="align-right"><b>{num(p.qty)}</b></td><td className="align-right">{num(stockOf(s,p.productId).available)}</td>
-        <td className="align-right">{p.reason.startsWith('Buy')?<StatusBadge tone="warning">Buy</StatusBadge>:<button type="button" className="soft-glass-btn compact" disabled={!app.can('production','create')} onClick={()=>setPicked({productId:p.productId,quantity:p.qty})}><Icon name="plus" size={14}/>MO</button>}</td>
-      </tr>)}</tbody></table></div>:<Empty compact icon="check" title="Tavsiya yo‘q" text="Talab qoplangan"/>}
-    </Card>
+    <MrpSuggestions plan={phased} options={options} horizon={horizon} setHorizon={setHorizon} onSupplier={sug=>setSourcing({materialId:sug.itemId,need:sug.qty,needBy:sug.needDate,source:'MRP'})}/>
+    <TimePhasedGrid plan={phased}/>
     {waiting.length>0&&<Card title="Material kutayotgan buyurtmalar">{waiting.map(o=><button type="button" key={o.id} className="list-row is-clickable" onClick={()=>open(o.id)}><span className="list-row-copy"><b>{o.code} · {productName(s,o.productId)}</b><small>{num(o.quantity)} · due {o.due}</small></span><StatusBadge>{o.status}</StatusBadge><Icon name="chevron" size={13} className="list-row-chevron"/></button>)}</Card>}
-    {picked&&<OrderFormModal defaults={picked} onClose={()=>setPicked(null)}/>}
     {sourcing&&<SourcingModal need={sourcing} onClose={()=>setSourcing(null)}/>}
     {planBuy&&<PurchasePlanModal needs={buys.map(needOf)} title="MRP — xarid" onClose={()=>setPlanBuy(false)}/>}
   </div>
+}
+
+type Phased=ReturnType<typeof runMrp>
+const REF_LABEL:Record<string,string>={sales:'Sotuv',forecast:'Forecast',mo:'MO',planned:'Reja',safety:'Safety'}
+
+/** MRP suggestions with the demand they serve; confirming one creates a draft MO / PO through the domain commands. */
+function MrpSuggestions({plan,options,horizon,setHorizon,onSupplier}:{plan:Phased;options:Parameters<typeof runMrp>[1];horizon:string;setHorizon:(v:string)=>void;onSupplier:(s:MrpSuggestion)=>void}){
+  const app=useApp(),s=app.state
+  const canMake=app.can('production','create'),canBuy=app.can('purchases','create')
+  const name=(id:string)=>s.products.find(p=>p.id===id)?.name||materialName(s,id)
+  return <Card className="flush" title="Tavsiyalar · vaqt bo‘yicha" subtitle="Proyeksiya = oldingi + rejadagi kirim − yalpi talab · net = max(0, safety − proyeksiya) · lead time oldin buyurtma"
+    actions={<Segmented ariaLabel="Rejalashtirish ufqi" items={[{value:'14d',label:'14 kun'},{value:'4w',label:'4 hafta'},{value:'8w',label:'8 hafta'},{value:'12w',label:'12 hafta'}]} value={horizon} onChange={setHorizon}/>}>
+    {plan.issues.length>0&&<div className="inline-note warning"><Icon name="warning"/><span>{plan.issues.join(' · ')}</span></div>}
+    {plan.suggestions.length?<div className="table-scroll"><table className="mrp-table"><thead><tr><th>Item</th><th>Tur</th><th className="align-right">Miqdor</th><th>Kerak</th><th>Buyurtma berish</th><th>Talab manbai</th><th>Make / buy</th><th className="align-right">Amal</th></tr></thead><tbody>{plan.suggestions.map(x=>{
+      const unit=s.products.find(p=>p.id===x.itemId)?.unit||s.rawMaterials.find(m=>m.id===x.itemId)?.unit||''
+      const demand=(x.origins.length?x.origins:x.refs)
+      const allowed=x.type==='make'?canMake:canBuy
+      return <tr key={x.key} className={x.pastDue?'row-danger':undefined}>
+        <td><div className="cell-main"><b>{name(x.itemId)}</b><small>L{x.level}{x.issues.length?` · ${x.issues.join(' · ')}`:''}</small></div></td>
+        <td><StatusBadge tone={x.type==='make'?'mfg':'info'}>{x.type==='make'?'Make':'Buy'}</StatusBadge></td>
+        <td className="align-right"><b>{qty(x.qty,unit)}</b>{x.qty!==x.netQty&&<small className="cell-sub">net {num(x.netQty,2)}</small>}</td>
+        <td>{x.needDate}</td>
+        <td><span className={x.pastDue?'negative':undefined}>{x.releaseDate}</span><small className="cell-sub">{x.leadTime} kun lead time{x.pastDue?' · kechikkan':''}</small></td>
+        <td className="wrap">{demand.slice(0,4).map((r,i)=><small key={i} className="cell-sub">{REF_LABEL[r.kind]} {r.code} · {num(r.qty,2)}</small>)}{demand.length>4&&<small className="cell-sub">+{demand.length-4}</small>}</td>
+        <td><small>{x.makeOrBuy}</small>{x.unitCost!==undefined&&<small className="cell-sub">{money(x.unitCost)} / {unit}</small>}</td>
+        <td className="align-right">{x.existing?<StatusBadge tone="info">{x.existing} qoralama</StatusBadge>
+          :x.blocked==='Supplier tanlanmagan'?<button type="button" className="soft-glass-btn compact" disabled={!canBuy} onClick={()=>onSupplier(x)}><Icon name="truck" size={14}/>Supplier</button>
+          :x.blocked?<small className="warning-text">{x.blocked}</small>
+          :<button type="button" className="primary-glass-btn compact" disabled={!allowed} title={allowed?undefined:'Ruxsat yo‘q'} onClick={()=>app.confirmMrpSuggestion(x.key,options)}><Icon name="check" size={14}/>{x.type==='make'?'MO qoralama':'PO qoralama'}</button>}</td>
+      </tr>})}</tbody></table></div>:<Empty compact icon="check" title="Tavsiya yo‘q" text="Ufq ichidagi talab zaxira, rejadagi MO va PO bilan qoplangan"/>}
+  </Card>
+}
+
+const PHASE_LINES:Array<{key:'gross'|'scheduled'|'plannedReceipt'|'projected';label:string;strong?:boolean}>=[{key:'gross',label:'Yalpi talab'},{key:'scheduled',label:'Rejadagi kirim'},{key:'plannedReceipt',label:'Tavsiya kirim'},{key:'projected',label:'Proyeksiya',strong:true}]
+
+/** The netting behind the suggestions, per item and bucket (items with any movement in the horizon). */
+function TimePhasedGrid({plan}:{plan:Phased}){
+  const rows=plan.rows.filter(r=>r.buckets.some(b=>b.gross||b.scheduled||b.plannedReceipt))
+  if(!rows.length)return null
+  return <Card className="flush" title="Vaqt bo‘yicha balans" subtitle={`Boshlang‘ich = available (qoldiq − rezerv − karantin) · safety stock bilan · ${plan.bucket==='day'?'kunlik':'haftalik'}`}>
+    <div className="table-scroll"><table className="mps-grid"><thead><tr><th>Item</th><th>Qator</th>{plan.periods.map(p=><th key={p.start} className="align-right">{shortDate(p.start)}</th>)}</tr></thead>
+      <tbody>{rows.map(r=>PHASE_LINES.map((line,li)=><tr key={r.itemId+line.key} className={cls(li===0&&'group-start',line.strong&&'strong')}>
+        {li===0&&<td rowSpan={PHASE_LINES.length} className="mps-product"><div className="cell-main"><b>{r.name}</b><small>L{r.level} · {r.procurement==='make'?'Make':'Buy'} · {r.leadTime} kun{r.leadTimeSource==='missing'?' (kiritilmagan)':''}</small></div><small className="cell-sub">available {num(r.available,2)} · rezerv {num(r.reserved,2)}{r.quarantine?` · karantin ${num(r.quarantine,2)}`:''}{r.safety?` · safety ${num(r.safety)}`:''}</small></td>}
+        <td className="mps-line">{line.label}</td>
+        {r.buckets.map(b=>{const v=b[line.key];return <td key={b.start} className={cls('align-right',line.key==='projected'&&v<r.safety&&'negative')}>{line.key==='plannedReceipt'?(v?<b className="mfg-text">+{num(v,2)}</b>:<span className="muted">—</span>):v?num(v,2):<span className="muted">{line.key==='projected'?num(v,2):'—'}</span>}</td>})}
+      </tr>))}</tbody></table></div>
+  </Card>
 }
 
 /* ------------------------------------------------------- work order queue -- */
@@ -306,12 +361,15 @@ function ShopFloor({open}:{open:Open}){
   const app=useApp(),s=app.state,now=useNow(10000)
   const active=s.productionOrders.filter(o=>['Tasdiqlangan','Jarayonda','Pauzada','Sifat nazoratida'].includes(o.status))
   const [selected,setSelected]=useSearchParamState('mo',active.find(o=>o.status==='Jarayonda')?.id||active[0]?.id||'')
-  const [scan,setScan]=useState(''),[modal,setModal]=useState<'output'|'scrap'|'stop'|null>(null)
+  const [scan,setScan]=useState(''),[modal,setModal]=useState<'output'|'opOutput'|'scrap'|'stop'|null>(null)
   const o=s.productionOrders.find(x=>x.id===selected)&&active.some(x=>x.id===selected)?s.productionOrders.find(x=>x.id===selected)!:active[0]
   if(!o)return <div className="page-stack"><PageHeader title="Shop Floor" subtitle="Operator ekrani"/><Card><Empty icon="factory" title="Faol buyurtma yo‘q" text="Tasdiqlangan yoki jarayondagi MO shu yerda ko‘rinadi"/></Card></div>
   const product=s.products.find(p=>p.id===o.productId)
   const current=o.workOrders.find(w=>w.status==='Jarayonda')||o.workOrders.find(w=>w.status==='Pauzada')||o.workOrders.find(w=>w.status==='Tayyor')||o.workOrders.find(w=>w.status==='Kutilmoqda'&&!w.dependsOn.length)
   const op=o.bomSnapshot.operations.find(x=>x.id===current?.operationId)
+  // Job card of the current operation, from persisted timestamps and reports only.
+  const card=current?jobCard(s,o,current,now):undefined
+  const opStarted=Boolean(current&&['Jarayonda','Pauzada'].includes(current.status))
   const equipment=s.equipment.find(e=>e.workCenterId===current?.workCenterId)
   const openDowntime=equipment&&s.downtimeEvents.find(d=>d.equipmentId===equipment.id&&!d.end)
   const canEdit=app.can('production','edit')
@@ -331,24 +389,26 @@ function ShopFloor({open}:{open:Open}){
             <h2>{current?.name||(o.status==='Sifat nazoratida'?'Sifat nazoratida':'Barcha operatsiyalar bajarilgan')}</h2>
             <div className="badge-row"><StatusBadge>{o.status}</StatusBadge>{current&&<StatusBadge>{current.status}</StatusBadge>}<StatusBadge>{o.priority}</StatusBadge></div>
           </div>
-          {current&&<div className="shop-timer" aria-label="Operatsiya vaqti"><span className="live-timer"><Icon name="clock" size={18}/>{formatMinutes(liveMinutes(current,now))}</span><small>reja {formatMinutes(current.plannedMin)}</small></div>}
+          {current&&<div className="shop-timer" aria-label="Operatsiya vaqti"><span className="live-timer"><Icon name="clock" size={18}/>{formatMinutes(liveMinutes(current,now))}</span><small>reja {formatMinutes(current.plannedMin)}{card?.setupMin?` · setup ${formatMinutes(card.setupMin)}`:''}{card?.pausedMin?` · pauza ${formatMinutes(card.pausedMin)}`:''}</small></div>}
         </div>
         <div className="shop-stats">{[['Reja',o.quantity,''],['Tayyor',o.completed,'good'],['Scrap',o.scrap,o.scrap?'bad':''],['Qolgan',remainingQty(o),'']].map(([l,v,t])=><div key={String(l)} className={String(t)}><span>{l}</span><b>{num(Number(v))}</b><small>{product?.unit}</small></div>)}</div>
         <div className="progress-cell shop-progress"><Progress value={o.progress} label="Buyurtma progressi"/><small>{o.progress}%</small></div>
         <InfoGrid columns={4} items={[
           {label:'Mashina',value:equipment?<span className="shop-machine">{equipment.name}<StatusBadge>{equipment.status}</StatusBadge></span>:'—'},
-          {label:'Operator',value:employeeName(s,o.responsibleId)},
+          {label:'Operator',value:card?.operators.length?card.operators.map(id=>employeeName(s,id)).join(', '):employeeName(s,o.responsibleId)},
           {label:'Material',value:o.materialReserved?'Rezervda':'Rezervsiz',tone:o.materialReserved?'success':'warning'},
           {label:'Final QC',value:o.qualityStatus||'Pending',tone:o.qualityStatus==='Passed'?'success':['Failed','Scrap'].includes(o.qualityStatus)?'danger':undefined},
         ]}/>
+        {card&&(card.tracksQty||opStarted)&&<InfoGrid columns={4} items={[{label:'Operatsiyaga kirdi',value:num(card.plannedQty)},{label:'Tayyor (operatsiya)',value:num(card.goodQty),tone:card.goodQty?'success':undefined},{label:'Scrap (operatsiya)',value:num(card.scrapQty),tone:card.scrapQty?'danger':undefined},{label:'Ochiq',value:num(card.openQty)}]}/>}
         {op?.instructions&&<p className="shop-instructions">{op.instructions}</p>}
         {op?.worksheet&&<div className="inline-note"><Icon name="file"/>Work instruction: <b>{op.worksheet}</b></div>}
         {openDowntime&&<div className="inline-note danger"><Icon name="warning"/>{equipment?.name} to‘xtagan: {openDowntime.reason} · {openDowntime.start}</div>}
         <div className="operator-actions">
           {current&&current.status!=='Jarayonda'&&<button type="button" className="operator-btn start" disabled={!canEdit||Boolean(openDowntime)||!['Tasdiqlangan','Jarayonda','Pauzada'].includes(o.status)} onClick={()=>app.startWorkOrder(o.id,current.id)}><Icon name="play" size={24}/><b>{current.status==='Pauzada'?'DAVOM ETTIRISH':'START'}</b></button>}
           {current?.status==='Jarayonda'&&<button type="button" className="operator-btn" disabled={!canEdit} onClick={()=>app.pauseWorkOrder(o.id,current.id)}><Icon name="pause" size={24}/><b>PAUZA</b></button>}
+          {current?.status==='Jarayonda'&&current.setupActualMin===undefined&&<button type="button" className="operator-btn" disabled={!canEdit} title="Hozirgacha vaqt setup sifatida yoziladi, keyingisi run" onClick={()=>app.markSetupDone(o.id,current.id)}><Icon name="settings" size={24}/><b>SETUP TUGADI</b></button>}
           {current&&['Jarayonda','Pauzada'].includes(current.status)&&<button type="button" className="operator-btn complete" disabled={!canEdit} onClick={()=>app.finishWorkOrder(o.id,current.id)}><Icon name="check" size={24}/><b>YAKUNLASH</b></button>}
-          <button type="button" className="operator-btn" disabled={!canEdit||!running} onClick={()=>setModal('output')}><Icon name="plus" size={24}/><b>NATIJA</b></button>
+          <button type="button" className="operator-btn" disabled={!canEdit||!running} title={opStarted?'Joriy operatsiya natijasi (job card)':'Buyurtma natijasi'} onClick={()=>setModal(opStarted?'opOutput':'output')}><Icon name="plus" size={24}/><b>NATIJA</b></button>
           <button type="button" className="operator-btn warn" disabled={!canEdit||!running} onClick={()=>setModal('scrap')}><Icon name="trash" size={24}/><b>SCRAP</b></button>
           <button type="button" className="operator-btn" disabled={!canEdit||!running} onClick={()=>app.transitionProduction(o.id,'Sifat nazoratida')}><Icon name="shield" size={24}/><b>SIFAT NAZORATI</b></button>
           {equipment&&(openDowntime
@@ -359,12 +419,13 @@ function ShopFloor({open}:{open:Open}){
       <div className="shop-side">
         <Card title="Material" subtitle="scan: SKU / LOT → BOM bilan solishtiriladi">
           <form className="scanner-line" onSubmit={e=>{e.preventDefault();submitScan()}}><Input value={scan} onChange={e=>setScan(e.target.value)} placeholder="Scan: SKU / LOT..." aria-label="Material kodi"/><button type="submit" className="secondary-glass-btn" disabled={!scan.trim()||!canEdit}><Icon name="scan"/>Tekshirish</button></form>
-          <div className="stack-list">{o.bomSnapshot.components.map(c=><div className="list-row" key={c.id}><span className="list-row-copy"><b>{materialName(s,c.materialId)}</b><small>{c.qty} {c.unit}/dona · FIFO lot {s.lots.filter(l=>l.itemId===c.materialId&&l.qty>0).sort((a,b)=>a.createdAt.localeCompare(b.createdAt))[0]?.code||'—'}</small></span><b className="num">{qty(c.qty*(1+c.waste/100)*remainingQty(o),c.unit)}</b></div>)}</div>
+          <div className="stack-list">{o.bomSnapshot.components.map(c=><div className="list-row" key={c.id}><span className="list-row-copy"><b>{materialName(s,c.materialId)}</b><small>{c.qty} {c.unit}/dona · berildi {num(issuedQty(o,c.materialId),2)} / {num(plannedIssue(o,c.materialId),2)} · FIFO lot {s.lots.filter(l=>l.itemId===c.materialId&&l.qty>0).sort((a,b)=>a.createdAt.localeCompare(b.createdAt))[0]?.code||'—'}</small></span><b className="num">{qty(c.qty*(1+c.waste/100)*remainingQty(o),c.unit)}</b></div>)}</div>
         </Card>
         <Card title="Operatsiyalar" subtitle={`${done}/${o.workOrders.length} bajarildi`}><WorkOrderList order={o} compact/></Card>
       </div>
     </div>
     {modal==='output'&&<OutputModal order={o} onClose={()=>setModal(null)}/>}
+    {modal==='opOutput'&&current&&<OperationOutputModal order={o} workOrder={current} onClose={()=>setModal(null)}/>}
     {modal==='scrap'&&<ScrapModal order={o} onClose={()=>setModal(null)}/>}
     {modal==='stop'&&equipment&&<StopModal equipmentId={equipment.id} note={`Shop floor · ${o.code}`} onClose={()=>setModal(null)}/>}
     <p className="soft-meta">Oxirgi yangilanish: {stamp(now).slice(11)}</p>

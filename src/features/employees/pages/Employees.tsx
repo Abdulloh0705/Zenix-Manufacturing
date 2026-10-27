@@ -8,7 +8,7 @@ import {PERMISSION_MODULES,assignRoleBlocker,employeeRemovalBlocker,hasPermissio
 import {PermissionMatrix} from '../../admin/components/PermissionMatrix'
 import {laborNow} from '../../../domain/manufacturingEngine'
 import {addDays,formatMinutes,minutesBetween,periodStart,stamp,todayISO} from '../../../utils/dates'
-import {cls,compactMoney,initials,money,num} from '../../../utils/format'
+import {compactMoney,initials,money,num} from '../../../utils/format'
 import {orderCode,productName,useNow,workCenterCode,workCenterName} from '../../common/lookups'
 import {ActivityPanel} from '../../common/RecordPanels'
 import {BarList} from '../../common/charts'
