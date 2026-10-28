@@ -7,7 +7,7 @@ import jsxA11y from 'eslint-plugin-jsx-a11y'
 import globals from 'globals'
 
 export default tseslint.config(
-  {ignores:['dist','.test-dist','node_modules','playwright-report','test-results','src/styles.css']},
+  {ignores:['dist','.test-dist','node_modules','playwright-report','test-results','src/styles.css','.claude/']},
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
