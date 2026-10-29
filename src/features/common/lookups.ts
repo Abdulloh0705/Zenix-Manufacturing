@@ -1,11 +1,14 @@
 import {useEffect,useState} from 'react'
 import type {ManufacturingState} from '../../types'
+import {splitKey} from '../../domain/inventory'
 
 type S=ManufacturingState
+const base=(id?:string)=>id?splitKey(id).itemId:id
 export const productName=(s:S,id?:string)=>s.products.find(p=>p.id===id)?.name||id||'—'
 export const materialName=(s:S,id?:string)=>s.rawMaterials.find(m=>m.id===id)?.name||s.products.find(p=>p.id===id)?.name||id||'—'
-export const itemSku=(s:S,id?:string)=>s.rawMaterials.find(m=>m.id===id)?.sku||s.products.find(p=>p.id===id)?.sku||''
-export const itemUnitOf=(s:S,id?:string)=>s.rawMaterials.find(m=>m.id===id)?.unit||s.products.find(p=>p.id===id)?.unit||''
+/** SKU of an item, or of a variant for a stock key (productId~variantId). */
+export const itemSku=(s:S,id?:string)=>{const k=id?splitKey(id):undefined;const p=s.products.find(x=>x.id===k?.itemId);return (k?.variantId&&p?.variants.find(v=>v.id===k.variantId)?.code)||s.rawMaterials.find(m=>m.id===base(id))?.sku||p?.sku||''}
+export const itemUnitOf=(s:S,id?:string)=>s.rawMaterials.find(m=>m.id===base(id))?.unit||s.products.find(p=>p.id===base(id))?.unit||''
 export const employeeName=(s:S,id?:string)=>s.employees.find(e=>e.id===id)?.name||'—'
 export const warehouseName=(s:S,id?:string)=>s.warehouses.find(w=>w.id===id)?.name||'—'
 export const workCenterName=(s:S,id?:string)=>s.workCenters.find(w=>w.id===id)?.name||'—'

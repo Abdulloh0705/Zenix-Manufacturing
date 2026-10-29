@@ -1,7 +1,8 @@
 import type {Bom,BomComponent,LotRecord,ManufacturingState,MaterialConsumption,MaterialReservation,ProductionOrder,SalesOrder,WorkCenter,WorkOrder} from '../types'
-import {addDays,daysBetween,isoDate,minutesBetween,parseDate,periodStart,stamp,todayISO,weekStart,weekdayShort} from '../utils/dates'
+import {addDays,dayOfWeek,daysBetween,isoDate,minutesBetween,parseDate,periodStart,stamp,todayISO,weekStart,weekdayShort} from '../utils/dates'
 import {SUPPLYING_PO,orderableLinks,preferredSupplierId} from './supplierMaterials'
 import {maintenanceWindow} from './maintenance'
+import {baseId,keyOf,splitKey} from './inventory'
 
 export type OeeInput={plannedMinutes:number;downtimeMinutes:number;idealCycleMinutes:number;totalCount:number;goodCount:number}
 export type OeeResult={availability:number;performance:number;quality:number;oee:number}
@@ -17,30 +18,54 @@ export function availableQuantity(balance:{onHand:number;reserved:number;quarant
   return Math.max(0,balance.onHand-balance.reserved-(balance.quarantine||0))
 }
 
-/** Quantity of one component needed per finished unit, including planned waste. */
-export function perUnit(component:Pick<BomComponent,'qty'|'waste'>){
-  return component.qty*(1+component.waste/100)
+/**
+ * Stock units of one component needed per finished unit, including planned waste. A line entered in another unit
+ * than the component's stock unit carries the conversion factor stamped when the BOM was saved (audit #24).
+ */
+export function perUnit(component:Pick<BomComponent,'qty'|'waste'>&{factor?:number}){
+  return component.qty*(component.factor??1)*(1+component.waste/100)
 }
+/** A BOM line in another unit without a conversion factor (saved before conversions existed): its quantity cannot be added to stock units. */
+export const unconvertedLine=(state:ManufacturingState,c:Pick<BomComponent,'unit'|'materialId'|'factor'>)=>Boolean(c.unit)&&c.unit!==itemUnit(state,c.materialId)&&c.factor===undefined
 
 export function remainingQty(order:Pick<ProductionOrder,'quantity'|'completed'|'scrap'>){
   return Math.max(0,order.quantity-order.completed-order.scrap)
 }
 
+/** Item ids may be stock keys (`productId~variantId`, see inventory.ts): names, units and kinds resolve through the product. */
 export function isProductItem(state:ManufacturingState,itemId:string){
-  return state.products.some(p=>p.id===itemId)
+  const id=baseId(itemId)
+  return state.products.some(p=>p.id===id)
 }
 
 export function itemName(state:ManufacturingState,itemId:string){
-  return state.products.find(p=>p.id===itemId)?.name||state.rawMaterials.find(m=>m.id===itemId)?.name||itemId
+  const {itemId:id,variantId}=splitKey(itemId)
+  const product=state.products.find(p=>p.id===id)
+  if(product)return variantId?`${product.name} · ${product.variants.find(v=>v.id===variantId)?.code||variantId}`:product.name
+  return state.rawMaterials.find(m=>m.id===id)?.name||itemId
 }
 
 export function itemUnit(state:ManufacturingState,itemId:string){
-  return state.products.find(p=>p.id===itemId)?.unit||state.rawMaterials.find(m=>m.id===itemId)?.unit||'birlik'
+  const id=baseId(itemId)
+  return state.products.find(p=>p.id===id)?.unit||state.rawMaterials.find(m=>m.id===id)?.unit||'birlik'
 }
 
-/** Aggregated stock of an item across warehouses. */
+/**
+ * Aggregated stock of one physical item (stock key) across warehouses. For a variant-tracked product the bare
+ * product id means its legacy, not-yet-assigned stock only — a variant's stock is never counted there (audit #15).
+ */
 export function stockOf(state:ManufacturingState,itemId:string,warehouseId?:string){
-  const rows=state.stockBalances.filter(b=>b.itemId===itemId&&(!warehouseId||b.warehouseId===warehouseId))
+  const rows=state.stockBalances.filter(b=>keyOf(b)===itemId&&(!warehouseId||b.warehouseId===warehouseId))
+  const onHand=rows.reduce((a,b)=>a+b.onHand,0),reserved=rows.reduce((a,b)=>a+b.reserved,0),incoming=rows.reduce((a,b)=>a+b.incoming,0),quarantine=rows.reduce((a,b)=>a+(b.quarantine||0),0)
+  return {onHand,reserved,incoming,quarantine,available:Math.max(0,onHand-reserved-quarantine)}
+}
+
+/**
+ * Product-level total over the product and all of its variants — for summaries and the MPS, which plan the product as
+ * a whole. Availability for a document line always uses the line's own stock key (stockOf), never this total.
+ */
+export function productStockOf(state:ManufacturingState,productId:string){
+  const rows=state.stockBalances.filter(b=>b.itemId===productId)
   const onHand=rows.reduce((a,b)=>a+b.onHand,0),reserved=rows.reduce((a,b)=>a+b.reserved,0),incoming=rows.reduce((a,b)=>a+b.incoming,0),quarantine=rows.reduce((a,b)=>a+(b.quarantine||0),0)
   return {onHand,reserved,incoming,quarantine,available:Math.max(0,onHand-reserved-quarantine)}
 }
@@ -202,7 +227,7 @@ export function createMpsRows(state:ManufacturingState,horizonWeeks=4){
   const firstWeek=weekStart(todayISO())
   const weeks=Array.from({length:horizonWeeks},(_,i)=>addDays(firstWeek,i*7))
   return state.products.filter(p=>p.status!=='Arxiv'&&p.procurement!=='buy').map(product=>{
-    const balance=stockOf(state,product.id)
+    const balance=productStockOf(state,product.id)
     const salesLines=openSalesLines(state,product.id)
     const sales=salesLines.reduce((a,l)=>a+l.open,0)
     const reservedForSales=salesLines.reduce((a,l)=>a+l.reserved,0)
@@ -247,7 +272,7 @@ export function explodeBomRequirements(state:ManufacturingState,bomId:string,qua
         continue
       }
       const previous=totals.get(component.materialId)
-      totals.set(component.materialId,{materialId:component.materialId,required:(previous?.required??0)+required,unit:component.unit})
+      totals.set(component.materialId,{materialId:component.materialId,required:(previous?.required??0)+required,unit:itemUnit(state,component.materialId)})
     }
   }
   walk(bomId,Math.max(0,quantity),new Set())
@@ -322,7 +347,7 @@ export function createMrpPlan(state:ManufacturingState){
     let qty=row?.suggested??0
     if(dependent>0){
       // Independent (MPS) and dependent (parent BOM) demand share one stock pool: net them together once.
-      const net=Math.max(0,(row?.demand??0)+dependent-stockOf(state,product.id).available-activeProductionQty(state,product.id))
+      const net=Math.max(0,(row?.demand??0)+dependent-productStockOf(state,product.id).available-activeProductionQty(state,product.id))
       qty=net>0?Math.ceil(net):0
     }
     if(qty<=0)continue
@@ -474,12 +499,97 @@ export function workCenterCalendar(state:ManufacturingState,wc:Pick<WorkCenter,'
   return {workingDays,shifts,shiftMinutes,dayMinutes:shifts*shiftMinutes}
 }
 
-export const isWorkingDay=(state:ManufacturingState,wc:Pick<WorkCenter,'calendar'>,date:string)=>workCenterCalendar(state,wc).workingDays.includes(parseDate(date).getDay())
+export const isWorkingDay=(state:ManufacturingState,wc:Pick<WorkCenter,'calendar'>,date:string)=>workCenterCalendar(state,wc).workingDays.includes(dayOfWeek(date))
 
-/** Minutes of [start, end) that fall inside the shift window of `date`. */
-function windowOverlap(start:string,end:string,date:string,windowMinutes:number){
-  const from=parseDate(date).getTime()+SHIFT_START_MINUTE*60000,to=from+windowMinutes*60000
-  return Math.max(0,Math.round((Math.min(to,parseDate(end).getTime())-Math.max(from,parseDate(start).getTime()))/60000))
+/** Clock minute of a `HH:mm` value, or the fallback when it is missing / not a real time. */
+export function clockMinute(value:string|undefined,fallback:number){
+  const m=/^(\d{2}):(\d{2})$/.exec(value||'')
+  return m&&Number(m[1])<=23&&Number(m[2])<=59?Number(m[1])*60+Number(m[2]):fallback
+}
+const MS=60000
+/** Instant of minute `minute` counted from the start of calendar day `date` in company wall-clock time (may run past midnight). */
+const wallInstant=(date:string,minute:number)=>{
+  const day=addDays(date,Math.floor(minute/1440)),m=((minute%1440)+1440)%1440
+  return parseDate(`${day} ${String(Math.floor(m/60)).padStart(2,'0')}:${String(m%60).padStart(2,'0')}`).getTime()
+}
+/** [from, to) minus a set of intervals (all in ms). */
+function subtract(from:number,to:number,cuts:Array<[number,number]>){
+  let parts:Array<[number,number]>=[[from,to]]
+  for(const [a,b] of cuts)parts=parts.flatMap(([x,y]):Array<[number,number]>=>b<=x||a>=y?[[x,y]]:[...(a>x?[[x,a] as [number,number]]:[]),...(b<y?[[b,y] as [number,number]]:[])])
+  return parts.filter(([x,y])=>y>x)
+}
+
+/**
+ * One productive interval of a work center: absolute instants (ms) and the share of its machines available then
+ * (1 = all, or no machines registered). Shift time outside these intervals — breaks, non-working time — is not productive.
+ */
+export type ProductiveWindow={from:number;to:number;rate:number}
+export type WorkCenterWindows={date:string;working:boolean;
+  /** Shift windows of the day (breaks already taken out) before machine stops and services. */
+  shifts:Array<[number,number]>;windows:ProductiveWindow[];parallel:number;
+  /**
+   * Per registered machine: its own free intervals (shift windows minus its own stops and services). Present only when
+   * the work center has machines; then each machine runs one operation at a time and `parallel` (default: the number
+   * of machines) caps how many run at once (Phase 5 capacity gap).
+   */
+  machines?:{id:string;free:Array<[number,number]>}[];
+  /** Data the windows could not use (e.g. a service without a duration takes its whole day), shown as is. */
+  notes:string[]}
+
+/**
+ * Sub-day calendar of one work center on one day (audit #23): shifts from `calendar.shiftStart` (default 08:00 company
+ * time) of `shiftMinutes` each, minus `calendar.breaks`; then every machine's unavailable time — logged downtime
+ * (an open stop until now), planned / running maintenance windows (a planned order without a duration takes the whole
+ * day), a machine stopped right now (the rest of today) — lowers the share of machines available in that interval.
+ * Instants come from the company timezone, so a shift on a daylight-saving day still starts at its wall-clock time.
+ */
+export function workCenterWindows(state:ManufacturingState,wc:WorkCenter,date:string,now=new Date(),shiftOverride?:number):WorkCenterWindows{
+  const cal=workCenterCalendar(state,wc,shiftOverride)
+  const machines=state.equipment.filter(e=>e.workCenterId===wc.id)
+  const parallel=Math.max(1,Math.floor(Number(wc.calendar?.parallel)||machines.length||1))
+  if(!cal.workingDays.includes(dayOfWeek(date))||cal.shiftMinutes<=0)return {date,working:cal.workingDays.includes(dayOfWeek(date)),shifts:[],windows:[],parallel,...(machines.length?{machines:machines.map(m=>({id:m.id,free:[]}))}:{}),notes:[]}
+  const startMinute=clockMinute(wc.calendar?.shiftStart,SHIFT_START_MINUTE)
+  const first=wallInstant(date,startMinute)
+  const shiftEnd=first+cal.dayMinutes*MS
+  // Breaks repeat at their clock time; one earlier than the shift start belongs to the night after it.
+  const breaks:Array<[number,number]>=(wc.calendar?.breaks||[]).filter(b=>b.minutes>0).map(b=>{
+    const m=clockMinute(b.start,-1)
+    if(m<0)return [0,0]
+    const from=wallInstant(date,m<startMinute?m+1440:m)
+    return [from,from+b.minutes*MS]
+  })
+  const shifts=subtract(first,shiftEnd,breaks)
+  const today=isoDate(now),nowMs=now.getTime(),notes:string[]=[]
+  const dayStart=wallInstant(date,0),dayEnd=wallInstant(date,1440)
+  const blocks=machines.map(e=>{
+    const out:Array<[number,number]>=[]
+    if(e.status==='To‘xtagan'&&date===today)out.push([dayStart,dayEnd])
+    for(const d of state.downtimeEvents.filter(x=>x.equipmentId===e.id))out.push([parseDate(d.start).getTime(),d.end?parseDate(d.end).getTime():Math.max(nowMs,parseDate(d.start).getTime())])
+    for(const m of state.maintenanceOrders.filter(x=>x.equipmentId===e.id&&(x.status==='Rejada'||x.status==='Jarayonda'))){
+      const w=maintenanceWindow(state,m)
+      if(!w.hours){if(m.status==='Rejada'&&m.scheduled.slice(0,10)===date){out.push([dayStart,dayEnd]);notes.push(`${m.code}: davomiylik yo‘q — butun kun band`)}continue}
+      const from=m.status==='Jarayonda'?Math.max(nowMs,parseDate(w.start).getTime()):parseDate(w.start).getTime()
+      out.push([from,parseDate(w.end).getTime()])
+    }
+    return out.filter(([a,b])=>b>a)
+  })
+  // Piecewise share of machines available inside each shift window.
+  const windows:ProductiveWindow[]=[]
+  for(const [x,y] of shifts){
+    const cuts=new Set([x,y])
+    for(const list of blocks)for(const [a,b] of list){if(a>x&&a<y)cuts.add(a);if(b>x&&b<y)cuts.add(b)}
+    const points=[...cuts].sort((a,b)=>a-b)
+    for(let i=0;i<points.length-1;i++){
+      const a=points[i],b=points[i+1],mid=(a+b)/2
+      const down=blocks.filter(list=>list.some(([p,q])=>p<=mid&&mid<q)).length
+      const rate=machines.length?(machines.length-down)/machines.length:1
+      if(rate<=0)continue
+      const last=windows[windows.length-1]
+      if(last&&last.to===a&&last.rate===rate)last.to=b;else windows.push({from:a,to:b,rate})
+    }
+  }
+  const free=machines.map((m,i)=>({id:m.id,free:shifts.flatMap(([x,y])=>subtract(x,y,blocks[i]))}))
+  return {date,working:true,shifts,windows,parallel,...(machines.length?{machines:free}:{}),notes}
 }
 
 export type WorkCenterDay={date:string;working:boolean;
@@ -489,31 +599,28 @@ export type WorkCenterDay={date:string;working:boolean;
   capacity:number}
 
 /**
- * Productive capacity of one work center on one day: its calendar (working day, shifts × shift minutes) minus the
- * share of its machines that are unavailable — a machine stopped now (today), logged downtime inside the shift
- * window, planned maintenance that day (the request's downtime hours, else the whole shift) — times efficiency.
+ * Productive capacity of one work center on one day, summed from its sub-day windows (workCenterWindows): shift
+ * minutes after breaks, times parallel units, minus the share of machines unavailable at each moment, times efficiency.
  */
 export function workCenterDay(state:ManufacturingState,wc:WorkCenter,date:string,now=new Date(),shiftOverride?:number):WorkCenterDay{
-  const cal=workCenterCalendar(state,wc,shiftOverride)
-  if(!cal.workingDays.includes(parseDate(date).getDay()))return {date,working:false,dayMinutes:0,blocked:0,clock:0,capacity:0}
-  const machines=state.equipment.filter(e=>e.workCenterId===wc.id)
-  const today=isoDate(now),nowStamp=stamp(now)
-  const lost=machines.map(e=>{
-    if(date===today&&e.status==='To‘xtagan')return cal.dayMinutes
-    const stops=state.downtimeEvents.filter(d=>d.equipmentId===e.id).reduce((a,d)=>a+windowOverlap(d.start,d.end||nowStamp,date,cal.dayMinutes),0)
-    // Planned service windows. Running work is counted once: the time it has already stopped the machine is in
-    // "stops" above, only the rest of its planned window is added here.
-    const service=state.maintenanceOrders.filter(m=>m.equipmentId===e.id&&(m.status==='Rejada'||m.status==='Jarayonda')).reduce((a,m)=>{
-      const w=maintenanceWindow(state,m)
-      if(!w.hours)return a+(m.status==='Rejada'&&m.scheduled.slice(0,10)===date?cal.dayMinutes:0)
-      const from=m.status==='Jarayonda'&&nowStamp>w.start?nowStamp:w.start
-      return from<w.end?a+windowOverlap(from,w.end,date,cal.dayMinutes):a
-    },0)
-    return Math.min(cal.dayMinutes,stops+service)
-  })
-  const blocked=machines.length?round(lost.reduce((a,b)=>a+b,0)/machines.length):0
-  const clock=Math.max(0,cal.dayMinutes-blocked)
-  return {date,working:true,dayMinutes:cal.dayMinutes,blocked,clock,capacity:round(clock*wc.efficiency/100)}
+  const w=workCenterWindows(state,wc,date,now,shiftOverride)
+  if(!w.working)return {date,working:false,dayMinutes:0,blocked:0,clock:0,capacity:0}
+  const lanes=w.machines?Math.min(w.parallel,w.machines.length):w.parallel
+  const dayMinutes=round(w.shifts.reduce((a,[x,y])=>a+(y-x)/MS,0)*lanes)
+  // With machines: at each moment min(machines free then, parallel cap) operations can run; otherwise the shared windows.
+  const clock=round(Math.min(dayMinutes,w.machines?laneMinutes(w.machines.map(m=>m.free),w.parallel):w.windows.reduce((a,x)=>a+(x.to-x.from)/MS*x.rate,0)*w.parallel))
+  return {date,working:true,dayMinutes,blocked:round(dayMinutes-clock),clock,capacity:round(clock*wc.efficiency/100)}
+}
+
+/** Minutes of min(lanes free at a moment, cap) summed over time. */
+function laneMinutes(lanes:Array<Array<[number,number]>>,cap:number){
+  const points=[...new Set(lanes.flat().flat())].sort((a,b)=>a-b)
+  let total=0
+  for(let i=0;i<points.length-1;i++){
+    const a=points[i],b=points[i+1],mid=(a+b)/2
+    total+=Math.min(cap,lanes.filter(l=>l.some(([p,q])=>p<=mid&&mid<q)).length)*(b-a)/MS
+  }
+  return total
 }
 
 /**
@@ -771,11 +878,11 @@ export function buildTraceability(state:ManufacturingState,orderId:string){
   const upstream=new Map<string,LotRecord>()
   for(const c of order.consumed){
     if(!c.lot)continue
-    const taken=state.lots.filter(l=>l.code===c.lot&&l.itemId===c.materialId&&l.consumedBy.includes(order.code))
+    const taken=state.lots.filter(l=>l.code===c.lot&&keyOf(l)===c.materialId&&l.consumedBy.includes(order.code))
     for(const l of taken.length?taken:[lotOrigin(state,c.lot,c.materialId)].filter((x):x is LotRecord=>Boolean(x)))upstream.set(l.id,l)
   }
   const upstreamLots=[...upstream.values()]
-  const outputLots=state.lots.filter(l=>l.sourceType==='production'&&l.sourceId===order.id&&l.itemId===order.productId)
+  const outputLots=state.lots.filter(l=>l.sourceType==='production'&&l.sourceId===order.id&&l.itemId===order.productId&&(l.variantId||'')===(l.variantId?order.variantId||'':''))
   const outputCodes=new Set(outputLots.map(l=>l.code))
   const qualityChecks=state.qualityChecks.filter(q=>q.sourceType==='production'&&q.sourceId===order.id)
   const movements=state.stockMovements.filter(m=>m.source===order.code||m.source===order.id)
@@ -808,7 +915,7 @@ export function findTraceOrder(state:ManufacturingState,query:string){
  * return record is preferred and the oldest record decides among equals.
  */
 export function lotOrigin(state:ManufacturingState,code:string,itemId?:string):LotRecord|undefined{
-  const rows=state.lots.filter(l=>l.code===code&&(!itemId||l.itemId===itemId))
+  const rows=state.lots.filter(l=>l.code===code&&(!itemId||l.itemId===baseId(itemId)))
   const rank=(l:LotRecord)=>l.sourceType==='adjustment'&&!l.sourceId.startsWith('opening')?1:0
   return [...rows].sort((a,b)=>rank(a)-rank(b)||a.createdAt.localeCompare(b.createdAt))[0]
 }
@@ -818,7 +925,7 @@ export function lotOrigin(state:ManufacturingState,code:string,itemId?:string):L
  * product, grouped by warehouse and lot in shipping order, minus what earlier returns of the line already took back.
  * Returns the allocations for `qty`, the warehouse that shipped most of them, and any part no shipment explains.
  */
-export function returnSources(state:ManufacturingState,so:Pick<SalesOrder,'id'|'code'>,productId:string,qty:number,excludeReturnId?:string){
+export function returnSources(state:ManufacturingState,so:Pick<SalesOrder,'id'|'code'>,productId:string,qty:number,excludeReturnId?:string,pick?:string[]){
   const shipped=new Map<string,{warehouseId:string;lot?:string;qty:number}>()
   // The ledger is newest first; walking it backwards gives shipping order.
   for(const m of [...state.stockMovements].reverse()){
@@ -840,6 +947,15 @@ export function returnSources(state:ManufacturingState,so:Pick<SalesOrder,'id'|'
   }
   let left=Math.max(0,qty)
   const allocations:{lot?:string;qty:number}[]=[],byWarehouse=new Map<string,number>()
+  // Named serial units (audit #25): each must be a unit this order shipped and no earlier return took back.
+  const missing:string[]=[]
+  for(const code of pick||[]){
+    const row=rows.find(r=>r.lot===code&&r.qty>=1-1e-9)
+    if(!row){missing.push(code);continue}
+    row.qty=q3(row.qty-1);allocations.push({lot:code,qty:1});left=q3(left-1)
+    byWarehouse.set(row.warehouseId,(byWarehouse.get(row.warehouseId)||0)+1)
+  }
+  if(pick)left=0
   for(const row of rows){
     if(left<=1e-9)break
     const take=q3(Math.min(left,row.qty))
@@ -850,12 +966,14 @@ export function returnSources(state:ManufacturingState,so:Pick<SalesOrder,'id'|'
     left=q3(left-take)
   }
   const warehouseId=[...byWarehouse].sort((a,b)=>b[1]-a[1])[0]?.[0]
-  return {allocations,warehouseId,unexplained:left}
+  return {allocations,warehouseId,unexplained:left,missing,
+    /** Shipped serial units still returnable (quantity 1 rows of this order). */
+    units:rows.filter(r=>r.lot&&r.qty>=1-1e-9&&state.lots.some(l=>l.code===r.lot&&l.kind==='serial'&&l.serialFrom===l.serialTo)).map(r=>r.lot!)}
 }
 
 /** The finished-goods balance an unbuild takes from: the warehouse with the most available units of the product. */
 export function unbuildSource(state:ManufacturingState,productId:string){
-  return state.stockBalances.filter(b=>b.itemId===productId&&availableQuantity(b)>0).sort((a,b)=>availableQuantity(b)-availableQuantity(a))[0]
+  return state.stockBalances.filter(b=>keyOf(b)===productId&&availableQuantity(b)>0).sort((a,b)=>availableQuantity(b)-availableQuantity(a))[0]
 }
 
 export function serialInRange(lot:LotRecord,query:string){
@@ -940,7 +1058,7 @@ export function materialPegging(state:ManufacturingState,today=todayISO()){
     const key=`${materialId}|${warehouseId}`
     let p=pools.get(key)
     if(!p){
-      const b=state.stockBalances.find(x=>x.itemId===materialId&&x.warehouseId===warehouseId)
+      const b=state.stockBalances.find(x=>keyOf(x)===materialId&&x.warehouseId===warehouseId)
       p={available:b?Math.max(0,b.onHand-b.reserved-(b.quarantine||0)):0,supply:raw?incomingSupply(state,materialId,warehouseId).map(x=>({...x})):[]}
       pools.set(key,p)
     }
@@ -964,9 +1082,9 @@ export function materialPegging(state:ManufacturingState,today=todayISO()){
       const materialId=component.materialId,raw=!isProductItem(state,materialId)
       // Every store of the branch that may supply the order counts; other branches' stock needs a transfer.
       const sources=componentSourceWarehouses(state,order,materialId),warehouseId=sources[0]||''
-      const stockUnit=itemUnit(state,materialId),unitMismatch=Boolean(component.unit)&&component.unit!==stockUnit
-      const elsewhere=q3(state.stockBalances.filter(b=>b.itemId===materialId&&!sources.includes(b.warehouseId)).reduce((a,b)=>a+Math.max(0,b.onHand-b.reserved-(b.quarantine||0)),0))
-      const base={component,materialId,unit:component.unit,stockUnit,unitMismatch,purchasable:raw&&!unitMismatch,warehouseId,required:q3(required),reserved:order.materialReserved,supply:[],lateForDue:false,afterStart:false,overduePo:false,elsewhere}
+      const stockUnit=itemUnit(state,materialId),unitMismatch=unconvertedLine(state,component)
+      const elsewhere=q3(state.stockBalances.filter(b=>keyOf(b)===materialId&&!sources.includes(b.warehouseId)).reduce((a,b)=>a+Math.max(0,b.onHand-b.reserved-(b.quarantine||0)),0))
+      const base={component,materialId,unit:unitMismatch?component.unit:stockUnit,stockUnit,unitMismatch,purchasable:raw&&!unitMismatch,warehouseId,required:q3(required),reserved:order.materialReserved,supply:[],lateForDue:false,afterStart:false,overduePo:false,elsewhere}
       if(order.materialReserved)return {...base,covered:q3(required),incoming:0,shortage:0,toBuy:0}
       // Quantities in different units are never added: a mismatched BOM line stays uncovered until it is fixed.
       if(unitMismatch)return {...base,covered:0,incoming:0,shortage:q3(required),toBuy:q3(required)}
@@ -1001,7 +1119,7 @@ export function materialPegging(state:ManufacturingState,today=todayISO()){
 export function orderMaterialPlan(state:ManufacturingState,order:ProductionOrder,today=todayISO()):MaterialPlanLine[]{
   const pegged=materialPegging(state,today).get(order.id)
   if(pegged)return pegged
-  return orderRequirements(order,remainingQty(order)).map(({component,required})=>({component,materialId:component.materialId,unit:component.unit,stockUnit:itemUnit(state,component.materialId),unitMismatch:false,purchasable:false,warehouseId:componentSourceWarehouse(state,order,component.materialId),required,reserved:order.materialReserved,covered:required,incoming:0,shortage:0,toBuy:0,supply:[],lateForDue:false,afterStart:false,overduePo:false,elsewhere:0}))
+  return orderRequirements(order,remainingQty(order)).map(({component,required})=>({component,materialId:component.materialId,unit:itemUnit(state,component.materialId),stockUnit:itemUnit(state,component.materialId),unitMismatch:false,purchasable:false,warehouseId:componentSourceWarehouse(state,order,component.materialId),required,reserved:order.materialReserved,covered:required,incoming:0,shortage:0,toBuy:0,supply:[],lateForDue:false,afterStart:false,overduePo:false,elsewhere:0}))
 }
 
 /** Coverage of each component for the remaining quantity of an order (Xomashyo → Material talabi rows). */

@@ -5,7 +5,8 @@ import {Icon} from './Icon'
 import {Empty} from './DataDisplay'
 import {SearchBox,Select} from './Forms'
 import {Popover} from './Overlays'
-import {downloadCsv} from '../../utils/exportData'
+import {exportRows as exportFile} from '../../utils/exportData'
+import type {ExportFormat} from '../../utils/exportData'
 import {paginate,sortRows} from './tableSort'
 import type {SortValue} from './tableSort'
 
@@ -88,7 +89,8 @@ export function ResourceTable<T extends {id:string}>({rows,columns,query,onQuery
     if(interactive&&e.currentTarget.contains(interactive))return
     onRow(r)
   }
-  const exportRows=()=>downloadCsv(exportName||'zenix-export',filtered.map(r=>Object.fromEntries(columns.map(c=>[c.label,cellValue(r,c)??'']))))
+  // Exactly the rows the table shows after search and filters, with its own column labels and raw values (audit #21).
+  const exportRows=(format:ExportFormat)=>exportFile(format,exportName||'zenix-export',filtered.map(r=>Object.fromEntries(columns.map(c=>[c.label,cellValue(r,c)??'']))))
   const searching=Boolean(q)||filtersActive
   const activeCount=(q?1:0)+Math.max(filtersActive?1:0,countActive(filters))
   const reset=()=>{onQuery('');onResetFilters?.()}
@@ -98,7 +100,8 @@ export function ResourceTable<T extends {id:string}>({rows,columns,query,onQuery
       {filters&&<div className="toolbar-filters">{filters}</div>}
       {searching&&<button type="button" className="filter-reset" onClick={reset} aria-label={`Filtrlarni tozalash (${activeCount})`}><Icon name="x" size={13}/>Tozalash<span className="seg-count">{activeCount}</span></button>}
       <div className="toolbar-actions">
-        {exportName&&exportAllowed&&<button type="button" className="ghost-btn compact" onClick={exportRows} disabled={!filtered.length} title={filtered.length?`${filtered.length} ta yozuvni CSV ga eksport qilish`:'Eksport uchun yozuv yo‘q'}><Icon name="download" size={14}/>CSV</button>}
+        {exportName&&exportAllowed&&<button type="button" className="ghost-btn compact" onClick={()=>exportRows('xlsx')} disabled={!filtered.length} title={filtered.length?`${filtered.length} ta yozuvni Excel (.xlsx) ga eksport qilish`:'Eksport uchun yozuv yo‘q'}><Icon name="download" size={14}/>Excel</button>}
+        {exportName&&exportAllowed&&<button type="button" className="ghost-btn compact" onClick={()=>exportRows('csv')} disabled={!filtered.length} title={filtered.length?`${filtered.length} ta yozuvni CSV ga eksport qilish`:'Eksport uchun yozuv yo‘q'}><Icon name="download" size={14}/>CSV</button>}
         {actions}
       </div>
     </div>

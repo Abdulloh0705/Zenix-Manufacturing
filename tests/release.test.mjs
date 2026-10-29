@@ -301,7 +301,8 @@ test('N-20: extra material beyond the BOM plan needs a reason, comes from free s
   assert.equal(after.stockBalances.filter(b=>b.itemId===c.materialId).reduce((a,b)=>a+b.reserved,0),reservedBefore,'reservations are not touched')
   assert.ok(after.stockMovements.some(m=>m.source===o.code&&/Qo‘shimcha chiqim/.test(m.note)))
   // The extra is capped at the BOM plan of that material.
-  refused(A.issueExtraMaterial(after,ctx(after),o.id,c.materialId,c.qty*5*(1+(c.waste||0)/100)*3,'yana'),/oshmasin|yetarli emas/)
+  // (in the ledger's 3-decimal precision: more decimals are refused on their own since audit #18)
+  refused(A.issueExtraMaterial(after,ctx(after),o.id,c.materialId,Math.round(c.qty*5*(1+(c.waste||0)/100)*3*1000)/1000,'yana'),/oshmasin|yetarli emas/)
   // Only planners may do it: operators run work but do not allow extra material.
   assert.equal(X.allowedBy(after.roles.find(r=>r.id==='role5'),X.actionRules('issueExtraMaterial',[])),false)
 })

@@ -66,11 +66,17 @@ export function RecoveryScreen(){
   if(!r)return null
   const download=()=>{downloadText(`zenix-saqlangan-malumot-${todayISO()}.json`,r.raw,'application/json');setDownloaded(true)}
   const start=()=>{const out=app.startClean(downloaded);if(!out.ok)setError(out.message)}
-  return <AuthShell title="Ma’lumotlarni tiklash" subtitle={r.reason==='unreadable'?'Brauzerda saqlangan ma’lumot buzilgan yoki ZENIX formatida emas.':'Saqlangan ma’lumotni ochishda xatolik yuz berdi.'}>
+  // Data of a newer app version is only exported here: replacing it from an older build would lose what it holds.
+  const newer=r.reason==='newer'
+  const subtitle=newer?`Ma’lumot ilovaning yangiroq versiyasida${r.version?` (v${r.version})`:''} saqlangan — bu versiya uni ocha olmaydi va ustidan yozmaydi.`
+    :r.reason==='unreadable'?'Brauzerda saqlangan ma’lumot buzilgan yoki ZENIX formatida emas.':'Saqlangan ma’lumotni ochishda xatolik yuz berdi.'
+  return <AuthShell title="Ma’lumotlarni tiklash" subtitle={subtitle}>
     <div className="form-stack">
-      <div className="inline-note warning" role="status"><Icon name="info"/><span>Hech narsa o‘chirilmadi va ustidan yozilmadi — ma’lumot brauzerda o‘zgarmagan holda turibdi. Davom etishdan oldin nusxasini yuklab oling.</span></div>
+      <div className="inline-note warning" role="status"><Icon name="info"/><span>{newer?'Hech narsa o‘zgartirilmadi. Nusxani yuklab oling, so‘ng ilovaning yangi versiyasini oching (sahifani yangilang). Bu oyna ma’lumotni faqat o‘qiydi.':'Hech narsa o‘chirilmadi va ustidan yozilmadi — ma’lumot brauzerda o‘zgarmagan holda turibdi. Davom etishdan oldin nusxasini yuklab oling.'}</span></div>
       <button type="button" className="secondary-glass-btn" onClick={download}><Icon name="download" size={16}/>{downloaded?'Nusxa yuklab olindi':'Nusxani yuklab olish'}</button>
-      <button type="button" className="primary-glass-btn auth-submit" onClick={()=>setAsk(true)}><Icon name="refresh" size={16}/>Toza holatda ochish</button>
+      {newer
+        ?<button type="button" className="primary-glass-btn auth-submit" onClick={()=>window.location.reload()}><Icon name="refresh" size={16}/>Sahifani yangilash</button>
+        :<button type="button" className="primary-glass-btn auth-submit" onClick={()=>setAsk(true)}><Icon name="refresh" size={16}/>Toza holatda ochish</button>}
       {error&&<div className="inline-note danger" role="alert"><Icon name="warning"/><span>{error}</span></div>}
     </div>
     <p className="soft-meta auth-help"><Icon name="key" size={13}/>Keyin Tizim → Backup import orqali eksport qilingan zaxirani tiklash mumkin.</p>

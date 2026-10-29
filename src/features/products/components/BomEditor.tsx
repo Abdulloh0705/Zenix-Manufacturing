@@ -5,8 +5,17 @@ import type {Bom,BomComponent,BomOperation} from '../../../types'
 import {estimateOrderCost} from '../../../domain/manufacturingEngine'
 import {money} from '../../../utils/format'
 import {itemUnitOf,productName} from '../../common/lookups'
+import {unitFactor,unitOptions} from '../../../domain/uom'
 
 const newId=(p:string)=>`${p}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,5)}`
+
+/** BOM line unit: the component's stock unit, a unit of the same dimension or one of its pack units (audit #24). */
+function UnitCell({itemId,value,onChange}:{itemId:string;value:string;onChange:(v:string)=>void}){
+  const s=useApp().state
+  const item=s.rawMaterials.find(m=>m.id===itemId)||s.products.find(p=>p.id===itemId)
+  const options=item?unitOptions(item):[value]
+  return <Select value={value} onChange={onChange} ariaLabel="O‘lchov birligi" size="sm" disabled={options.length<2}>{options.map(u=><option key={u} value={u}>{u}</option>)}</Select>
+}
 
 export function BomEditor({bom,onClose}:{bom:Bom;onClose:()=>void}){
   const app=useApp(),s=app.state
@@ -21,6 +30,8 @@ export function BomEditor({bom,onClose}:{bom:Bom;onClose:()=>void}){
   const removeOperation=(i:number)=>setDraft(d=>{const removed=d.operations[i].id;return {...d,operations:d.operations.filter((_,x)=>x!==i).map(o=>({...o,dependsOn:(o.dependsOn||[]).filter(dep=>dep!==removed)}))}})
   const estimate=estimateOrderCost(s,{bomSnapshot:draft,quantity:100})
   const unitCost=(id:string)=>s.rawMaterials.find(m=>m.id===id)?.standardCost??s.products.find(p=>p.id===id)?.standardCost??0
+  // Stock units in one BOM-line unit (the same UoM service saveBom stamps with); an impossible unit costs nothing here.
+  const lineFactor=(c:BomComponent)=>{const item=s.rawMaterials.find(m=>m.id===c.materialId)||s.products.find(p=>p.id===c.materialId);const f=item?unitFactor(item,c.unit):{error:''};return 'error' in f?0:f.factor}
   const save=()=>{setError('');const r=app.saveBom(draft);if(!r.ok)setError(r.message);return r.ok}
   return <Modal open onClose={onClose} title={`${draft.code} ${draft.version} — tahrirlash`} eyebrow="Draft" subtitle={`${productName(s,draft.productId)} · faol BOM faqat ECO orqali o‘zgaradi`} size="xl"
     footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Yopish</button><span className="spacer"/><span className="soft-meta">Tannarx ≈ <b>{money(estimate.total/100)}</b>/dona</span><button type="button" className="secondary-glass-btn" onClick={()=>{if(save())onClose()}}><Icon name="check" size={16}/>Saqlash</button>{app.can('products','approve')&&<button type="button" className="primary-glass-btn" onClick={()=>{if(save())setConfirmActivate(true)}}><Icon name="flag" size={16}/>Faollashtirish</button>}</>}>
@@ -36,9 +47,9 @@ export function BomEditor({bom,onClose}:{bom:Bom;onClose:()=>void}){
         {draft.components.length?<div className="table-scroll"><table className="fit editor-table"><thead><tr><th>Komponent</th><th className="align-right">Qty / dona</th><th>UOM</th><th className="align-right">Scrap %</th><th className="align-right">Tannarx / dona</th><th><span className="sr-only">Amal</span></th></tr></thead><tbody>{draft.components.map((c,i)=><tr key={c.id}>
           <td className="wide-cell"><Select value={c.materialId} onChange={v=>setComponent(i,{materialId:v})} ariaLabel={`Komponent ${i+1}`}>{items.map(x=><option key={x.id} value={x.id}>{x.label}</option>)}</Select></td>
           <td className="align-right"><input className="ui-input cell-input" type="number" min="0" step="0.001" aria-label="Miqdor" value={String(c.qty)} onChange={e=>setComponent(i,{qty:Number(e.target.value)})}/></td>
-          <td>{c.unit}</td>
+          <td><UnitCell itemId={c.materialId} value={c.unit} onChange={u=>setDraft(d=>({...d,components:d.components.map((x,j)=>j===i?{...x,unit:u}:x)}))}/></td>
           <td className="align-right"><input className="ui-input cell-input" type="number" min="0" step="0.1" aria-label="Scrap %" value={String(c.waste)} onChange={e=>setComponent(i,{waste:Number(e.target.value)||0})}/></td>
-          <td className="align-right num">{money(c.qty*(1+c.waste/100)*unitCost(c.materialId))}</td>
+          <td className="align-right num">{money(c.qty*lineFactor(c)*(1+c.waste/100)*unitCost(c.materialId))}</td>
           <td className="align-right"><button type="button" className="icon-ghost danger" aria-label="Komponentni o‘chirish" onClick={()=>setDraft(d=>({...d,components:d.components.filter((_,x)=>x!==i)}))}><Icon name="trash" size={15}/></button></td>
         </tr>)}</tbody></table></div>:<p className="soft-meta">Komponent qo‘shilmagan.</p>}
       </section>

@@ -5,11 +5,12 @@ import {useApp} from '../../../app/providers/AppProvider/AppContext'
 import {Card,Empty,FilterSelect,Icon,InfoGrid,KPI,PageHeader,StatusBadge,useSearchParamState} from '../../../shared/ui'
 import type {ManufacturingState} from '../../../types'
 import {buildTraceability,calculateCapacityLoads,downtimeByReason,findTraceOrder,orderCosting,productionOee,stockOf,workCenterOee} from '../../../domain/manufacturingEngine'
-import {addDays,parseDate,shortDate,todayISO} from '../../../utils/dates'
+import {addDays,daysBetween,displayStamp,shortDate,todayISO} from '../../../utils/dates'
 import {compactMoney,money,num} from '../../../utils/format'
-import {downloadCsv,downloadExcel} from '../../../utils/exportData'
-import type {FlatRow} from '../../../utils/exportData'
+import {exportRows} from '../../../utils/exportData'
+import type {ExportFormat,FlatRow} from '../../../utils/exportData'
 import {customerName,materialName,productName,supplierName,warehouseName} from '../../common/lookups'
+import {SERIAL_STATUS_LABEL,isSerialUnit,serialStatus} from '../../../domain/serials'
 import {BarList,ColumnChart,Gauge,StackedBar} from '../../common/charts'
 
 type S=ManufacturingState
@@ -47,10 +48,12 @@ function ExportButtons({name,rows}:{name:string;rows:FlatRow[]}){
   const app=useApp()
   const allowed=app.can('reports','export')
   const reason=!allowed?'Eksport uchun reports.export ruxsati kerak':!rows.length?'Eksport uchun ma’lumot yo‘q':undefined
+  // The file holds exactly the rows of the report for the chosen period; nothing is saved for an empty result.
+  const run=(format:ExportFormat)=>{const r=exportRows(format,name,rows);app.toast(r.message,r.ok?'success':'warning')}
   return <div className="export-actions no-print" role="group" aria-label="Eksport">
-    <button type="button" className="secondary-glass-btn compact" disabled={Boolean(reason)} title={reason} onClick={()=>{downloadExcel(name,rows);app.toast(`${name}.xls yuklab olindi`)}}><Icon name="download" size={15}/>Excel</button>
-    <button type="button" className="secondary-glass-btn compact" disabled={Boolean(reason)} title={reason} onClick={()=>{downloadCsv(name,rows);app.toast(`${name}.csv yuklab olindi`)}}><Icon name="download" size={15}/>CSV</button>
-    <button type="button" className="secondary-glass-btn compact" disabled={!allowed} title={!allowed?reason:'Print oynasida “PDF sifatida saqlash”ni tanlang'} onClick={()=>window.print()}><Icon name="printer" size={15}/>PDF</button>
+    <button type="button" className="secondary-glass-btn compact" disabled={Boolean(reason)} title={reason||`${rows.length} qator · .xlsx`} onClick={()=>run('xlsx')}><Icon name="download" size={15}/>Excel (.xlsx)</button>
+    <button type="button" className="secondary-glass-btn compact" disabled={Boolean(reason)} title={reason||`${rows.length} qator · UTF-8`} onClick={()=>run('csv')}><Icon name="download" size={15}/>CSV</button>
+    <button type="button" className="secondary-glass-btn compact" disabled={!allowed} title={!allowed?reason:'Brauzerning chop etish oynasi ochiladi — PDF uchun “PDF sifatida saqlash”ni tanlang'} onClick={()=>window.print()}><Icon name="printer" size={15}/>Print / PDF saqlash</button>
   </div>
 }
 
@@ -114,7 +117,7 @@ function buildReport(view:string,s:S,since:string,period:number):Report{
     const cost=(id:string)=>s.rawMaterials.find(m=>m.id===id)?.standardCost??s.products.find(p=>p.id===id)?.standardCost??0
     const byWh=s.warehouses.map(w=>({w,value:s.stockBalances.filter(b=>b.warehouseId===w.id).reduce((a,b)=>a+b.onHand*cost(b.itemId),0)}))
     const lots=s.lots.filter(l=>l.qty>0)
-    const aging=[['0–7 kun',0,7],['8–30 kun',8,30],['31–90 kun',31,90],['90+ kun',91,9999]].map(([label,a,b])=>({label:String(label),value:lots.filter(l=>{const d=Math.round((parseDate(todayISO()).getTime()-parseDate(l.createdAt).getTime())/864e5);return d>=Number(a)&&d<=Number(b)}).reduce((x,l)=>x+l.qty*cost(l.itemId),0)}))
+    const aging=[['0–7 kun',0,7],['8–30 kun',8,30],['31–90 kun',31,90],['90+ kun',91,9999]].map(([label,a,b])=>({label:String(label),value:lots.filter(l=>{const d=daysBetween(l.createdAt,todayISO());return d>=Number(a)&&d<=Number(b)}).reduce((x,l)=>x+l.qty*cost(l.itemId),0)}))
     const moves=s.stockMovements.filter(m=>inPeriod(m.date))
     return {title:'Ombor hisoboti',subtitle:'Qiymat, ombor bo‘yicha, lot yoshi',
       rows:s.stockBalances.map(b=>({Ombor:warehouseName(s,b.warehouseId),Item:materialName(s,b.itemId),'On hand':Math.round(b.onHand*100)/100,Rezerv:Math.round(b.reserved*100)/100,Available:Math.round((b.onHand-b.reserved)*100)/100,"Yo‘lda":b.incoming,Qiymat:Math.round(b.onHand*cost(b.itemId))})),
@@ -165,11 +168,18 @@ function Traceability(){
   useEffect(()=>setDraft(q),[q])
   const order=findTraceOrder(s,q)
   const trace=order?buildTraceability(s,order.id):null
+  const unit=q?serialStatus(s,q.trim()):undefined
   const rows:FlatRow[]=trace?[...trace.upstreamLots.map(l=>({'Yo‘nalish':'Upstream',Kod:l.code,Item:materialName(s,l.itemId),Manba:l.sourceCode,Sana:l.createdAt})),{'Yo‘nalish':'MO',Kod:order!.code,Item:productName(s,order!.productId),Manba:order!.bomVersion,Sana:order!.completedAt||order!.createdAt},...trace.outputLots.map(l=>({'Yo‘nalish':'Output',Kod:l.code,Item:productName(s,l.itemId),Manba:l.sourceCode,Sana:l.createdAt})),...trace.downstreamSales.map(o=>({'Yo‘nalish':'Downstream',Kod:o.code,Item:customerName(s,o.customerId),Manba:o.status,Sana:o.deliveredAt||o.createdAt}))]:[]
   return <div className="page-stack print-area">
     <PageHeader title="Traceability" subtitle="Lot, serial, MO yoki SKU → to‘liq zanjir" actions={<ExportButtons name={`trace-${q||'empty'}`} rows={rows}/>}/>
     <Card><form className="trace-search" onSubmit={e=>{e.preventDefault();setQ(draft.trim())}}><Icon name="search"/><input value={draft} onChange={e=>setDraft(e.target.value)} placeholder="LOT-..., SN-..., MO-..., FG-..." aria-label="Traceability qidiruvi"/><button className="primary-glass-btn" type="submit" disabled={!draft.trim()}>Trace</button></form></Card>
-    {!order||!trace?<Card><Empty icon="search" title={q?`“${q}” bo‘yicha zanjir topilmadi`:'Kod kiriting'} text="MO, lot, serial (SN-…) yoki SKU"/></Card>:<>
+    {unit&&<Card title={`Serial ${unit.serial}`} actions={<StatusBadge tone={unit.record?'success':'neutral'}>{SERIAL_STATUS_LABEL[unit.status]}</StatusBadge>}>
+      {unit.conflict&&<div className="inline-note danger" role="alert"><Icon name="warning"/><span>{unit.conflict}</span></div>}
+      <InfoGrid items={[{label:'Item',value:unit.origin?.itemType==='raw'?materialName(s,unit.itemId):productName(s,unit.itemId)},{label:'Hozir',value:unit.warehouseId?`${warehouseName(s,unit.warehouseId)}${unit.location?` · ${unit.location}`:''}`:SERIAL_STATUS_LABEL[unit.status]},{label:'Manba',value:unit.origin?`${unit.origin.sourceCode}${unit.origin.batch?` · ${unit.origin.batch}`:''}`:'—'},{label:'Harakatlar',value:unit.history.length}]}/>
+      <div className="table-scroll"><table className="fit"><thead><tr><th>Sana</th><th>Harakat</th><th>Hujjat</th><th>Ombor</th><th className="align-right">Miqdor</th></tr></thead>
+        <tbody>{unit.history.map(m=><tr key={m.id}><td>{displayStamp(m.date)}</td><td>{m.type}</td><td>{m.source}</td><td>{warehouseName(s,m.warehouseId)}{m.location?` · ${m.location}`:''}</td><td className="align-right">{num(m.qty)}</td></tr>)}</tbody></table></div>
+    </Card>}
+    {!order||!trace?(unit?null:<Card><Empty icon="search" title={q?`“${q}” bo‘yicha zanjir topilmadi`:'Kod kiriting'} text="MO, lot, serial (SN-…) yoki SKU"/></Card>):<>
       <div className="trace-chain">
         <TraceNode icon="truck" label="Supplier / xarid" title={trace.purchases.map(p=>p.code).join(', ')||'Boshlang‘ich zaxira'} sub={[...new Set(trace.purchases.map(p=>supplierName(s,p.supplierId)))].join(', ')||'—'}/>
         <Icon name="arrow" className="trace-arrow"/>
@@ -185,12 +195,25 @@ function Traceability(){
       </div>
       <div className="two-col">
         <Card title="Upstream: sarflangan lotlar">{trace.upstreamLots.length?<div className="stack-list">{trace.upstreamLots.map(l=><button type="button" key={l.id} className="list-row is-clickable" onClick={()=>setQ(l.code)}><span className="list-row-copy"><b>{l.code}</b><small>{materialName(s,l.itemId)} · {l.sourceCode}{l.sourceType==='purchase'?` · ${supplierName(s,s.purchaseOrders.find(p=>p.id===l.sourceId)?.supplierId)}`:''}</small></span><span className="list-row-meta"><span className="num">{num(order.consumed.filter(c=>c.lot===l.code).reduce((a,c)=>a+c.qty,0),1)}</span></span></button>)}</div>:<Empty compact title="Material hali sarflanmagan"/>}</Card>
-        <Card title="Downstream: jo‘natmalar">{trace.movements.filter(m=>m.type==='Production +').length?<div className="stack-list">{s.stockMovements.filter(m=>m.type==='Sale -'&&m.lot&&trace.outputLots.some(l=>l.code===m.lot)).map(m=><div className="list-row" key={m.id}><span className="list-row-copy"><b>{m.source}</b><small>{m.date} · {num(-m.qty)} · {m.lot}</small></span><StatusBadge tone="success">Jo‘natilgan</StatusBadge></div>)}{trace.outputLots.map(l=><div className="list-row" key={l.id}><span className="list-row-copy"><b>{l.code}</b><small>Omborda qoldiq {num(l.qty)} · {warehouseName(s,l.warehouseId)}</small></span></div>)}</div>:<Empty compact title="Tayyor mahsulot hali qabul qilinmagan"/>}</Card>
+        <Card title="Downstream: jo‘natmalar">{trace.movements.filter(m=>m.type==='Production +').length?<div className="stack-list">{shipments(s,trace.outputLots).map(g=><div className="list-row" key={g.key}><span className="list-row-copy"><b>{g.source}</b><small>{g.date} · {num(g.qty)} · {g.lots.slice(0,3).join(', ')}{g.lots.length>3?` +${g.lots.length-3}`:''}</small></span><StatusBadge tone="success">Jo‘natilgan</StatusBadge></div>)}{trace.outputLots.filter(l=>!isSerialUnit(l)).map(l=><div className="list-row" key={l.id}><span className="list-row-copy"><b>{l.code}</b><small>Omborda qoldiq {num(l.qty)} · {warehouseName(s,l.warehouseId)}</small></span></div>)}{unitsInStock(trace.outputLots).map(([wh,codes])=><div className="list-row" key={wh}><span className="list-row-copy"><b>{codes.length} ta serial omborda</b><small>{warehouseName(s,wh)} · {codes.slice(0,3).join(', ')}{codes.length>3?` +${codes.length-3}`:''}</small></span></div>)}</div>:<Empty compact title="Tayyor mahsulot hali qabul qilinmagan"/>}</Card>
       </div>
       <InfoGrid items={[{label:'Mahsulot zaxirasi',value:num(stockOf(s,order.productId).onHand)},{label:'Ishlab chiqarilgan',value:order.completedAt||'jarayonda'},{label:'Harakatlar',value:trace.movements.length},{label:'Qaytarishlar',value:s.returns.filter(r=>r.lot&&trace.outputLots.some(l=>l.code===r.lot)).length}]}/>
     </>}
   </div>
 }
+
+/** Shipments of an order's output, one row per delivery document (serial units are many rows of one shipment). */
+function shipments(s:ManufacturingState,lots:ManufacturingState['lots']){
+  const codes=new Set(lots.map(l=>l.code)),groups=new Map<string,{key:string;source:string;date:string;qty:number;lots:string[]}>()
+  for(const m of s.stockMovements){
+    if(m.type!=='Sale -'||!m.lot||!codes.has(m.lot))continue
+    const k=`${m.source}|${m.date}`,g=groups.get(k)||{key:k,source:m.source,date:m.date,qty:0,lots:[]}
+    g.qty+=-m.qty;if(!g.lots.includes(m.lot))g.lots.push(m.lot);groups.set(k,g)
+  }
+  return [...groups.values()]
+}
+/** Serial units of the output still in stock, by warehouse. */
+const unitsInStock=(lots:ManufacturingState['lots'])=>{const m=new Map<string,string[]>();for(const l of lots)if(isSerialUnit(l)&&l.qty>0)m.set(l.warehouseId,[...(m.get(l.warehouseId)||[]),l.code]);return [...m]}
 
 function TraceNode({icon,label,title,sub,onClick}:{icon:string;label:string;title:string;sub:string;onClick?:()=>void}){
   const body=<><span className="trace-icon"><Icon name={icon}/></span><em>{label}</em><b>{title}</b><small>{sub}</small></>

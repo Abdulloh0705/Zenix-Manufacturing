@@ -3,7 +3,8 @@ import {useNavigate,useSearchParams} from 'react-router-dom'
 import {useApp} from '../../../app/providers/AppProvider/AppContext'
 import {Card,Confirm,Drawer,Empty,Field,FilterSelect,Icon,InfoGrid,Input,Modal,MoneyInput,PageHeader,ResourceTable,SectionTitle,Select,StatusBadge,Tabs,Textarea,required,useForm,useRecordParam,useSearchParamState} from '../../../shared/ui'
 import type {Bom,Product,ProductVariant} from '../../../types'
-import {activeBomFor,estimateOrderCost,perUnit,stockOf} from '../../../domain/manufacturingEngine'
+import {activeBomFor,estimateOrderCost,perUnit,productStockOf,stockOf} from '../../../domain/manufacturingEngine'
+import {stockKey} from '../../../domain/inventory'
 import {ecoChanges,referenceBlocker,variantValues} from '../../../domain/actions'
 import {addDays,todayISO} from '../../../utils/dates'
 import {money,num} from '../../../utils/format'
@@ -44,7 +45,7 @@ function AllProducts(){
         {key:'status',label:'Status',value:p=>p.status,render:p=><StatusBadge>{p.status}</StatusBadge>},
         {key:'type',label:'Tur',value:p=>p.type==='finished'?'Tayyor':'Yarim tayyor',render:p=><span>{p.type==='finished'?'Tayyor':'Yarim tayyor'}<small className="cell-sub">{p.procurement==='make'?'Make':'Buy'} · {p.tracking==='lot'?'Lot':p.tracking==='serial'?'Serial':'—'}</small></span>},
         {key:'bom',label:'Faol BOM',value:p=>activeBomFor(s,p.id)?.code||'',render:p=>{const b=activeBomFor(s,p.id);return b?<span>{b.code}<small className="cell-sub">{b.version}</small></span>:<span className="muted">{p.procurement==='buy'?'Buy':'BOM yo‘q'}</span>},priority:'low'},
-        {key:'stock',label:'Available',align:'right',value:p=>stockOf(s,p.id).available,render:p=><span className="num">{num(stockOf(s,p.id).available)} {p.unit}</span>},
+        {key:'stock',label:'Available',align:'right',value:p=>productStockOf(s,p.id).available,render:p=><span className="num" title={p.variantStock?'Variantlar yig‘indisi (har biri alohida qoldiq)':undefined}>{num(productStockOf(s,p.id).available)} {p.unit}</span>},
         ...(app.can('costs')?[{key:'cost',label:'Tannarx',align:'right' as const,value:(p:Product)=>p.standardCost,render:(p:Product)=>money(p.standardCost)}]:[]),
         {key:'price',label:'Sotuv narxi',align:'right',value:p=>p.salePrice,render:p=>money(p.salePrice)},
         ...(app.can('costs')?[{key:'margin',label:'Marja',align:'right' as const,value:(p:Product)=>p.salePrice?(1-p.standardCost/p.salePrice)*100:0,render:(p:Product)=>`${p.salePrice?Math.round((1-p.standardCost/p.salePrice)*100):0}%`,priority:'low' as const}]:[])
@@ -70,7 +71,7 @@ function ProductDrawerBody({product,onClose}:{product:Product;onClose:()=>void})
   const sales=s.salesOrders.flatMap(o=>o.items.filter(i=>i.productId===product.id).map(i=>({o,i})))
   const orders=s.productionOrders.filter(o=>o.productId===product.id)
   const blocker=referenceBlocker(s,'products',product.id)
-  const stock=stockOf(s,product.id)
+  const stock=productStockOf(s,product.id)
   return <Drawer open onClose={onClose} title={product.name} eyebrow="Mahsulot" icon="box" size="lg" subtitle={`${product.sku} · ${product.category}`}
     headerExtra={<><StatusBadge>{product.status}</StatusBadge><span className="chip">{product.procurement==='make'?'Make':'Buy'}</span><span className="chip">{product.tracking==='lot'?'Lot tracked':product.tracking==='serial'?'Serial tracked':'Kuzatilmaydi'}</span></>}
     actions={<>
@@ -88,7 +89,7 @@ function ProductDrawerBody({product,onClose}:{product:Product;onClose:()=>void})
     </>}
     {tab==='bom'&&(bom?<><SectionTitle title={`${bom.code} ${bom.version}`} subtitle={`Revision ${bom.revision} · effective ${bom.effectiveDate}`} actions={<button type="button" className="ghost-btn" onClick={()=>navigate(`/products?view=bom&id=${bom.id}`)}>BOM’ni ochish <Icon name="chevron" size={13}/></button>}/><BomTree bom={bom} quantity={1}/></>:<Empty compact title="Faol BOM yo‘q"/>)}
     {tab==='stock'&&<div className="two-col">
-      <div><SectionTitle title="Omborlar bo‘yicha"/>{balances.length?<div className="stack-list">{balances.map(b=><div className="list-row" key={b.id}><span className="list-row-copy"><b>{warehouseName(s,b.warehouseId)}</b><small>Rezerv {num(b.reserved)} · yo‘lda {num(b.incoming)}</small></span><b className="num">{num(b.onHand)} {b.unit}</b></div>)}</div>:<Empty compact title="Qoldiq yo‘q"/>}</div>
+      <div><SectionTitle title="Omborlar bo‘yicha"/>{balances.length?<div className="stack-list">{balances.map(b=><div className="list-row" key={b.id}><span className="list-row-copy"><b>{warehouseName(s,b.warehouseId)}{product.variantStock?` · ${b.variantId?product.variants.find(v=>v.id===b.variantId)?.code||b.variantId:'variant aniqlanmagan'}`:''}</b><small>Rezerv {num(b.reserved)} · yo‘lda {num(b.incoming)}</small></span><b className="num">{num(b.onHand)} {b.unit}</b></div>)}</div>:<Empty compact title="Qoldiq yo‘q"/>}</div>
       <div><SectionTitle title="Faol lot / serial"/>{lots.length?<div className="stack-list">{lots.map(l=><div className="list-row" key={l.id}><span className="list-row-copy"><b>{l.code}</b><small>{l.sourceCode} · {l.createdAt.slice(0,10)}</small></span><b className="num">{num(l.qty)}</b></div>)}</div>:<Empty compact title="Kuzatiladigan lot yo‘q"/>}</div>
     </div>}
     {tab==='variants'&&<VariantManager product={product}/>}
@@ -112,8 +113,33 @@ function VariantManager({product}:{product:Product}){
   return <div className="stack-list">
     {product.variants.length?product.variants.map(v=><div className="list-row" key={v.id}><span className="list-row-copy"><b>{v.code}</b><small>{v.attributes} · {v.priceDelta?`${v.priceDelta>0?'+':''}${money(v.priceDelta)}`:'narx farqi yo‘q'}{v.barcode?` · ${v.barcode}`:''} · BOM: {variantBom(v)?`${variantBom(v)!.code} ${variantBom(v)!.version}`:'umumiy'}</small></span><span className="list-row-meta"><StatusBadge>{v.status}</StatusBadge>{canEdit&&<button type="button" className="icon-ghost" aria-label={`${v.code} — tahrirlash`} onClick={()=>setEditing(v)}><Icon name="edit" size={15}/></button>}</span></div>):<Empty compact title="Variant yo‘q"/>}
     {canEdit&&<div className="row-actions"><button type="button" className="secondary-glass-btn compact" onClick={()=>setEditing('new')}><Icon name="plus" size={14}/>Variant qo‘shish</button></div>}
-    <p className="soft-meta">Zaxira mahsulot darajasida yuritiladi — variantlar alohida qoldiq saqlamaydi.</p>
+    <VariantStockPanel product={product}/>
     {editing&&<VariantModal product={product} variant={editing==='new'?undefined:editing} onClose={()=>setEditing(null)}/>}
+  </div>
+}
+
+/**
+ * Variant inventory identity (audit #15): whether variants are separate physical stock items, each variant's own
+ * availability, and the legacy product stock no variant owns yet (reconciled in Ombor → Inventarizatsiya).
+ */
+function VariantStockPanel({product}:{product:Product}){
+  const app=useApp(),s=app.state
+  const [confirm,setConfirm]=useState(false)
+  const on=Boolean(product.variantStock)
+  const legacy=stockOf(s,product.id)
+  const canEdit=app.can('products','edit')
+  return <div className="variant-stock">
+    <SectionTitle title="Variant bo‘yicha qoldiq" subtitle={on?'Har bir variant alohida fizik item: qoldiq, LOT, rezerv, ishlab chiqarish va yetkazish variant bilan':'O‘chiq — zaxira mahsulot darajasida, variantlar faqat konfiguratsiya'}
+      actions={canEdit&&product.variants.some(v=>v.status==='Faol')?<button type="button" className="secondary-glass-btn compact" onClick={()=>setConfirm(true)}>{on?'O‘chirish':'Yoqish'}</button>:undefined}/>
+    {on&&<div className="table-scroll"><table className="fit"><thead><tr><th>Variant</th><th className="align-right">On hand</th><th className="align-right">Rezerv</th><th className="align-right">Available</th></tr></thead><tbody>
+      {product.variants.map(v=>{const st=stockOf(s,stockKey(product.id,v.id));return <tr key={v.id}><td>{v.code}<small className="cell-sub">{v.attributes}</small></td><td className="align-right num">{num(st.onHand)}</td><td className="align-right num">{num(st.reserved)}</td><td className="align-right num"><b>{num(st.available)}</b></td></tr>})}
+      {legacy.onHand>0&&<tr className="row-warning"><td>Variant aniqlanmagan<small className="cell-sub">Eski qoldiq — hech bir variantga berilmaydi</small></td><td className="align-right num">{num(legacy.onHand)}</td><td className="align-right num">{num(legacy.reserved)}</td><td className="align-right num">{num(legacy.available)}</td></tr>}
+    </tbody></table></div>}
+    {on&&legacy.onHand>0&&<div className="inline-note warning"><Icon name="warning"/>{num(legacy.onHand)} {product.unit} eski qoldiq variantga biriktirilmagan — Ombor → Inventarizatsiya → Muvofiqlashtirish bo‘limida sanab biriktiring.</div>}
+    <Confirm open={confirm} onClose={()=>setConfirm(false)} onConfirm={()=>{app.setVariantStock(product.id,!on);setConfirm(false)}}
+      title={on?'Variant qoldig‘ini o‘chirasizmi?':'Variantlarni alohida qoldiq sifatida yuritasizmi?'}
+      text={on?'Faqat hech bir variantda qoldiq, LOT yoki rezerv bo‘lmasa o‘chiriladi — variant qoldig‘i mahsulotga “qo‘shib yuborilmaydi”.':`Mavjud ${num(stockOf(s,product.id).onHand)} ${product.unit} qoldiq ko‘chirilmaydi va avtomatik taqsimlanmaydi: u “variant aniqlanmagan” bo‘lib qoladi va hech bir variant talabiga berilmaydi, toki sanab biriktirmaguningizcha. Yangi MO va sotuv qatorlari variantni talab qiladi.`}
+      confirmText={on?'O‘chirish':'Yoqish'}/>
   </div>
 }
 

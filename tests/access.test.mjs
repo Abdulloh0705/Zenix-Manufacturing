@@ -158,7 +158,8 @@ test('v4 migration: eight roles, ids and assignments kept, untouched roles get t
   const before=legacyState()
   const {state:after,applied}=migrateState(before)
   assert.equal(after.schemaVersion,SCHEMA_VERSION)
-  assert.equal(applied.length,1)
+  // v3 data runs the v4 step and then the v5 version mark (Phase 5), in order.
+  assert.deepEqual(applied.map(a=>a.split(':')[0]),['v4','v5'])
   assert.deepEqual(after.roles.map(r=>r.key).sort(),['admin','maintenance','operator','production_manager','quality','super_admin','supply_sales','warehouse'])
   for(const id of ['role1','role2','role3','role4','role5'])assert.ok(after.roles.some(r=>r.id===id),id)
   assert.deepEqual(after.employees,before.employees,'every employee keeps their role id')

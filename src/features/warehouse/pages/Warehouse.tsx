@@ -3,7 +3,14 @@ import {useNavigate,useSearchParams} from 'react-router-dom'
 import {useApp} from '../../../app/providers/AppProvider/AppContext'
 import {Card,Empty,Field,FilterSelect,Icon,InfoGrid,Input,KPI,Modal,PageHeader,ResourceTable,SectionTitle,Select,StatusBadge,required,useForm,useSearchParamState} from '../../../shared/ui'
 import type {LotRecord,StockBalance,Warehouse as WarehouseType} from '../../../types'
-import {findTraceOrder,itemName,serialInRange,stockOf} from '../../../domain/manufacturingEngine'
+import {findTraceOrder,itemName,orderReservations,serialInRange,stockOf} from '../../../domain/manufacturingEngine'
+import {stockScope} from '../../../domain/access'
+import {lotTracked} from '../../../domain/actions'
+import {SERIAL_STATUS_LABEL,isLegacyRange,serialIssues,serialRegister} from '../../../domain/serials'
+import type {SerialStatus} from '../../../domain/serials'
+import {binQty,inventoryIssues,keyOf,locationRows,lotsAt,unassignedQty,untrackedAt} from '../../../domain/inventory'
+import type {IntegrityIssue} from '../../../domain/inventory'
+import {convertQty,unitOptions} from '../../../domain/uom'
 import {addDays,todayISO} from '../../../utils/dates'
 import {compactMoney,money,num,qty} from '../../../utils/format'
 import {itemSku,itemUnitOf,warehouseName} from '../../common/lookups'
@@ -17,7 +24,8 @@ export default function Warehouse(){
   if(view==='inventory')return <Inventory/>
   if(view==='warehouses')return <Warehouses/>
   if(view==='locations')return <Locations/>
-  if(view==='lots'||view==='serials')return <Lots kind={view==='lots'?'lot':'serial'}/>
+  if(view==='serials')return <Serials/>
+  if(view==='lots')return <Lots kind="lot"/>
   if(view==='barcode')return <Barcode/>
   return <Stock/>
 }
@@ -25,7 +33,29 @@ export default function Warehouse(){
 type StockRow=StockBalance&{name:string;sku:string;available:number;value:number}
 function useStockRows(){
   const s=useApp().state
-  return useMemo<StockRow[]>(()=>s.stockBalances.map(b=>{const cost=s.rawMaterials.find(m=>m.id===b.itemId)?.standardCost??s.products.find(p=>p.id===b.itemId)?.standardCost??0;return {...b,name:itemName(s,b.itemId),sku:itemSku(s,b.itemId),available:Math.max(0,b.onHand-b.reserved-(b.quarantine||0)),value:b.onHand*cost}}),[s])
+  return useMemo<StockRow[]>(()=>s.stockBalances.map(b=>{const cost=s.rawMaterials.find(m=>m.id===b.itemId)?.standardCost??s.products.find(p=>p.id===b.itemId)?.standardCost??0;return {...b,name:itemName(s,keyOf(b)),sku:itemSku(s,keyOf(b)),available:Math.max(0,b.onHand-b.reserved-(b.quarantine||0)),value:b.onHand*cost}}),[s])
+}
+/** Where a balance sits: its locations and the unassigned rest (audit #17); one line, no wrapping chips in a table. */
+function LocationCell({b}:{b:StockBalance}){
+  const rows=locationRows(b).filter(r=>r.qty>1e-9)
+  if(!rows.length)return <span className="soft-meta">—</span>
+  return <span className="truncate" title={rows.map(r=>`${r.location||'Joysiz'}: ${num(r.qty,1)}`).join(' · ')}>{rows.map(r=>`${r.location||'Joysiz'} ${num(r.qty,1)}`).join(' · ')}</span>
+}
+/** Unit selector for a quantity field: the item's stock unit, same-dimension units and its own pack units (audit #24). */
+function UnitSelect({itemId,value,onChange}:{itemId:string;value:string;onChange:(v:string)=>void}){
+  const s=useApp().state
+  const id=itemId.split('~')[0]
+  const item=s.rawMaterials.find(m=>m.id===id)||s.products.find(p=>p.id===id)
+  const options=item?unitOptions(item):[]
+  return <Select value={value||item?.unit||''} onChange={onChange} ariaLabel="Birlik" disabled={options.length<2}>{options.map(u=><option key={u} value={u}>{u}</option>)}</Select>
+}
+/** A typed quantity in stock units, or why it cannot be converted (shown as the field's error). */
+function stockQtyOf(s:ReturnType<typeof useApp>['state'],itemId:string|undefined,value:string,unit:string):{value:number;error?:string;converted?:string}{
+  const id=(itemId||'').split('~')[0]
+  const item=s.rawMaterials.find(m=>m.id===id)||s.products.find(p=>p.id===id)
+  if(!item||value===''||!Number.isFinite(Number(value)))return {value:Number.NaN}
+  const c=convertQty(item,Number(value),unit||item.unit,undefined,'half-up')
+  return 'error' in c?{value:Number.NaN,error:c.error}:{value:c.value,converted:(unit&&unit!==item.unit)?`= ${num(c.value,3)} ${item.unit}`:undefined}
 }
 const openItem=(navigate:ReturnType<typeof useNavigate>,r:{itemType:string;itemId:string})=>navigate(r.itemType==='raw'?`/materials?view=all&id=${r.itemId}`:`/products?view=all&id=${r.itemId}`)
 
@@ -52,6 +82,7 @@ function Stock(){
       columns={[
         {key:'name',label:'Item',value:r=>r.name,render:r=><div className="cell-main"><b>{r.name}</b><small>{r.sku}{r.lot?` · ${r.lot}`:''}</small></div>},
         {key:'warehouse',label:'Ombor',value:r=>warehouseName(s,r.warehouseId)},
+        {key:'locations',label:'Joylar',value:r=>locationRows(r).filter(x=>x.qty>0).map(x=>x.location||'Joysiz').join(' '),render:r=><LocationCell b={r}/>,priority:'low'},
         {key:'type',label:'Tur',value:r=>r.itemType==='raw'?'Xomashyo':'Mahsulot',priority:'low'},
         {key:'onHand',label:'On hand',align:'right',value:r=>r.onHand,render:r=>num(r.onHand,1)},
         {key:'reserved',label:'Rezerv',align:'right',value:r=>r.reserved,render:r=>num(r.reserved,1)},
@@ -77,7 +108,7 @@ function Movements(){
       columns={[
         {key:'date',label:'Sana',value:m=>m.date},
         {key:'type',label:'Harakat',value:m=>m.type,render:m=><StatusBadge tone={m.qty>=0?'success':'warning'}>{m.type}</StatusBadge>},
-        {key:'item',label:'Item',value:m=>itemName(s,m.itemId),render:m=><div className="cell-main"><b>{itemName(s,m.itemId)}</b><small>{m.lot||m.note}</small></div>},
+        {key:'item',label:'Item',value:m=>itemName(s,keyOf(m)),render:m=><div className="cell-main"><b>{itemName(s,keyOf(m))}</b><small>{[m.lot||m.note,m.location].filter(Boolean).join(' · ')}</small></div>},
         {key:'warehouse',label:'Ombor',value:m=>warehouseName(s,m.warehouseId),priority:'low'},
         {key:'qty',label:'Miqdor',align:'right',value:m=>m.qty,render:m=><b className={m.qty>=0?'positive':'negative'}>{m.qty>0?'+':''}{num(m.qty,1)} {itemUnitOf(s,m.itemId)}</b>},
         {key:'source',label:'Manba',value:m=>m.source},
@@ -88,15 +119,22 @@ function Movements(){
 
 function TransferModal({onClose}:{onClose:()=>void}){
   const app=useApp(),s=app.state
+  // Only stores the role may move stock into are offered; the engine checks the same scope again.
+  const scope=stockScope(s,app.currentEmployee)
   const lines=s.stockBalances.filter(b=>b.onHand-b.reserved-(b.quarantine||0)>0)
-  const form=useForm({line:lines[0]?.id||'',to:'',qty:''},v=>{const b=s.stockBalances.find(x=>x.id===v.line);const avail=b?b.onHand-b.reserved-(b.quarantine||0):0;return {line:b?undefined:'Stock qatorini tanlang',to:!v.to?'Qabul qiluvchi omborni tanlang':v.to===b?.warehouseId?'Bir xil ombor':undefined,qty:!(Number(v.qty)>0)?'Miqdor kiriting':Number(v.qty)>avail?`Available ${num(avail,1)}`:undefined}})
+  const [unit,setUnit]=useState('')
+  const form=useForm({line:lines[0]?.id||'',to:'',qty:'',fromLocation:'*',toLocation:''},v=>{const b=s.stockBalances.find(x=>x.id===v.line);const amount=stockQtyOf(s,b?keyOf(b):undefined,v.qty,unit);const avail=b?b.onHand-b.reserved-(b.quarantine||0):0;const here=b&&v.fromLocation!=='*'?binQty(b,v.fromLocation):avail;return {line:b?undefined:'Stock qatorini tanlang',to:!v.to?'Qabul qiluvchi omborni tanlang':v.to===b?.warehouseId?'Bir xil ombor':undefined,qty:amount.error||(!(amount.value>0)?'Miqdor kiriting':amount.value>Math.min(avail,here)+1e-9?`Mavjud ${num(Math.min(avail,here),1)}`:undefined)}})
   const b=s.stockBalances.find(x=>x.id===form.values.line)
-  return <Modal open onClose={onClose} title="Omborlararo transfer" subtitle="Faqat available qoldiq ko‘chiriladi" size="md"
-    footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Bekor qilish</button><button type="button" className="primary-glass-btn" onClick={()=>form.submit(v=>{const r=app.transferStock(b!.itemId,b!.warehouseId,v.to,Number(v.qty));if(r.ok)onClose();return r.ok})}><Icon name="arrow-right" size={16}/>Transfer qilish</button></>}>
+  const amount=stockQtyOf(s,b?keyOf(b):undefined,form.values.qty,unit)
+  const target=s.warehouses.find(w=>w.id===form.values.to)
+  return <Modal open onClose={onClose} title="Omborlararo transfer" subtitle="Faqat available qoldiq ko‘chiriladi · LOT o‘z joyidan, manbasi bilan" size="md"
+    footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Bekor qilish</button><button type="button" className="primary-glass-btn" onClick={()=>form.submit(v=>{const r=app.transferStock(keyOf(b!),b!.warehouseId,v.to,Number(v.qty),undefined,{fromLocation:v.fromLocation==='*'?undefined:v.fromLocation,toLocation:v.toLocation||undefined,unit:unit||undefined});if(r.ok)onClose();return r.ok})}><Icon name="arrow-right" size={16}/>Transfer qilish</button></>}>
     <div className="form-grid">
-      <Field className="span-2" label="Item va manba ombor" required error={form.error('line')}><Select value={form.values.line} onChange={v=>{form.set('line',v);form.set('to','')}}>{lines.map(x=><option key={x.id} value={x.id}>{itemName(s,x.itemId)} · {warehouseName(s,x.warehouseId)} · {num(x.onHand-x.reserved-(x.quarantine||0),1)} {x.unit}</option>)}</Select></Field>
-      <Field label="Qabul qiluvchi ombor" required error={form.error('to')}><Select value={form.values.to} onChange={v=>form.set('to',v)} placeholder="Tanlang">{s.warehouses.filter(w=>w.id!==b?.warehouseId&&w.status==='Faol').map(w=>(<option key={w.id} value={w.id}>{w.name}</option>))}</Select></Field>
-      <Field label="Miqdor" required error={form.error('qty')} hint={b?`Available: ${num(b.onHand-b.reserved-(b.quarantine||0),1)} ${b.unit}`:undefined}><Input type="number" min="0" step="any" {...form.input('qty')}/></Field>
+      <Field className="span-2" label="Item va manba ombor" required error={form.error('line')}><Select value={form.values.line} onChange={v=>{form.set('line',v);form.set('to','');form.set('fromLocation','*');setUnit('')}}>{lines.map(x=><option key={x.id} value={x.id}>{itemName(s,keyOf(x))} · {warehouseName(s,x.warehouseId)} · {num(x.onHand-x.reserved-(x.quarantine||0),1)} {x.unit}</option>)}</Select></Field>
+      <Field label="Manba joyi" hint="Ixtiyoriy: LOT’lar turgan joyidan olinadi"><Select value={form.values.fromLocation} onChange={v=>form.set('fromLocation',v)}><option value="*">Istalgan joy</option>{b&&locationRows(b).filter(r=>r.qty>0).map(r=><option key={r.location||'none'} value={r.location}>{r.location||'Joysiz qoldiq'} · {num(r.qty,1)}</option>)}</Select></Field>
+      <Field label="Qabul qiluvchi ombor" required error={form.error('to')}><Select value={form.values.to} onChange={v=>{form.set('to',v);form.set('toLocation','')}} placeholder="Tanlang">{s.warehouses.filter(w=>w.id!==b?.warehouseId&&w.status==='Faol'&&(!scope||scope.has(w.id))).map(w=>(<option key={w.id} value={w.id}>{w.name}</option>))}</Select></Field>
+      <Field label="Qabul joyi" hint={target&&!target.locations.length?'Bu omborda joy yo‘q':undefined}><Select value={form.values.toLocation} onChange={v=>form.set('toLocation',v)} disabled={!target?.locations.length}><option value="">Joysiz (keyin joylashtiriladi)</option>{target?.locations.map(l=><option key={l} value={l}>{l}</option>)}</Select></Field>
+      <Field label="Miqdor" required error={form.error('qty')} hint={amount.converted||(b?`Available: ${num(b.onHand-b.reserved-(b.quarantine||0),1)} ${b.unit}`:undefined)}><div className="inline-row"><Input type="number" min="0" step="any" aria-label="Miqdor" {...form.input('qty')}/>{b&&<UnitSelect itemId={keyOf(b)} value={unit} onChange={setUnit}/>}</div></Field>
     </div>
   </Modal>
 }
@@ -117,11 +155,19 @@ function Transfers(){
 
 function CountModal({line,onClose}:{line:StockBalance;onClose:()=>void}){
   const app=useApp(),s=app.state
-  const form=useForm({counted:String(line.onHand),note:'Cycle count'},v=>({counted:v.counted===''||Number(v.counted)<0?'Sanalgan miqdorni kiriting':Number(v.counted)<line.reserved?`Rezervdan (${num(line.reserved,1)}) kam bo‘lmasin`:undefined,note:required(v.note,'Sabab')}))
-  const delta=(Number(form.values.counted)||0)-line.onHand
-  return <Modal open onClose={onClose} title="Inventarizatsiya sanog‘i" eyebrow={warehouseName(s,line.warehouseId)} subtitle={`${itemName(s,line.itemId)} · tizimda ${num(line.onHand,1)} ${line.unit}`} size="sm"
-    footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Bekor qilish</button><button type="button" className="primary-glass-btn" onClick={()=>form.submit(v=>{const r=app.countStock(line.id,Number(v.counted),v.note.trim());if(r.ok)onClose();return r.ok})}>Sanoqni tasdiqlash</button></>}>
+  const w=s.warehouses.find(x=>x.id===line.warehouseId)
+  // '*' = the whole warehouse line; '' = unassigned stock; otherwise one location (audit #17).
+  const [where,setWhere]=useState('*')
+  const system=where==='*'?line.onHand:binQty(line,where)
+  const [key]=useState(()=>`count-${line.id}-${Date.now()}`)
+  const form=useForm({counted:String(line.onHand),note:'Cycle count'},v=>({counted:v.counted===''||Number(v.counted)<0?'Sanalgan miqdorni kiriting':where==='*'&&Number(v.counted)<line.reserved?`Rezervdan (${num(line.reserved,1)}) kam bo‘lmasin`:undefined,note:required(v.note,'Sabab')}))
+  const delta=(Number(form.values.counted)||0)-system
+  const tracked=lotTracked(s,keyOf(line))
+  return <Modal open onClose={onClose} title="Inventarizatsiya sanog‘i" eyebrow={warehouseName(s,line.warehouseId)} subtitle={`${itemName(s,keyOf(line))} · tizimda ${num(system,1)} ${line.unit}`} size="sm"
+    footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Bekor qilish</button><button type="button" className="primary-glass-btn" onClick={()=>form.submit(v=>{const r=app.countStock(line.id,Number(v.counted),v.note.trim(),{location:where==='*'?undefined:where,key});if(r.ok)onClose();return r.ok})}>Sanoqni tasdiqlash</button></>}>
     <div className="form-stack">
+      {Boolean(w?.locations.length||line.bins)&&<Field label="Sanoq joyi"><Select value={where} onChange={v=>{setWhere(v);form.set('counted',String(v==='*'?line.onHand:binQty(line,v)))}}><option value="*">Butun ombor qatori</option><option value="">Joysiz qoldiq · {num(unassignedQty(line),1)}</option>{w?.locations.map(l=><option key={l} value={l}>{l} · {num(binQty(line,l),1)}</option>)}</Select></Field>}
+      {tracked&&delta<0&&<div className="inline-note warning"><Icon name="info"/>LOT bilan kuzatiladi: kamayish faqat {where==='*'?'':'shu joydagi '}LOT yozuvlaridan (FEFO, rezervdagilar tegilmaydi) hisobdan chiqariladi — LOT’siz qoldiq rad etiladi</div>}
       <Field label="Fizik sanalgan miqdor" required error={form.error('counted')}><Input type="number" min="0" step="any" {...form.input('counted')} autoFocus/></Field>
       <div className={`inline-note ${delta<0?'danger':delta>0?'warning':'success'}`}><Icon name={delta?'warning':'check'}/>Farq: <b>{delta>0?'+':''}{num(delta,2)} {line.unit}</b>{delta?' — Adjustment harakati yoziladi':' — tizim bilan mos'}</div>
       <Field label="Sabab / izoh" required error={form.error('note')}><Input {...form.input('note')}/></Field>
@@ -146,13 +192,59 @@ function Inventory(){
       columns={[
         {key:'name',label:'Item',value:r=>r.name,render:r=><div className="cell-main"><b>{r.name}</b><small>{r.sku}</small></div>},
         {key:'warehouse',label:'Ombor',value:r=>warehouseName(s,r.warehouseId)},
+        {key:'locations',label:'Joylar',value:r=>locationRows(r).filter(x=>x.qty>0).map(x=>x.location||'Joysiz').join(' '),render:r=><LocationCell b={r}/>,priority:'low'},
         {key:'onHand',label:'Tizimda',align:'right',value:r=>r.onHand,render:r=>qty(r.onHand,r.unit,1)},
         {key:'reserved',label:'Rezerv',align:'right',value:r=>r.reserved,render:r=>num(r.reserved,1)},
-        {key:'last',label:'Oxirgi sanoq',value:r=>counts.find(m=>m.itemId===r.itemId&&m.warehouseId===r.warehouseId)?.date||'—',priority:'low'},
+        {key:'last',label:'Oxirgi sanoq',value:r=>counts.find(m=>keyOf(m)===keyOf(r)&&m.warehouseId===r.warehouseId)?.date||'—',priority:'low'},
         {key:'action',label:'',sortable:false,searchable:false,render:r=><button type="button" className="soft-glass-btn compact" disabled={!app.can('warehouse','edit')} onClick={()=>setLine(r)}><Icon name="edit" size={14}/>Sanash</button>},
       ]}/>
+    <Reconciliation/>
     {line&&<CountModal line={line} onClose={()=>setLine(null)}/>}
   </div>
+}
+
+const ISSUE_LABEL:Record<IntegrityIssue['kind'],string>={'legacy-reservation':'LOT’siz eski rezerv','variant-unassigned':'Variant aniqlanmagan','bins-exceed':'Joylar > qoldiq','bin-negative':'Manfiy joy','bin-unknown':'Noma’lum joy','lot-location':'LOT joyi mos emas'}
+/**
+ * What needs an explicit decision (Phase 3): legacy reservations without lots, product stock no variant owns, and
+ * location breakdowns that disagree with their balance. Nothing here is repaired automatically.
+ */
+function Reconciliation(){
+  const app=useApp(),s=app.state
+  const issues=useMemo(()=>inventoryIssues(s,k=>lotTracked(s,k),o=>orderReservations(s,o)),[s])
+  const [assign,setAssign]=useState<IntegrityIssue|null>(null)
+  const canEdit=app.can('warehouse','edit')
+  return <Card title="Muvofiqlashtirish" subtitle="Eski ma’lumotdagi noaniqliklar — avtomatik tuzatilmaydi, faqat aniq qaror bilan" className="reconcile-card">
+    {!issues.length?<Empty compact icon="check" title="Muvofiqlashtirish kerak emas" text="Rezervlar LOT’ga bog‘langan, variant qoldig‘i aniqlangan, joylar qoldiq bilan mos"/>
+      :<div className="table-scroll"><table className="fit"><thead><tr><th>Holat</th><th>Item</th><th>Ombor</th><th className="align-right">Miqdor</th><th>Izoh</th><th/></tr></thead><tbody>
+        {issues.map((i,n)=><tr key={`${i.kind}-${i.warehouseId}-${i.itemKey}-${n}`}>
+          <td><StatusBadge tone={i.kind==='legacy-reservation'||i.kind==='variant-unassigned'?'warning':'danger'}>{ISSUE_LABEL[i.kind]}</StatusBadge></td>
+          <td>{itemName(s,i.itemKey)}</td><td>{warehouseName(s,i.warehouseId)}</td>
+          <td className="align-right">{qty(i.qty,itemUnitOf(s,i.itemKey),1)}</td><td className="wrap">{i.text}</td>
+          <td className="align-right">{i.kind==='legacy-reservation'&&i.ref?<button type="button" className="soft-glass-btn compact" disabled={!canEdit} title={canEdit?'FEFO bo‘yicha yaroqli LOT’lar bog‘lanadi; yetmasa hech narsa o‘zgarmaydi':'Ruxsat yo‘q'} onClick={()=>app.allocateLegacyLots(i.ref!.kind,i.ref!.id)}>LOT bilan bog‘lash</button>
+            :i.kind==='variant-unassigned'?<button type="button" className="soft-glass-btn compact" disabled={!canEdit} onClick={()=>setAssign(i)}>Variantga biriktirish</button>:null}</td>
+        </tr>)}
+      </tbody></table></div>}
+    {assign&&<AssignVariantModal issue={assign} onClose={()=>setAssign(null)}/>}
+  </Card>
+}
+
+function AssignVariantModal({issue,onClose}:{issue:IntegrityIssue;onClose:()=>void}){
+  const app=useApp(),s=app.state
+  const product=s.products.find(p=>p.id===issue.itemKey)
+  const b=s.stockBalances.find(x=>x.warehouseId===issue.warehouseId&&keyOf(x)===issue.itemKey)
+  const free=b?Math.max(0,b.onHand-b.reserved-(b.quarantine||0)):0
+  const lots=lotsAt(s,issue.warehouseId,issue.itemKey,'').concat(...(b?Object.keys(b.bins||{}).map(l=>lotsAt(s,issue.warehouseId,issue.itemKey,l)):[]))
+  const form=useForm({variantId:product?.variants.find(v=>v.status==='Faol')?.id||'',qty:'',lot:'',note:'Sanoq'},v=>({variantId:v.variantId?undefined:'Variantni tanlang',qty:!(Number(v.qty)>0)?'Miqdor kiriting':Number(v.qty)>free+1e-9?`Bo‘sh ${num(free,1)}`:undefined,note:required(v.note,'Asos')}))
+  return <Modal open onClose={onClose} title="Variantga biriktirish" eyebrow={warehouseName(s,issue.warehouseId)} subtitle={`${product?.name||issue.itemKey} · variant aniqlanmagan bo‘sh qoldiq ${num(free,1)} ${product?.unit||''}`} size="sm"
+    footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Bekor qilish</button><button type="button" className="primary-glass-btn" onClick={()=>form.submit(v=>{const r=app.assignVariantStock({warehouseId:issue.warehouseId,productId:issue.itemKey,variantId:v.variantId,qty:Number(v.qty),lot:v.lot||undefined,note:v.note.trim()});if(r.ok)onClose();return r.ok})}>Biriktirish</button></>}>
+    <div className="form-stack">
+      <div className="inline-note warning"><Icon name="info"/>Qoldiq avtomatik taqsimlanmaydi: faqat sanab tasdiqlangan miqdorni tanlangan variantga o‘tkazing. Rezerv va karantindagi qism ko‘chmaydi.</div>
+      <Field label="Variant" required error={form.error('variantId')}><Select value={form.values.variantId} onChange={v=>form.set('variantId',v)}>{product?.variants.filter(v=>v.status==='Faol').map(v=><option key={v.id} value={v.id}>{v.code} · {v.attributes}</option>)}</Select></Field>
+      {lots.length>0&&<Field label="LOT" hint="Ixtiyoriy: bo‘sh qoldirilsa FEFO"><Select value={form.values.lot} onChange={v=>form.set('lot',v)}><option value="">FEFO</option>{[...new Set(lots.map(l=>l.code))].map(c=><option key={c} value={c}>{c}</option>)}</Select></Field>}
+      <Field label="Miqdor" required error={form.error('qty')}><Input type="number" min="0" step="any" {...form.input('qty')} autoFocus/></Field>
+      <Field label="Asos (sanoq / hujjat)" required error={form.error('note')}><Input {...form.input('note')}/></Field>
+    </div>
+  </Modal>
 }
 
 function WarehouseModal({warehouse,onClose}:{warehouse?:WarehouseType;onClose:()=>void}){
@@ -183,16 +275,46 @@ function Warehouses(){
   </div>
 }
 
+/** Moves stock between two locations of one warehouse; lots only from where their records are (audit #17). */
+function BinMoveModal({warehouseId,onClose}:{warehouseId:string;onClose:()=>void}){
+  const app=useApp(),s=app.state
+  const w=s.warehouses.find(x=>x.id===warehouseId)!
+  const lines=s.stockBalances.filter(b=>b.warehouseId===warehouseId&&b.onHand>1e-9)
+  const [unit,setUnit]=useState('')
+  const form=useForm({line:lines[0]?.id||'',from:'',to:w.locations[0]||'',lot:'',qty:''},v=>{
+    const line=lines.find(x=>x.id===v.line),here=line?binQty(line,v.from):0,amount=stockQtyOf(s,line?keyOf(line):undefined,v.qty,unit)
+    return {line:line?undefined:'Item tanlang',to:v.to===v.from?'Manba va qabul joyi bir xil':undefined,qty:amount.error||(!(amount.value>0)?'Miqdor kiriting':amount.value>here+1e-9?`${v.from||'Joysiz'}da ${num(here,1)}`:undefined)}})
+  const b=lines.find(x=>x.id===form.values.line)
+  const amount=stockQtyOf(s,b?keyOf(b):undefined,form.values.qty,unit)
+  const lots=b?lotsAt(s,warehouseId,keyOf(b),form.values.from):[]
+  const loose=b?untrackedAt(s,b,form.values.from):0
+  return <Modal open onClose={onClose} title="Joy almashtirish" eyebrow={w.name} subtitle="Ombor jami o‘zgarmaydi · LOT manbasi saqlanadi" size="md"
+    footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Bekor qilish</button><button type="button" className="primary-glass-btn" onClick={()=>form.submit(v=>{const r=app.moveStockBin({warehouseId,itemId:keyOf(b!),from:v.from,to:v.to,qty:Number(v.qty),lot:v.lot||undefined,unit:unit||undefined});if(r.ok)onClose();return r.ok})}><Icon name="arrow-right" size={16}/>Ko‘chirish</button></>}>
+    <div className="form-grid">
+      <Field className="span-2" label="Item" required error={form.error('line')}><Select value={form.values.line} onChange={v=>{form.set('line',v);form.set('lot','');setUnit('')}}>{lines.map(x=><option key={x.id} value={x.id}>{itemName(s,keyOf(x))} · {num(x.onHand,1)} {x.unit}</option>)}</Select></Field>
+      <Field label="Qayerdan" required><Select value={form.values.from} onChange={v=>{form.set('from',v);form.set('lot','')}}><option value="">Joysiz qoldiq · {num(unassignedQty(b),1)}</option>{w.locations.map(l=><option key={l} value={l}>{l} · {num(binQty(b,l),1)}</option>)}</Select></Field>
+      <Field label="Qayerga" required error={form.error('to')}><Select value={form.values.to} onChange={v=>form.set('to',v)}><option value="">Joysiz qoldiq</option>{w.locations.map(l=><option key={l} value={l}>{l}</option>)}</Select></Field>
+      {lots.length>0&&<Field className="span-2" label="LOT" hint={`Bo‘sh qoldirilsa avval shu joydagi LOT’lar (FEFO), keyin LOT’siz qoldiq (${num(loose,1)})`}><Select value={form.values.lot} onChange={v=>form.set('lot',v)}><option value="">FEFO</option>{lots.map(l=><option key={l.id} value={l.code}>{l.code} · {num(l.qty,1)}{l.status&&l.status!=='available'?` · ${l.status}`:''}</option>)}</Select></Field>}
+      <Field className="span-2" label="Miqdor" required error={form.error('qty')} hint={amount.converted}><div className="inline-row"><Input type="number" min="0" step="any" aria-label="Miqdor" {...form.input('qty')}/>{b&&<UnitSelect itemId={keyOf(b)} value={unit} onChange={setUnit}/>}</div></Field>
+    </div>
+  </Modal>
+}
+
 function Locations(){
   const app=useApp(),s=app.state
   const [adding,setAdding]=useState<string|null>(null),[value,setValue]=useState('')
+  const [moving,setMoving]=useState<string|null>(null)
+  const held=(w:WarehouseType,loc:string)=>s.stockBalances.filter(b=>b.warehouseId===w.id&&binQty(b,loc)>1e-9).length
   const add=(w:WarehouseType)=>{const code=value.trim().toUpperCase();if(!code)return;if(w.locations.includes(code)){app.toast('Bu lokatsiya allaqachon mavjud','warning');return}if(app.updateEntity('warehouses',w.id,{locations:[...w.locations,code]}).ok){setValue('');setAdding(null)}}
   return <div className="page-stack">
     <PageHeader title="Lokatsiyalar" subtitle="Qabul, saqlash, QC hold, jo‘natish zonalari"/>
     <div className="card-grid">{s.warehouses.map(w=><Card key={w.id} title={w.name} subtitle={`${w.code} · ${w.locations.length} lokatsiya`}>
-      <div className="location-list">{w.locations.map(l=><span key={l} className="location-chip"><Icon name="tag" size={12}/>{l}{app.can('warehouse','edit')&&<button type="button" aria-label={`${l} — o‘chirish`} onClick={()=>app.updateEntity('warehouses',w.id,{locations:w.locations.filter(x=>x!==l)})}><Icon name="x" size={12}/></button>}</span>)}{!w.locations.length&&<span className="soft-meta">Lokatsiya yo‘q</span>}</div>
+      <div className="location-list">{w.locations.map(l=>{const n=held(w,l);return <span key={l} className="location-chip" title={n?`${n} ta item qoldig‘i`:'Bo‘sh'}><Icon name="tag" size={12}/>{l}{n>0&&<small className="soft-meta">· {n}</small>}{app.can('warehouse','edit')&&<button type="button" aria-label={`${l} — o‘chirish`} disabled={n>0} title={n?'Joyda qoldiq bor — avval ko‘chiring':undefined} onClick={()=>app.updateEntity('warehouses',w.id,{locations:w.locations.filter(x=>x!==l)})}><Icon name="x" size={12}/></button>}</span>})}{!w.locations.length&&<span className="soft-meta">Lokatsiya yo‘q</span>}</div>
+      {s.stockBalances.some(b=>b.warehouseId===w.id&&unassignedQty(b)>1e-9)&&<p className="soft-meta">Joysiz qoldiq: {s.stockBalances.filter(b=>b.warehouseId===w.id&&unassignedQty(b)>1e-9).length} ta item — joyga ko‘chirib aniqlashtiring</p>}
+      {app.can('warehouse','edit')&&w.status==='Faol'&&s.stockBalances.some(b=>b.warehouseId===w.id&&b.onHand>0)&&<button type="button" className="soft-glass-btn compact" onClick={()=>setMoving(w.id)}><Icon name="arrow-right" size={14}/>Joy almashtirish</button>}
       {app.can('warehouse','edit')&&(adding===w.id?<form className="inline-row" onSubmit={e=>{e.preventDefault();add(w)}}><Input value={value} onChange={e=>setValue(e.target.value)} placeholder="Masalan: RACK-B3" aria-label="Yangi lokatsiya" autoFocus/><button type="submit" className="primary-glass-btn compact" disabled={!value.trim()}>Qo‘shish</button><button type="button" className="ghost-btn" onClick={()=>{setAdding(null);setValue('')}}>Bekor</button></form>:<button type="button" className="ghost-btn" onClick={()=>{setAdding(w.id);setValue('')}}><Icon name="plus" size={14}/>Lokatsiya qo‘shish</button>)}
     </Card>)}</div>
+    {moving&&<BinMoveModal warehouseId={moving} onClose={()=>setMoving(null)}/>}
   </div>
 }
 
@@ -219,16 +341,54 @@ function Lots({kind}:{kind:'lot'|'serial'}){
       emptyText={kind==='serial'?'Serial mahsulot ishlab chiqarilganda yaratiladi':undefined}
       rowClassName={l=>lotStatus(l)==='Sarflangan'?'row-muted':lotStatus(l).startsWith('Muddati')?'row-warning':undefined}
       columns={[
-        {key:'code',label:kind==='lot'?'Lot':'Serial diapazon',value:l=>l.code,render:l=><div className="cell-main"><b>{l.code}</b><small>{itemName(s,l.itemId)}</small></div>},
+        {key:'code',label:kind==='lot'?'Lot':'Serial diapazon',value:l=>l.code,render:l=><div className="cell-main"><b>{l.code}</b><small>{itemName(s,keyOf(l))}</small></div>},
         {key:'source',label:'Manba',value:l=>l.sourceCode,render:l=><span>{l.sourceCode}<small className="cell-sub">{l.sourceType==='purchase'?'Xarid':l.sourceType==='production'?'Ishlab chiqarish':l.sourceType==='return'?'Qaytarish':'Boshlang‘ich'}</small></span>},
         {key:'date',label:'Sana',value:l=>l.createdAt.slice(0,10)},
-        {key:'warehouse',label:'Ombor',value:l=>warehouseName(s,l.warehouseId),priority:'low'},
+        {key:'warehouse',label:'Ombor',value:l=>`${warehouseName(s,l.warehouseId)}${l.location?` · ${l.location}`:''}`,priority:'low'},
         {key:'qty',label:'Qoldiq',align:'right',value:l=>l.qty,render:l=>qty(l.qty,itemUnitOf(s,l.itemId),1)},
         {key:'expiry',label:'Expiry',value:l=>l.expiry||'—',priority:'low'},
         {key:'status',label:'Holat',value:l=>lotStatus(l),render:l=><StatusBadge tone={lotStatus(l)==='Faol'?'success':lotStatus(l)==='Sarflangan'?'neutral':lotStatus(l)==='Rework'?'info':'warning'}>{lotStatus(l)}</StatusBadge>},
         {key:'used',label:'Sarflangan',value:l=>l.consumedBy.join(', '),render:l=><span className="truncate">{l.consumedBy.slice(0,3).join(', ')||'—'}{l.consumedBy.length>3?` +${l.consumedBy.length-3}`:''}</span>,priority:'low'},
         {key:'label',label:'',sortable:false,searchable:false,render:l=><button type="button" className="icon-ghost" aria-label={`${l.code} — label`} onClick={()=>setLabel({title:itemName(s,l.itemId),code:l.kind==='serial'?l.serialFrom||l.code:l.code,lines:[['SKU',itemSku(s,l.itemId)],['Manba',l.sourceCode],['Miqdor',qty(l.qty,itemUnitOf(s,l.itemId),1)],['Sana',l.createdAt.slice(0,10)]]})}><Icon name="printer" size={15}/></button>},
       ]}/>
+    <LabelModal label={label} onClose={()=>setLabel(null)}/>
+  </div>
+}
+
+/** Serial register (audit #25): one row per unit with where it is or how it left; legacy range records listed apart. */
+function Serials(){
+  const s=useApp().state,navigate=useNavigate()
+  const [q,setQ]=useSearchParamState('q'),[status,setStatus]=useSearchParamState('status')
+  const [label,setLabel]=useState<LabelData|null>(null)
+  const {lots,stockMovements}=s
+  const register=useMemo(()=>serialRegister({lots,stockMovements}),[lots,stockMovements])
+  const issues=useMemo(()=>serialIssues({lots}),[lots])
+  const legacy=issues.legacyRanges
+  const rows=register.filter(r=>!status||SERIAL_STATUS_LABEL[r.status]===status).map(r=>({...r,id:`${r.itemId}|${r.serial}`}))
+  const where=(r:SerialStatus)=>r.warehouseId?`${warehouseName(s,r.warehouseId)}${r.location?` · ${r.location}`:''}`:'—'
+  const last=(r:SerialStatus)=>r.history.at(-1)
+  const tone=(r:SerialStatus)=>r.status==='available'?'success':r.status==='sold'||r.status==='consumed'?'neutral':r.status==='unknown'?'danger':'warning'
+  return <div className="page-stack">
+    <PageHeader title="Serial raqamlar" subtitle="Har bir birlik: qayerda, qanday holatda, qayerdan kelgan va qayerga ketgan · bosing — traceability"/>
+    {issues.problems.length>0&&<div className="inline-note danger" role="alert"><Icon name="warning" size={15}/>Serial ma’lumotida ziddiyat: {issues.problems.slice(0,3).join('; ')}{issues.problems.length>3?` (+${issues.problems.length-3})`:''}</div>}
+    <ResourceTable rows={rows} query={q} onQuery={setQ} placeholder="Serial, mahsulot, MO, ombor..." onRow={r=>navigate(`/reports?view=traceability&q=${encodeURIComponent(r.serial)}`)} exportName="serials" resetKey={status}
+      filtersActive={Boolean(status)} onResetFilters={()=>setStatus('')}
+      filters={<FilterSelect label="Holat" value={status} onChange={setStatus} options={Object.values(SERIAL_STATUS_LABEL)}/>}
+      emptyText="Serial kuzatiladigan mahsulot ishlab chiqarilganda yoki serial material qabul qilinganda har bir birlik shu yerda paydo bo‘ladi"
+      rowClassName={r=>r.record?undefined:'row-muted'}
+      columns={[
+        {key:'serial',label:'Serial',value:r=>r.serial,render:r=><div className="cell-main"><b>{r.serial}</b><small>{itemName(s,r.record?keyOf(r.record):r.itemId)}</small></div>},
+        {key:'status',label:'Holat',value:r=>SERIAL_STATUS_LABEL[r.status],render:r=><StatusBadge tone={tone(r)}>{SERIAL_STATUS_LABEL[r.status]}</StatusBadge>},
+        {key:'where',label:'Ombor / joy',value:where},
+        {key:'origin',label:'Manba',value:r=>r.origin?.sourceCode||'—',render:r=><span>{r.origin?.sourceCode||'—'}<small className="cell-sub">{r.origin?.batch||''}</small></span>},
+        {key:'last',label:'So‘nggi harakat',value:r=>last(r)?.date||'',render:r=>{const m=last(r);return m?<span>{m.type} · {m.source}<small className="cell-sub">{m.date}</small></span>:'—'},priority:'low'},
+        {key:'label',label:'',sortable:false,searchable:false,render:r=><button type="button" className="icon-ghost" aria-label={`${r.serial} — label`} onClick={e=>{e.stopPropagation();setLabel({title:itemName(s,r.itemId),code:r.serial,lines:[['SKU',itemSku(s,r.itemId)],['Manba',r.origin?.sourceCode||'—'],['Holat',SERIAL_STATUS_LABEL[r.status]]]})}}><Icon name="printer" size={15}/></button>},
+      ]}/>
+    {legacy.length>0&&<Card title={`Eski serial diapazonlari (${legacy.length})`}>
+      <p className="muted">Bu yozuvlar birlik bo‘yicha kuzatuvdan oldin saqlangan: diapazondan qaysi raqamlar qolgani noma’lum, shuning uchun alohida birliklar o‘ylab topilmaydi. Miqdor bo‘yicha ishlatish davom etadi; bu raqamlar qayta ro‘yxatga olinmaydi.</p>
+      <div className="table-scroll"><table className="fit"><thead><tr><th>Diapazon</th><th>Mahsulot</th><th>Manba</th><th>Ombor</th><th className="align-right">Qoldiq</th></tr></thead>
+        <tbody>{legacy.filter(isLegacyRange).map(l=><tr key={l.id}><td>{l.code}</td><td>{itemName(s,keyOf(l))}</td><td>{l.sourceCode}</td><td>{warehouseName(s,l.warehouseId)}</td><td className="align-right">{qty(l.qty,itemUnitOf(s,l.itemId),1)}</td></tr>)}</tbody></table></div>
+    </Card>}
     <LabelModal label={label} onClose={()=>setLabel(null)}/>
   </div>
 }

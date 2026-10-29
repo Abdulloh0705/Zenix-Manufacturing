@@ -229,7 +229,8 @@ test('P3-09: BOM drafts validate components, by-products and units; released rev
   const line=(o)=>({...draft,components:[{id:'c1',materialId:'rm2',qty:1,unit:'kg',waste:0,...o}]})
   refused(s,A.saveBom(s,ctx(s),line({qty:0})),/musbat/)
   refused(s,A.saveBom(s,ctx(s),line({materialId:'nope'})),/mavjud bo‘lmagan/)
-  refused(s,A.saveBom(s,ctx(s),line({unit:'g'})),/birligi/)
+  // Audit #24: a unit of the same dimension converts (g → kg stamped as 0.001); another dimension is refused.
+  refused(s,A.saveBom(s,ctx(s),line({unit:'dona'})),/konversiyasi mumkin emas/)
   refused(s,A.saveBom(s,ctx(s),{...line({}),byProducts:[{productId:'p3',qty:1,unit:'dona'}]}),/o‘ziga/)
   refused(s,A.saveBom(s,ctx(s),{...line({}),byProducts:[{productId:'p4',qty:0,unit:'kg'}]}),/0 dan katta/)
   refused(s,A.saveBom(s,ctx(s),{...line({}),waste:120}),/waste/)

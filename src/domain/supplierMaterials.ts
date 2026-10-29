@@ -1,6 +1,6 @@
 // Supplier ↔ material sourcing: which supplier can deliver which material, on what terms, and how the
 // options for one material compare when a shortage has to be bought. Pure functions over state.
-import type {CurrencyCode,ManufacturingState,PurchaseOrder,PurchaseReceipt,QualityCheck,SupplierMaterial} from '../types'
+import type {CurrencyCode,ManufacturingState,PurchaseOrder,PurchaseReceipt,QualityCheck,SupplierMaterial,SupplierReplacement} from '../types'
 import {CURRENCIES} from '../utils/format'
 import {addDays,daysBetween,todayISO} from '../utils/dates'
 
@@ -149,7 +149,8 @@ export function supplierPerformance(s:S,supplierId:string,today=todayISO()){
   const placed=pos.filter(p=>p.status!=='Qoralama')
   const receipts=placed.flatMap(p=>p.receipts.map(r=>({...r,po:p})))
   const lines=placed.flatMap(p=>p.items.map(i=>{
-    const own=p.receipts.filter(r=>r.materialId===i.materialId).sort((a,b)=>a.date.localeCompare(b.date))
+    // Replacement goods never complete a PO line: on-time and lead time measure the original delivery only (audit #27).
+    const own=p.receipts.filter(r=>r.materialId===i.materialId&&!r.replacementId).sort((a,b)=>a.date.localeCompare(b.date))
     let sum=0,completedAt:string|undefined
     for(const r of own){sum+=r.qty;if(!completedAt&&sum>=i.qty-1e-9)completedAt=r.date.slice(0,10)}
     return {po:p,line:i,completedAt}
@@ -168,7 +169,9 @@ export function supplierPerformance(s:S,supplierId:string,today=todayISO()){
   for(const p of closed)for(const i of p.items){
     ordered+=i.qty
     const returned=p.receipts.filter(r=>r.materialId===i.materialId).reduce((a,r)=>a+receiptQuantities(s,p,r).returned,0)
-    delivered+=Math.max(0,i.received-returned)
+    // Accepted replacement units make good what was returned; never more than was ordered.
+    const replaced=p.receipts.filter(r=>r.materialId===i.materialId&&r.replacementId).reduce((a,r)=>a+receiptQuantities(s,p,r).accepted,0)
+    delivered+=Math.min(i.qty,Math.max(0,i.received-returned+replaced))
   }
   const pct=(a:number,b:number)=>b>0?Math.round(a/b*1000)/10:null
   const missing:string[]=[]
@@ -247,4 +250,34 @@ export function migrateSupplierLinks(s:S,now=todayISO()):SupplierMaterial[]{
     rows.push({id:`sm-${supplierId}-${materialId}`,supplierId,materialId,supplierSku:'',price,currency:'UZS',purchaseUnit:material.unit,unitFactor:1,moq:0,leadTime:supplier.leadTime??material.leadTime??0,active:true,lastPrice:last?price:undefined,lastPurchaseDate:last?.createdAt.slice(0,10),lastPurchaseOrderId:last?.id,createdAt:now})
   }
   return rows
+}
+
+/* ------------------------------------------------- supplier replacement -- */
+
+/**
+ * Where a supplier replacement stands (audit #27), read from its own receipts on the original PO: received,
+ * inspected-and-accepted, rejected, still in incoming QC, and what the supplier still owes. Nothing is stored twice.
+ */
+export function replacementView(s:S,rep:SupplierReplacement){
+  const po=s.purchaseOrders.find(p=>p.id===rep.purchaseOrderId)
+  const receipts=po?po.receipts.filter(r=>r.replacementId===rep.id):[]
+  const split=receipts.map(r=>receiptQuantities(s,po!,r))
+  const sum=(f:(x:typeof split[number])=>number)=>q3(split.reduce((a,x)=>a+f(x),0))
+  const received=q3(receipts.reduce((a,r)=>a+r.qty,0))
+  const outstanding=rep.status==='Bekor'||rep.status==='Yopildi'?0:q3(Math.max(0,rep.qty-received))
+  return {po,receipts,requested:rep.qty,received,accepted:sum(x=>x.accepted),rejected:sum(x=>x.rejected),pending:sum(x=>x.pending),outstanding}
+}
+export const replacementOutstanding=(s:S,rep:SupplierReplacement)=>replacementView(s,rep).outstanding
+
+/** Units of a receipt shipped back to the supplier and not yet covered by an open or received replacement request. */
+export function replaceableQty(s:S,po:PurchaseOrder,receipt:PurchaseReceipt){
+  const returned=receiptQuantities(s,po,receipt).returned
+  const asked=(s.supplierReplacements||[]).filter(r=>r.receiptId===receipt.id&&r.status!=='Bekor').reduce((a,r)=>a+(r.status==='Yopildi'?replacementView(s,r).received:r.qty),0)
+  return q3(Math.max(0,returned-asked))
+}
+
+/** Lot / serial codes of a receipt that went back to the supplier (ledger "Supplier Return −" rows). */
+export function returnedLots(s:S,po:PurchaseOrder,receipt:PurchaseReceipt){
+  const codes=new Set(s.lots.filter(l=>l.itemId===receipt.materialId&&(l.code===receipt.lot||l.batch===receipt.lot)).map(l=>l.code))
+  return [...new Set(s.stockMovements.filter(m=>m.type==='Supplier Return -'&&m.source===po.code&&m.itemId===receipt.materialId&&m.lot&&(codes.has(m.lot)||m.lot===receipt.lot)).map(m=>m.lot!))]
 }

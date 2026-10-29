@@ -1,9 +1,10 @@
 import {useState} from 'react'
 import {useApp} from '../../../app/providers/AppProvider/AppContext'
-import {Checkbox,Confirm,Drawer,Empty,Field,Icon,InfoGrid,Input,Modal,Progress,SectionTitle,Select,StatusBadge,Tabs,Textarea,positive,useForm} from '../../../shared/ui'
+import {Checkbox,Confirm,Drawer,RecordUnavailable,Empty,Field,Icon,InfoGrid,Input,Modal,Progress,SectionTitle,Select,StatusBadge,Tabs,Textarea,positive,useForm} from '../../../shared/ui'
 import type {ProductionOrder,ProductionStatus,WorkOrder} from '../../../types'
-import {activeBomFor,buildTraceability,deliveryRisk,finalWorkOrder,jobCard,materialReadiness,operationInput,orderCosting,orderMaterialPlan,remainingQty,stockOf,workOrderRemainingMinutes} from '../../../domain/manufacturingEngine'
+import {activeBomFor,buildTraceability,deliveryRisk,finalWorkOrder,jobCard,materialReadiness,operationInput,orderCosting,orderMaterialPlan,perUnit,remainingQty,stockOf,workOrderRemainingMinutes} from '../../../domain/manufacturingEngine'
 import {operatorScopeBlocker} from '../../../domain/access'
+import {brokenReservations,finishedWarehouseFor,outputWarehouseProblem,productionLineProblem} from '../../../domain/actions'
 import {compactMoney,money,num,qty} from '../../../utils/format'
 import {formatMinutes,minutesBetween,stamp,todayISO} from '../../../utils/dates'
 import {employeeName,itemUnitOf,lineName,materialName,productName,useNow,warehouseName,workCenterName} from '../../common/lookups'
@@ -38,11 +39,22 @@ export function OrderFormModal({order,onClose,defaults}:{order?:ProductionOrder;
   const variants=(product?.variants||[]).filter(v=>v.status==='Faol'||v.id===variantId)
   const bom=editing?order!.bomSnapshot:activeBomFor(s,form.values.productId,variantId||undefined)
   const qtyNum=Number(form.values.quantity)||0
-  const requirements=bom?bom.components.map(c=>({c,need:c.qty*(1+c.waste/100)*qtyNum,available:stockOf(s,c.materialId).available})):[]
+  // Requirements in the component's stock unit (BOM line UoM factor applied, audit #24).
+  const requirements=bom?bom.components.map(c=>({c,need:perUnit(c)*qtyNum,available:stockOf(s,c.materialId).available})):[]
+  const [outputLocation,setOutputLocation]=useState(order?.outputLocation||'')
+  const variantRequired=Boolean(product?.variantStock)&&!editing
+  // Same rules the engine applies (audit #4 / #12): an active line of the routing's branch and an output store of that branch.
+  const lineLocked=editing&&(order!.materialReserved||!['Qoralama','Material kutilmoqda'].includes(order!.status))
+  const lines=s.productionLines.filter(l=>l.status!=='Arxiv'||l.id===order?.lineId)
+  const lineChanged=!editing||form.values.lineId!==order!.lineId
+  const lineProblem=lineChanged&&bom?productionLineProblem(s,form.values.lineId,bom.operations):null
+  const outputId=editing&&!lineChanged?order!.warehouseId:finishedWarehouseFor(s,form.values.lineId)
+  const outputProblem=lineProblem||(lineChanged?outputWarehouseProblem(s,form.values.lineId,outputId):null)
   const submit=()=>form.submit(v=>{
+    if(outputProblem||(variantRequired&&!variantId))return false
     const r=editing
       ?app.updateProductionOrder(order!.id,{quantity:qtyLocked?undefined:Number(v.quantity),start:v.start,due:v.due||undefined,priority:v.priority as ProductionOrder['priority'],lineId:v.lineId,responsibleId:v.responsibleId})
-      :app.createProductionOrder({productId:v.productId,variantId:variantId||undefined,quantity:Number(v.quantity),lineId:v.lineId,start:v.start,due:v.due||undefined,priority:v.priority as ProductionOrder['priority'],responsibleId:v.responsibleId})
+      :app.createProductionOrder({productId:v.productId,variantId:variantId||undefined,quantity:Number(v.quantity),lineId:v.lineId,start:v.start,due:v.due||undefined,priority:v.priority as ProductionOrder['priority'],responsibleId:v.responsibleId,outputLocation:outputLocation||undefined})
     if(r.ok)onClose()
     return r.ok
   })
@@ -50,7 +62,7 @@ export function OrderFormModal({order,onClose,defaults}:{order?:ProductionOrder;
     footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Bekor qilish</button><button type="button" className="primary-glass-btn" onClick={submit}><Icon name="check" size={16}/>{editing?'Saqlash':'Yaratish'}</button></>}>
     <div className="form-grid">
       <div className="form-group-title">Asosiy</div>
-      {variants.length>0&&<Field label="Variant" hint={variantId&&bom?.variantId===variantId?'Variantning o‘z BOM’i':'Variantda o‘z BOM bo‘lmasa umumiy BOM ishlatiladi'}><Select value={variantId} disabled={editing} onChange={setVariantId}><option value="">Umumiy (variantsiz)</option>{variants.map(v=><option key={v.id} value={v.id}>{v.code} · {v.attributes}</option>)}</Select></Field>}
+      {variants.length>0&&<Field label="Variant" required={variantRequired} error={variantRequired&&!variantId?'Variant bo‘yicha qoldiq yuritiladi — variantni tanlang':undefined} hint={variantId&&bom?.variantId===variantId?'Variantning o‘z BOM’i':variantRequired?'Tayyor mahsulot shu variant qoldig‘iga kiradi':'Variantda o‘z BOM bo‘lmasa umumiy BOM ishlatiladi'}><Select value={variantId} disabled={editing} onChange={setVariantId}>{!variantRequired&&<option value="">Umumiy (variantsiz)</option>}{variantRequired&&!variantId&&<option value="">Tanlang</option>}{variants.map(v=><option key={v.id} value={v.id}>{v.code} · {v.attributes}</option>)}</Select></Field>}
       <Field label="Mahsulot" required error={form.error('productId')}><Select value={form.values.productId} disabled={editing} onChange={v=>{form.set('productId',v);setVariantId('')}}>{products.map(p=><option key={p.id} value={p.id}>{p.name} · {p.sku}</option>)}</Select></Field>
       <Field label="Miqdor" required error={form.error('quantity')} hint={qtyLocked?'Rezervdan keyin miqdor o‘zgarmaydi':product?.unit}><Input type="number" inputMode="numeric" min="1" step="1" disabled={qtyLocked} {...form.input('quantity')}/></Field>
       <Field label="Due" error={form.error('due')} hint={!form.values.due?`Bo‘sh: +${product?.leadTime??1} kun`:undefined}><Input type="date" {...form.input('due')}/></Field>
@@ -58,12 +70,13 @@ export function OrderFormModal({order,onClose,defaults}:{order?:ProductionOrder;
       <div className="form-group-title">Rejalashtirish</div>
       <Field label="BOM"><Input readOnly value={bom?`${bom.code} · ${bom.version}`:'Faol BOM topilmadi'}/></Field>
       <Field label="Routing"><Input readOnly value={bom?`${bom.operations.length} operatsiya · ${bom.operations.map(o=>s.workCenters.find(w=>w.id===o.workCenterId)?.code||'—').join(' → ')}`:'—'}/></Field>
-      <Field label="Liniya"><Select value={form.values.lineId} disabled={editing&&order!.materialReserved} onChange={v=>form.set('lineId',v)}>{s.productionLines.map(l=><option key={l.id} value={l.id}>{l.name}</option>)}</Select></Field>
+      <Field label="Liniya" error={outputProblem||undefined} hint={outputProblem?undefined:lineLocked?'Rezerv yoki boshlangan ishdan keyin liniya o‘zgarmaydi':`Tayyor mahsulot → ${warehouseName(s,outputId)}`}><Select value={form.values.lineId} disabled={lineLocked} onChange={v=>form.set('lineId',v)}>{lines.map(l=><option key={l.id} value={l.id}>{l.name}</option>)}</Select></Field>
       <Field label="Boshlanish"><Input type="date" {...form.input('start')}/></Field>
+      {!editing&&(s.warehouses.find(w=>w.id===outputId)?.locations.length||0)>0&&<Field label="Tayyor mahsulot joyi" hint="Ixtiyoriy: bo‘sh bo‘lsa joysiz qabul qilinadi"><Select value={outputLocation} onChange={setOutputLocation}><option value="">Joysiz</option>{s.warehouses.find(w=>w.id===outputId)!.locations.map(l=><option key={l} value={l}>{l}</option>)}</Select></Field>}
       <Field className="span-2" label="Mas’ul"><Select value={form.values.responsibleId} onChange={v=>form.set('responsibleId',v)}>{s.employees.filter(e=>e.status!=='Arxiv').map(e=><option key={e.id} value={e.id}>{e.name}</option>)}</Select></Field>
     </div>
     {bom&&qtyNum>0&&<div className="form-section"><h4>Materiallar</h4>
-      <div className="table-scroll"><table className="fit"><thead><tr><th>Komponent</th><th className="align-right">Talab</th><th className="align-right">Available</th><th>Holat</th></tr></thead><tbody>{requirements.map(({c,need,available})=><tr key={c.id}><td><div className="cell-main"><b>{materialName(s,c.materialId)}</b><small>{c.qty} {c.unit}/dona · scrap {c.waste}%</small></div></td><td className="align-right"><b>{qty(need,c.unit)}</b></td><td className="align-right">{num(available)}</td><td><StatusBadge tone={available>=need?'success':'danger'}>{available>=need?'Yetarli':`Kam: ${num(need-available)}`}</StatusBadge></td></tr>)}</tbody></table></div>
+      <div className="table-scroll"><table className="fit"><thead><tr><th>Komponent</th><th className="align-right">Talab</th><th className="align-right">Available</th><th>Holat</th></tr></thead><tbody>{requirements.map(({c,need,available})=><tr key={c.id}><td><div className="cell-main"><b>{materialName(s,c.materialId)}</b><small>{c.qty} {c.unit}/dona{c.factor!==undefined?` (= ${num(perUnit({...c,waste:0}),3)} ${itemUnitOf(s,c.materialId)})`:''} · scrap {c.waste}%</small></div></td><td className="align-right"><b>{qty(need,c.unit)}</b></td><td className="align-right">{num(available)}</td><td><StatusBadge tone={available>=need?'success':'danger'}>{available>=need?'Yetarli':`Kam: ${num(need-available)}`}</StatusBadge></td></tr>)}</tbody></table></div>
       {requirements.some(r=>r.available<r.need)&&<div className="inline-note warning"><Icon name="warning"/>Yetishmaydi — tasdiqlanganda “Material kutilmoqda” bo‘ladi, MRP xarid tavsiya qiladi.</div>}
     </div>}
   </Modal>
@@ -224,7 +237,7 @@ type Primary={label:string;icon:string;run:()=>void;tone?:'primary'|'secondary'|
 export function OrderDrawer({orderId,onClose}:{orderId:string|null;onClose:()=>void}){
   const app=useApp()
   const order=app.state.productionOrders.find(o=>o.id===orderId)
-  if(!order)return null
+  if(!order)return orderId?<RecordUnavailable label="Ishlab chiqarish buyurtmasi" onClose={onClose}/>:null
   return <OrderDrawerBody key={order.id} order={order} onClose={onClose}/>
 }
 
@@ -255,6 +268,8 @@ function OrderDrawerBody({order,onClose}:{order:ProductionOrder;onClose:()=>void
   } as Record<string,Primary[]>)[order.status]||[]
   const tabs=[{value:'overview',label:'Umumiy'},{value:'operations',label:'Operatsiyalar',count:order.workOrders.length},{value:'materials',label:'Materiallar',count:closed||order.materialReserved?undefined:orderMaterialPlan(s,order).filter(l=>l.toBuy>0).length||undefined},{value:'quality',label:'Sifat',count:checks.length},...(app.can('costs')?[{value:'costs',label:'Tannarx'}]:[]),{value:'trace',label:'Traceability'},{value:'documents',label:'Hujjatlar',count:s.attachments.filter(a=>a.entityType==='production'&&a.entityId===order.id).length},{value:'history',label:'Tarix'}]
   const trace=buildTraceability(s,order.id)
+  // A reserved lot that expired or went on hold since confirmation blocks issue until it is re-reserved (audit #10).
+  const brokenLots=!closed&&order.materialReserved?[...new Set(brokenReservations(s,order,todayISO()).flatMap(r=>r.lots))]:[]
   return <Drawer open onClose={onClose} title={order.code} eyebrow="Ishlab chiqarish buyurtmasi" icon="factory" size="xl"
     subtitle={<>{product?.name} · {num(order.quantity)} {unit}{order.source?` · ${order.source}`:''}</>}
     headerExtra={<><StatusBadge>{order.status}</StatusBadge><StatusBadge>{order.priority}</StatusBadge>{risk&&<StatusBadge tone="danger">Muddat riski</StatusBadge>}{order.salesOrderId&&<span className="chip"><Icon name="truck" size={12}/>{s.salesOrders.find(x=>x.id===order.salesOrderId)?.code}</span>}{order.reworkOf&&<span className="chip">Rework</span>}</>}
@@ -275,6 +290,7 @@ function OrderDrawerBody({order,onClose}:{order:ProductionOrder;onClose:()=>void
         <InfoGrid columns={3} items={[{label:'Material',value:order.materialReserved?'Rezerv qilingan':`${ready}% tayyor`,tone:order.materialReserved||ready>=100?'success':'warning'},{label:'Final QC',value:order.qualityStatus,tone:order.qualityStatus==='Passed'?'success':['Failed','Scrap'].includes(order.qualityStatus)?'danger':undefined},{label:'Due',value:order.due,tone:risk?'danger':undefined}]}/>
       </div>
       {order.status==='Sifat nazoratida'&&completeBlock&&<div className="inline-note warning"><Icon name="shield"/><span>{completeBlock}{pendingFinal&&app.can('quality','edit')&&<> — <button type="button" className="link-btn" onClick={()=>setCheck(pendingFinal.id)}>natijani hozir kiritish</button></>}</span></div>}
+      {brokenLots.length>0&&<div className="inline-note warning" role="alert"><Icon name="warning"/><span>Rezerv qilingan LOT endi yaroqsiz (muddati o‘tgan yoki bloklangan): <b>{brokenLots.join(', ')}</b> — natija va material chiqimi bloklanadi.{canEdit&&<> <button type="button" className="link-btn" onClick={()=>app.refreshMaterialReservation(order.id)}>Rezervni yangilash</button></>}</span></div>}
       <OrderMaterialNote order={order} onOpenMaterials={()=>setTab('materials')}/>
       <InfoGrid items={[{label:'Mahsulot',value:product?.name},{label:'BOM snapshot',value:`${order.bomSnapshot.code} · ${order.bomVersion}`},{label:'Liniya',value:lineName(s,order.lineId)},{label:'Ombor',value:warehouseName(s,order.warehouseId)},{label:'Mas’ul',value:employeeName(s,order.responsibleId)},{label:'Boshlanish',value:order.start},{label:order.lot?'Lot':'Serial',value:order.lot||order.serialRange},{label:'Yaratilgan',value:order.createdAt}]}/>
     </>}

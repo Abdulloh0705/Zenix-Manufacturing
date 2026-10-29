@@ -2,7 +2,8 @@
 // calendar interval or by running hours), which services sit on which day, and MTBF / MTTR from failures that
 // were actually recorded. Nothing here is estimated where data is missing — the missing part is reported instead.
 import type {Equipment,MaintenanceOrder,MaintenancePlan,ManufacturingState} from '../types'
-import {addDays,daysBetween,minutesBetween,parseDate,stamp} from '../utils/dates'
+import {addDays,addMinutes,addMonths,dayOfWeek,daysBetween,minutesBetween} from '../utils/dates'
+import {isWorkingDay,workCenterCalendar} from './manufacturingEngine'
 
 type S=ManufacturingState
 
@@ -22,13 +23,7 @@ export function planLabel(plan?:MaintenancePlan){
 }
 
 /** Adds whole months, clamped to the last day of a shorter month (31 Jan + 1 month = 28/29 Feb). */
-export function addMonths(date:string,months:number){
-  const d=parseDate(date),day=d.getDate()
-  const target=new Date(d.getFullYear(),d.getMonth()+months,1)
-  const last=new Date(target.getFullYear(),target.getMonth()+1,0).getDate()
-  target.setDate(Math.min(day,last))
-  return `${target.getFullYear()}-${String(target.getMonth()+1).padStart(2,'0')}-${String(target.getDate()).padStart(2,'0')}`
-}
+export {addMonths}
 
 /** Next calendar due date of a plan after a service on `from`; runtime plans have no calendar date. */
 export function nextDueDate(plan:MaintenancePlan|undefined,from:string):string|undefined{
@@ -68,7 +63,7 @@ export function maintenanceDue(e:Equipment,today:string):MaintenanceDue{
 export function maintenanceWindow(s:S,m:MaintenanceOrder){
   const start=m.scheduled.length>10?m.scheduled:`${m.scheduled} 09:00`
   const hours=m.plannedHours&&m.plannedHours>0?m.plannedHours:s.maintenanceRequests.find(r=>r.id===m.requestId)?.downtimeHours||0
-  const end=hours>0?stamp(new Date(parseDate(start).getTime()+hours*3600000)):`${start.slice(0,10)} 23:59`
+  const end=hours>0?addMinutes(start,hours*60):`${start.slice(0,10)} 23:59`
   return {start,end,hours:hours>0?hours:undefined}
 }
 
@@ -134,4 +129,75 @@ export function reliabilityOf(s:S,equipmentId:string):Reliability{
   return {failures:failures.length,closed:closed.length,mtbfHours:mtbf,mttrHours:mttr,
     mtbfNote:mtbf===null?(failures.length<2?`Kamida 2 ta qayd etilgan nosozlik kerak (hozir ${failures.length})`:'Yopilmagan nosozlik bor'):undefined,
     mttrNote:mttr===null?'Yopilgan nosozlik qayd etilmagan':undefined}
+}
+
+/* ------------------------------------------------- Runtime forecast (audit #26) -- */
+
+/** Usage history a forecast needs: at least two meter readings this many calendar days apart, the last one this recent. */
+export const FORECAST_MIN_SPAN_DAYS=7,FORECAST_MAX_AGE_DAYS=30,FORECAST_WINDOW_DAYS=90,FORECAST_HORIZON_DAYS=365
+export const INSUFFICIENT='Ma’lumot yetarli emas'
+
+/** Meter readings of a machine, oldest first; data saved before the log keeps its one latest reading. */
+export function runtimeReadings(e:Pick<Equipment,'runtimeLog'|'runtimeHours'|'runtimeReadAt'>){
+  const log=e.runtimeLog?.length?e.runtimeLog:e.runtimeHours!==undefined&&e.runtimeReadAt?[{at:e.runtimeReadAt,hours:e.runtimeHours}]:[]
+  return [...log].filter(r=>Number.isFinite(r.hours)&&typeof r.at==='string').sort((a,b)=>a.at.localeCompare(b.at))
+}
+
+export type RuntimeForecast={
+  /** estimated: a projected date from recorded usage; due: the interval is already used up; the rest give no date. */
+  state:'estimated'|'due'|'insufficient'|'inactive'|'not-runtime';
+  dueDate?:string;hoursPerDay?:number;leftHours?:number;basisDays?:number;readings:number;reason:string;
+  /** A preventive order already planned — the confirmed date, shown apart from the estimate and never replaced by it. */
+  scheduled?:{code:string;date:string}}
+
+/**
+ * Next runtime-based service date estimated from the machine's own recorded usage: hours run between meter readings
+ * over the last FORECAST_WINDOW_DAYS, divided by the working days of its work center's calendar in that span, give
+ * hours per working day; the hours left on the interval are then laid over the coming working days. Nothing is
+ * assumed: fewer than two readings, a span under a week, no hours run, an old last reading or a stopped machine give
+ * no date ("Ma’lumot yetarli emas"). The forecast is a read — it never writes the machine's schedule.
+ */
+export function runtimeForecast(s:S,e:Equipment,today:string):RuntimeForecast{
+  const plan=planOf(e)
+  const open=s.maintenanceOrders.filter(m=>m.equipmentId===e.id&&m.type==='Preventive'&&OPEN_MAINTENANCE.includes(m.status)).sort((a,b)=>a.scheduled.localeCompare(b.scheduled))[0]
+  const scheduled=open?{code:open.code,date:open.scheduled.slice(0,10)}:undefined
+  const readings=runtimeReadings(e)
+  const base={readings:readings.length,scheduled}
+  if(!plan||plan.unit!=='runtime')return {...base,state:'not-runtime',reason:'Reja ish soati bo‘yicha emas'}
+  const due=maintenanceDue(e,today)
+  if(due.state==='no-data')return {...base,state:'insufficient',reason:`${INSUFFICIENT}: ${due.reason}`}
+  if((due.leftHours??0)<=0)return {...base,state:'due',dueDate:today,leftHours:due.leftHours,reason:due.reason}
+  if(e.status==='To‘xtagan')return {...base,state:'inactive',leftHours:due.leftHours,reason:'Uskuna to‘xtagan — ishlash sur’ati yo‘q, prognoz qilinmaydi'}
+  const last=readings[readings.length-1]
+  if(!last||readings.length<2)return {...base,state:'insufficient',leftHours:due.leftHours,reason:`${INSUFFICIENT}: kamida 2 ta hisoblagich o‘lchovi kerak (hozir ${readings.length})`}
+  const lastDay=last.at.slice(0,10)
+  if(daysBetween(lastDay,today)>FORECAST_MAX_AGE_DAYS)return {...base,state:'insufficient',leftHours:due.leftHours,reason:`${INSUFFICIENT}: oxirgi o‘lchov ${lastDay} — ${FORECAST_MAX_AGE_DAYS} kundan eski`}
+  const window=readings.filter(r=>daysBetween(r.at.slice(0,10),lastDay)<=FORECAST_WINDOW_DAYS)
+  const first=window[0]
+  const span=daysBetween(first.at.slice(0,10),lastDay)
+  if(window.length<2||span<FORECAST_MIN_SPAN_DAYS)return {...base,state:'insufficient',leftHours:due.leftHours,reason:`${INSUFFICIENT}: o‘lchovlar oralig‘i ${span} kun (kamida ${FORECAST_MIN_SPAN_DAYS} kun kerak)`}
+  const wc=s.workCenters.find(w=>w.id===e.workCenterId)
+  const working=(date:string)=>wc?isWorkingDay(s,wc,date):workCenterCalendar(s,{}).workingDays.includes(dayOfWeek(date))
+  let workDays=0
+  for(let d=addDays(first.at.slice(0,10),1);d<=lastDay;d=addDays(d,1))if(working(d))workDays+=1
+  const ran=last.hours-first.hours
+  if(workDays<=0||ran<=0)return {...base,state:'insufficient',leftHours:due.leftHours,basisDays:workDays,reason:`${INSUFFICIENT}: ${span} kunda ish soati o‘smadi — foydalanish qayd etilmagan`}
+  const rate=ran/workDays
+  // Hours left as of the last reading, consumed working day by working day from the day after it.
+  let left=due.leftHours??0,day=lastDay,guard=0
+  while(left>1e-9&&guard++<FORECAST_HORIZON_DAYS+FORECAST_MAX_AGE_DAYS){day=addDays(day,1);if(working(day))left-=rate}
+  const hoursPerDay=Math.round(rate*10)/10
+  if(left>1e-9)return {...base,state:'insufficient',hoursPerDay,leftHours:due.leftHours,basisDays:workDays,reason:`${INSUFFICIENT}: hozirgi sur’atda (${hoursPerDay} soat/kun) 1 yildan ko‘p`}
+  return {...base,state:'estimated',dueDate:day<today?today:day,hoursPerDay,leftHours:due.leftHours,basisDays:workDays,
+    reason:`Taxminiy: ${hoursPerDay} soat/ish kuni (${workDays} ish kuni, ${window.length} o‘lchov) · ${due.leftHours} soat qoldi`}
+}
+
+/**
+ * Capacity warnings from forecasts: machines whose estimated runtime service falls within the horizon and that have
+ * no preventive order yet — the service is not in the capacity plan until someone schedules it.
+ */
+export function forecastWarnings(s:S,today:string,horizonDays=14){
+  const until=addDays(today,horizonDays)
+  return s.equipment.map(e=>({equipment:e,forecast:runtimeForecast(s,e,today)}))
+    .filter(x=>!x.forecast.scheduled&&(x.forecast.state==='due'||(x.forecast.state==='estimated'&&x.forecast.dueDate!<=until)))
 }

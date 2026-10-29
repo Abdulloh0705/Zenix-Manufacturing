@@ -2,6 +2,8 @@ import {useEffect,useRef,useState} from 'react'
 import {useNavigate,useSearchParams} from 'react-router-dom'
 import {useApp} from '../../../app/providers/AppProvider/AppContext'
 import {Card,Checkbox,Confirm,Drawer,Empty,Field,FilterSelect,Icon,InfoGrid,Input,KPI,Modal,MoneyInput,PageHeader,Progress,ResourceTable,Select,StatusBadge,Tabs,nonNegative,required,useForm,useRecordParam,useSearchParamState} from '../../../shared/ui'
+import {siteSafetyStock} from '../../../domain/planning'
+import {packsProblem} from '../../../domain/uom'
 import type {RawMaterial,SupplierMaterial} from '../../../types'
 import {MATERIAL_STOCK_STATES,createMrpPlan,isOpenOrder,materialShortages,materialStockRows,orderMaterialLines,stockOf} from '../../../domain/manufacturingEngine'
 import {referenceBlocker} from '../../../domain/actions'
@@ -53,7 +55,9 @@ function All({open,onCreate}:{open:(id:string)=>void;onCreate:()=>void}){
   </div>
 }
 
-const materialDefaults=(m?:RawMaterial):MaterialFormValues=>({name:m?.name||'',sku:m?.sku||'',category:m?.category||'Metall',unit:m?.unit||'kg',standardCost:String(m?.standardCost??''),minStock:String(m?.minStock??0),reorderPoint:String(m?.reorderPoint??0),leadTime:String(m?.leadTime??3),lotTracking:m?.lotTracking??true,expiryTracking:m?.expiryTracking??false,status:m?.status||'Faol',supplierId:m?.supplierId||''})
+/** The form's pack row as master data: none when no pack unit is typed (audit #24). */
+const packsOf=(v:MaterialFormValues)=>(v.packUnit||'').trim()?[{unit:(v.packUnit||'').trim(),factor:Number(v.packFactor)}]:[]
+const materialDefaults=(m?:RawMaterial):MaterialFormValues=>({name:m?.name||'',sku:m?.sku||'',category:m?.category||'Metall',unit:m?.unit||'kg',standardCost:String(m?.standardCost??''),minStock:String(m?.minStock??0),reorderPoint:String(m?.reorderPoint??0),leadTime:String(m?.leadTime??3),lotTracking:m?.lotTracking??true,serialTracking:Boolean(m?.serialTracking),expiryTracking:m?.expiryTracking??false,status:m?.status||'Faol',supplierId:m?.supplierId||'',packUnit:m?.packs?.[0]?.unit||'',packFactor:m?.packs?.[0]?String(m.packs[0].factor):''})
 
 /**
  * Create/edit form. "Unsaved" means different from what is persisted (the saved draft, else the record):
@@ -71,6 +75,7 @@ function MaterialFormModal({material,pickSupplier,onPicked,onClose,onCreated}:{m
     name:required(v.name,'Nomi'),sku:required(v.sku,'SKU')||(s.rawMaterials.some(m=>m.id!==material?.id&&m.sku.toLowerCase()===v.sku.trim().toLowerCase())?'Bu SKU band':undefined),
     standardCost:nonNegative(v.standardCost,'Narx'),minStock:nonNegative(v.minStock,'Min stock'),reorderPoint:nonNegative(v.reorderPoint,'Reorder point')||(Number(v.reorderPoint)<Number(v.minStock)?'Reorder point min stock’dan kichik bo‘lmasin':undefined),leadTime:nonNegative(v.leadTime,'Lead time'),
     supplierId:v.supplierId&&!s.suppliers.some(x=>x.id===v.supplierId)?'Supplier topilmadi — boshqasini tanlang':undefined,
+    packFactor:(v.packUnit||'').trim()?packsProblem({unit:v.unit,packs:packsOf(v)})||undefined:undefined,
   }))
   // The handoff is single-use; the picked supplier is now in the form, so drop it from the URL.
   // eslint-disable-next-line react-hooks/exhaustive-deps -- runs once on mount: the handoff is consumed exactly once
@@ -101,7 +106,7 @@ function MaterialFormModal({material,pickSupplier,onPicked,onClose,onCreated}:{m
     app.setPreferredSupplier(materialId,v.supplierId)
   }
   const submit=()=>form.submit(v=>{
-    const payload={name:v.name.trim(),sku:v.sku.trim().toUpperCase(),category:v.category.trim()||'Material',unit:v.unit,standardCost:Number(v.standardCost),minStock:Number(v.minStock),reorderPoint:Number(v.reorderPoint),leadTime:Number(v.leadTime),lotTracking:v.lotTracking,expiryTracking:v.expiryTracking,status:v.status}
+    const payload={name:v.name.trim(),sku:v.sku.trim().toUpperCase(),category:v.category.trim()||'Material',unit:v.unit,standardCost:Number(v.standardCost),minStock:Number(v.minStock),reorderPoint:Number(v.reorderPoint),leadTime:Number(v.leadTime),lotTracking:v.lotTracking||Boolean(v.serialTracking),serialTracking:Boolean(v.serialTracking),expiryTracking:v.expiryTracking,status:v.status,packs:packsOf(v)}
     const r=material?app.updateEntity('rawMaterials',material.id,payload):app.createEntity('rawMaterials',{...payload,supplierId:''})
     if(!r.ok)return false
     const id=material?.id||r.id!
@@ -124,7 +129,9 @@ function MaterialFormModal({material,pickSupplier,onPicked,onClose,onCreated}:{m
       <Field label="Nomi" required error={form.error('name')}><Input {...form.input('name')} autoFocus/></Field>
       <Field label="SKU" required error={form.error('sku')}><Input {...form.input('sku')}/></Field>
       <Field label="Kategoriya"><Input list="material-categories" {...form.input('category')}/></Field>
-      <Field label="Birlik"><Select value={form.values.unit} onChange={v=>form.set('unit',v)}>{['kg','dona','m','l','m²','list'].map(u=><option key={u} value={u}>{u}</option>)}</Select></Field>
+      <Field label="Birlik" hint="Ombor, BOM va MRP shu birlikda hisoblaydi"><Select value={form.values.unit} onChange={v=>form.set('unit',v)}>{['kg','g','t','dona','m','cm','l','ml','m²','list'].map(u=><option key={u} value={u}>{u}</option>)}</Select></Field>
+      <Field label="Qadoq birligi" hint="Ixtiyoriy: masalan quti, qop, rulon"><Input {...form.input('packUnit')} placeholder="quti"/></Field>
+      <Field label={`1 qadoqda (${form.values.unit})`} error={form.error('packFactor')} hint="Aniq koeffitsiyent — taxmin qilinmaydi"><Input type="number" min="0" step="any" {...form.input('packFactor')} disabled={!(form.values.packUnit||'').trim()}/></Field>
       <div className="form-group-title">Narx va ta’minot</div>
       <Field label="Standart narx" required error={form.error('standardCost')}><MoneyInput min="0" {...form.money('standardCost')}/></Field>
       <div className="field-with-action">
@@ -139,7 +146,7 @@ function MaterialFormModal({material,pickSupplier,onPicked,onClose,onCreated}:{m
       <Field label="Reorder point" error={form.error('reorderPoint')}><Input type="number" min="0" {...form.input('reorderPoint')}/></Field>
       <Field label="Lead time (kun)" error={form.error('leadTime')}><Input type="number" min="0" {...form.input('leadTime')}/></Field>
       <Field label="Status"><Select value={form.values.status} onChange={v=>form.set('status',v)}><option value="Faol">Faol</option><option value="Arxiv">Arxiv</option></Select></Field>
-      <div className="span-2 check-row"><Checkbox checked={form.values.lotTracking} onChange={v=>form.set('lotTracking',v)} label="Lot kuzatuvi" description="FIFO sarf"/><Checkbox checked={form.values.expiryTracking} onChange={v=>form.set('expiryTracking',v)} label="Yaroqlilik muddati" description="Lotga expiry"/></div>
+      <div className="span-2 check-row"><Checkbox checked={form.values.lotTracking} onChange={v=>form.set('lotTracking',v)} label="Lot kuzatuvi" description="FIFO sarf"/><Checkbox checked={form.values.expiryTracking} onChange={v=>form.set('expiryTracking',v)} label="Yaroqlilik muddati" description="Lotga expiry"/><Checkbox checked={Boolean(form.values.serialTracking)} onChange={v=>form.set('serialTracking',v)} label="Serial raqam" description="Har bir dona raqami bilan qabul qilinadi"/></div>
     </div>
     <datalist id="material-categories">{[...new Set(s.rawMaterials.map(m=>m.category))].map(c=><option key={c} value={c}/>)}</datalist>
     <DraftPrompt open={Boolean(ask)} forSupplier={ask?.forSupplier} error={draftError} onSave={saveDraft} onDiscard={()=>ask&&go(ask.then)} onCancel={()=>setAsk(null)}/>
@@ -157,6 +164,22 @@ function DraftPrompt({open,forSupplier,error,onSave,onDiscard,onCancel}:{open:bo
   </Modal>
 }
 
+/**
+ * Safety stock of one material per branch: MRP nets each site against its own figure and never borrows another's.
+ * A branch left empty keeps the default rule (the default branch uses Min stock, the others hold none).
+ */
+function SiteSafetyModal({material,onClose}:{material:RawMaterial;onClose:()=>void}){
+  const app=useApp(),s=app.state
+  const branches=s.branches.filter(b=>b.status!=='Arxiv')
+  const [values,setValues]=useState<Record<string,string>>(()=>Object.fromEntries(branches.map(b=>[b.id,material.siteSafety?.[b.id]!==undefined?String(material.siteSafety[b.id]):''])))
+  const bad=branches.find(b=>values[b.id]!==''&&!(Number(values[b.id])>=0))
+  const save=()=>{if(bad)return;const siteSafety=Object.fromEntries(Object.entries(values).filter(([,v])=>v!=='').map(([k,v])=>[k,Number(v)]));const r=app.updateEntity('rawMaterials',material.id,{siteSafety:Object.keys(siteSafety).length?siteSafety:undefined});if(r.ok)onClose()}
+  return <Modal open onClose={onClose} size="sm" title="Safety stock · filiallar" eyebrow={material.name} subtitle={`Bo‘sh = standart: asosiy filial Min stock (${num(material.minStock)} ${material.unit}), boshqalar 0`}
+    footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Bekor qilish</button><button type="button" className="primary-glass-btn" disabled={Boolean(bad)} onClick={save}>Saqlash</button></>}>
+    <div className="form-grid">{branches.map(b=><Field key={b.id} label={`${b.name} (${material.unit})`} error={bad?.id===b.id?'0 yoki musbat son':undefined}><Input type="number" min="0" step="any" value={values[b.id]} placeholder={String(siteSafetyStock(s,{...material,siteSafety:undefined},b.id))} onChange={e=>setValues(v=>({...v,[b.id]:e.target.value}))}/></Field>)}</div>
+  </Modal>
+}
+
 function MaterialDrawer({materialId,onClose,onEdit}:{materialId:string|null;onClose:()=>void;onEdit:(id:string)=>void}){
   const app=useApp()
   const m=app.state.rawMaterials.find(x=>x.id===materialId)
@@ -166,7 +189,7 @@ function MaterialDrawer({materialId,onClose,onEdit}:{materialId:string|null;onCl
 
 function MaterialDrawerBody({m,onClose,onEdit}:{m:RawMaterial;onClose:()=>void;onEdit:()=>void}){
   const app=useApp(),s=app.state,navigate=useNavigate()
-  const [tab,setTab]=useState(()=>linksOfMaterial(s,m.id).length?'overview':'suppliers'),[remove,setRemove]=useState(false)
+  const [tab,setTab]=useState(()=>linksOfMaterial(s,m.id).length?'overview':'suppliers'),[remove,setRemove]=useState(false),[safety,setSafety]=useState(false)
   const [linkEdit,setLinkEdit]=useState<SupplierMaterial|'new'|null>(null),[unlink,setUnlink]=useState<SupplierMaterial|null>(null),[sourcing,setSourcing]=useState<SourcingNeed|null>(null)
   const st=stockOf(s,m.id)
   const links=linksOfMaterial(s,m.id)
@@ -187,6 +210,8 @@ function MaterialDrawerBody({m,onClose,onEdit}:{m:RawMaterial;onClose:()=>void;o
     <Tabs items={[{value:'overview',label:'Umumiy'},{value:'suppliers',label:'Supplierlar',count:links.length},{value:'lots',label:'Lotlar',count:lots.filter(l=>l.qty>0).length},{value:'used',label:'Where-used',count:whereUsed.length},{value:'purchases',label:'Xaridlar',count:pos.length},{value:'moves',label:'Harakatlar'},{value:'docs',label:'Hujjatlar'},{value:'history',label:'Tarix'}]} active={tab} onChange={setTab}/>
     {tab==='overview'&&<>
       <div className="stock-summary card"><div><span>Available</span><strong>{qty(st.available,m.unit)}</strong></div><Progress value={st.available/Math.max(1,m.reorderPoint)*100} toneName={level==='Kritik'?'danger':level==='Reorder'?'warning':'success'} label="Reorder pointga nisbatan"/><div className="stock-summary-meta"><span>On hand <b>{num(st.onHand)}</b></span><span>Rezerv <b>{num(st.reserved)}</b></span><span>Yo‘lda <b>{num(st.incoming)}</b></span><span>Reorder <b>{num(m.reorderPoint)}</b></span></div></div>
+      {s.branches.filter(b=>b.status!=='Arxiv').length>1&&<div className="list-row"><span className="list-row-copy"><b>Safety stock filiallar bo‘yicha (MRP)</b><small>{s.branches.filter(b=>b.status!=='Arxiv').map(b=>`${b.name}: ${num(siteSafetyStock(s,m,b.id))} ${m.unit}`).join(' · ')}</small></span>{app.can('materials','edit')&&<button type="button" className="secondary-glass-btn compact" onClick={()=>setSafety(true)}><Icon name="edit" size={14}/>Filiallar</button>}</div>}
+      {safety&&<SiteSafetyModal material={m} onClose={()=>setSafety(false)}/>}
       <InfoGrid items={[{label:'Standart narx',value:money(m.standardCost)},{label:'Zaxira qiymati',value:money(st.onHand*m.standardCost)},{label:'Asosiy supplier',value:preferredSupplierId(s,m.id)?supplierName(s,preferredSupplierId(s,m.id)):links.length?`${links.length} ta — tanlanmagan`:'Yo‘q',tone:links.length?undefined:'danger'},{label:'Lead time',value:`${m.leadTime} kun`},{label:'Min stock',value:num(m.minStock)},{label:'Omborlar',value:s.stockBalances.filter(b=>b.itemId===m.id).map(b=>warehouseName(s,b.warehouseId)).join(', ')}]}/>
     </>}
     {tab==='suppliers'&&<div className="stack-list">

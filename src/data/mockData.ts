@@ -9,10 +9,11 @@ import {rollUpStandardCosts} from '../domain/manufacturingEngine'
 import {clearTransactions} from '../domain/reset'
 import {SYSTEM_ROLES} from '../domain/access'
 import {SCHEMA_VERSION} from '../domain/migrations'
+import {openingEntries} from '../domain/receivables'
 
 const clone=<T,>(v:T):T=>JSON.parse(JSON.stringify(v))
 import type {Ctx,Outcome} from '../domain/actions'
-import {isoDate,stamp,weekStart,addDays} from '../utils/dates'
+import {isoDate,parseDate,stamp,weekStart,addDays} from '../utils/dates'
 
 
 const boms:Bom[]=[
@@ -44,7 +45,7 @@ const employees:Employee[]=[
 ]
 
 function baseState():ManufacturingState{
-  return {
+  const s:ManufacturingState={
     settings:{theme:'system',appearance:'blue',accent:'#3B78E7',currency:'UZS',fontSize:'standard',reducedMotion:false,uiDensity:'standard',tableDensity:'standard',defaultBranchId:'b1',defaultWarehouseId:'w1',defaultLineId:'l1',language:'uz',
       notifications:{lowStock:true,quality:true,maintenance:true,delay:true,ai:true},ai:{enabled:true,credits:20},
       company:{name:'ZENIX Industrial Demo',currency:'UZS',timezone:'Asia/Tashkent',taxId:'305 441 882'},
@@ -121,8 +122,10 @@ function baseState():ManufacturingState{
       {id:'qcp5',title:'Po‘lat list qalinlik sertifikati',scope:'Incoming',productId:'rm2',frequency:'Every time',sampleRate:100,checkType:'Pass-Fail',instructions:'Mill certificate va 1.5 mm ±0.05 qalinlikni tekshiring.',active:true},
     ],
     maintenanceRequests:[],subcontractOrders:[],repairOrders:[],notifications:[],activity:[],currentEmployeeId:'em1',schemaVersion:SCHEMA_VERSION,
-    timeLogs:[],downtimeEvents:[],lots:[],forecasts:[],returns:[],attachments:[],
+    timeLogs:[],downtimeEvents:[],lots:[],forecasts:[],returns:[],attachments:[],receivables:[],supplierReplacements:[],receivableReconciliations:[],
   }
+  // Demo customers' balances are opening ledger entries, so the balance shown is the ledger's (audit #19).
+  return {...s,receivables:openingEntries(s.customers,stamp(new Date(2026,0,1)))}
 }
 
 /** Clean start: master data, settings and roles; no orders, stock, purchases, QC, maintenance or history. */
@@ -135,7 +138,8 @@ export function createSeedState(now=new Date()):ManufacturingState{
   const counters=new Map<string,number>()
   // Generated ids contain a dash so they can never collide with the static master ids (bom1, p1, …).
   const id=(prefix:string)=>{const n=(counters.get(prefix)??0)+1;counters.set(prefix,n);return `${prefix}-${n}`}
-  const day=(offset:number,h=8,m=0)=>{const d=new Date(now);d.setDate(d.getDate()+offset);d.setHours(h,m,0,0);return d}
+  // Company wall-clock time `offset` days from today (timezone layer, audit #20).
+  const day=(offset:number,h=8,m=0)=>parseDate(`${addDays(isoDate(now),offset)} ${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`)
   const ago=(minutes:number)=>new Date(now.getTime()-minutes*60000)
   const plus=(d:Date,minutes:number)=>new Date(d.getTime()+minutes*60000)
   let s=baseState()

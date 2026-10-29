@@ -4,7 +4,16 @@
 // so this narrows the window to one synchronous read-modify-write; it is not a transaction.
 
 export type RawStore={getRaw(key:string):string|null;setRaw(key:string,text:string):boolean}
-export type WriteResult='same'|'saved'|'failed'|'conflict'
+/**
+ * 'locked': the stored text must not be overwritten by this tab (e.g. data of a newer schema, audit #8);
+ * 'invalid': the state could not be serialised faithfully (e.g. a non-finite number) and nothing was written.
+ */
+export type WriteResult='same'|'saved'|'failed'|'conflict'|'locked'|'invalid'
+export type SlotOptions={
+  /** Stored text this tab may never write over, whatever it holds. */
+  locked?:(raw:string)=>boolean;
+  /** Serialiser for writes; throwing refuses the write ('invalid'). Defaults to JSON.stringify. */
+  stringify?:(value:unknown)=>string}
 
 export type SyncedSlot<T>={
   /** The newest state: what another tab saved since this tab last read or wrote, otherwise `current`. */
@@ -19,7 +28,8 @@ export type SyncedSlot<T>={
   receive(raw:string|null):T|null;
 }
 
-export function createSyncedSlot<T>(store:RawStore,key:string,parse:(raw:string)=>T|null,initialText:string|null):SyncedSlot<T>{
+export function createSyncedSlot<T>(store:RawStore,key:string,parse:(raw:string)=>T|null,initialText:string|null,options:SlotOptions={}):SyncedSlot<T>{
+  const stringify=options.stringify||JSON.stringify
   let lastText=initialText
   const read=(raw:string|null):T|null=>{
     if(raw===null||raw===lastText)return null
@@ -33,9 +43,11 @@ export function createSyncedSlot<T>(store:RawStore,key:string,parse:(raw:string)
   return {
     latest(current){const next=read(store.getRaw(key));return next===null?{state:current,changed:false}:{state:next,changed:true}},
     write(state){
-      const text=JSON.stringify(state)
+      let text:string
+      try{text=stringify(state)}catch{return 'invalid'}
       if(text===lastText)return 'same'
       const stored=store.getRaw(key)
+      if(stored!==null&&stored!==text&&options.locked?.(stored))return 'locked'
       if(stored!==null&&stored!==lastText&&stored!==text){
         // Unreadable text (a half-written value) is not worth keeping over this tab's state; readable data is.
         let readable=false

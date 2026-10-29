@@ -3,7 +3,8 @@ import {useNavigate,useSearchParams} from 'react-router-dom'
 import {useApp} from '../../../app/providers/AppProvider/AppContext'
 import {Card,Confirm,Drawer,Empty,Field,FilterSelect,Icon,InfoGrid,Input,KPI,Modal,MoneyInput,PageHeader,ResourceTable,SectionTitle,Select,StatusBadge,Tabs,Textarea,required,useForm,useRecordParam,useSearchParamState} from '../../../shared/ui'
 import type {DowntimeReason,Equipment as EquipmentType,MaintenanceOrder,MaintenancePlan,WorkCenter} from '../../../types'
-import {PLAN_UNITS,maintenanceCalendar,maintenanceDue,maintenanceWindow,planLabel,planOf,reliabilityOf} from '../../../domain/maintenance'
+import {PLAN_UNITS,maintenanceCalendar,maintenanceDue,maintenanceWindow,planLabel,planOf,reliabilityOf,runtimeForecast} from '../../../domain/maintenance'
+import type {RuntimeForecast} from '../../../domain/maintenance'
 import type {DueState} from '../../../domain/maintenance'
 import {calculateCapacityLoads,downtimeInPeriod,downtimeSummary,equipmentActivity,isOpenOrder,workCenterCalendar,workCenterOee} from '../../../domain/manufacturingEngine'
 import {addDays,formatMinutes,minutesBetween,stamp,todayISO,weekdayShort} from '../../../utils/dates'
@@ -158,7 +159,7 @@ function MaintenanceOrderModal({order,equipmentId,onClose,onSaved}:{order?:Maint
 function MachineDrawer({machine,onClose,onEdit}:{machine:EquipmentType;onClose:()=>void;onEdit:()=>void}){
   const app=useApp(),s=app.state,now=useNow(30000),navigate=useNavigate()
   const [tab,setTab]=useState('overview'),[stop,setStop]=useState(false),[request,setRequest]=useState(false),[runtime,setRuntime]=useState(false),[plan,setPlan]=useState(false)
-  const rel=reliabilityOf(s,machine.id),due=maintenanceDue(machine,todayISO())
+  const rel=reliabilityOf(s,machine.id),due=maintenanceDue(machine,todayISO()),forecast=runtimeForecast(s,machine,todayISO())
   const open=s.downtimeEvents.find(d=>d.equipmentId===machine.id&&!d.end)
   const events=s.downtimeEvents.filter(d=>d.equipmentId===machine.id)
   const maint=s.maintenanceOrders.filter(m=>m.equipmentId===machine.id)
@@ -178,6 +179,7 @@ function MachineDrawer({machine,onClose,onEdit}:{machine:EquipmentType;onClose:(
         {label:'MTBF',value:hoursText(rel.mtbfHours)},{label:'MTTR',value:hoursText(rel.mttrHours)},{label:'Qayd etilgan nosozlik',value:`${rel.failures} ta`},
         {label:'Preventive reja',value:planLabel(planOf(machine))},{label:'Oxirgi servis',value:machine.lastMaintenance||'—'},{label:'Keyingi servis',value:due.dueDate||DUE_LABEL[due.state],tone:due.state==='overdue'?'danger':due.state==='soon'||due.state==='due'?'warning':undefined},
         {label:'Ish soati',value:machine.runtimeHours!==undefined?`${machine.runtimeHours} soat${due.plan?.unit==='runtime'?` · ${due.reason}`:''}`:'—'},{label:'Maintenance xarajati',value:money(machine.maintenanceCost)}]}/>
+      {forecast.state!=='not-runtime'&&<ForecastNote forecast={forecast}/>}
       {(rel.mtbfNote||rel.mttrNote)&&<p className="soft-meta">MTBF / MTTR faqat qayd etilgan nosozliklardan hisoblanadi: {[rel.mtbfNote&&`MTBF — ${rel.mtbfNote}`,rel.mttrNote&&`MTTR — ${rel.mttrNote}`].filter(Boolean).join(' · ')}.</p>}
       <SectionTitle title="Navbatdagi MOlar"/>
       {orders.length?<div className="stack-list">{orders.map(o=><button type="button" className="list-row is-clickable" key={o.id} onClick={()=>navigate(`/production?view=orders&id=${o.id}`)}><span className="list-row-copy"><b>{o.code} · {productName(s,o.productId)}</b><small>due {o.due}</small></span><StatusBadge>{o.status}</StatusBadge></button>)}</div>:<Empty compact title="Ochiq operatsiya yo‘q"/>}
@@ -202,7 +204,7 @@ function WorkCenters(){
     <PageHeader title="Work Centers" subtitle="7 kunlik yuklama (kalendar bo‘yicha), OEE, samaradorlik va stavka"/>
     <div className="card flush"><div className="table-scroll"><table className="wc-table"><thead><tr><th>Work center</th><th>Holat</th><th>7 kun yuklama</th><th className="align-right">Ochiq ish</th><th className="align-right">OEE (7k)</th><th className="align-right">Samaradorlik</th>{app.can('costs')&&<th className="align-right">Stavka / soat</th>}<th>Uskunalar</th>{canEdit&&<th className="action-col"><span className="sr-only">Amal</span></th>}</tr></thead><tbody>
       {s.workCenters.map(w=>{const l=loads.find(x=>x.workCenter.id===w.id)!,o=workCenterOee(s,w.id);return <tr key={w.id} className={l.down?'row-danger':l.overloaded?'row-warning':undefined}>
-        <td><div className="cell-main"><b>{w.name}</b><small>{w.code} · {lineName(s,w.lineId)}</small><small>{(()=>{const c=workCenterCalendar(s,w);return `${workingDaysLabel(c.workingDays)} · ${c.shifts}×${c.shiftMinutes} min`})()}</small></div></td>
+        <td><div className="cell-main"><b>{w.name}</b><small>{w.code} · {lineName(s,w.lineId)}</small><small>{(()=>{const c=workCenterCalendar(s,w);const brk=(w.calendar?.breaks||[]).reduce((a,b)=>a+b.minutes,0);return `${workingDaysLabel(c.workingDays)} · ${w.calendar?.shiftStart||'08:00'} · ${c.shifts}×${c.shiftMinutes} min${brk?` · tanaffus ${brk} min`:''}${(w.calendar?.parallel||1)>1?` · ${w.calendar!.parallel} parallel`:''}`})()}</small></div></td>
         <td><StatusBadge tone={l.down?'danger':l.overloaded?'warning':'success'}>{l.down?'To‘xtagan':l.overloaded?'Overload':'Normal'}</StatusBadge></td>
         <td><div className="wc-load"><div className="mini-days" aria-label={`${w.name}: kunlik yuklama`}>{l.days.map(d=><span key={d.date} className={d.utilization>100?'over':d.utilization>85?'high':d.load?'ok':''} title={d.working===false?`${d.date}: dam olish`:`${d.date}: ${d.utilization}%${d.blocked?` · band ${d.blocked} min`:''}`}><i style={{height:`${Math.min(100,d.utilization)}%`}}/></span>)}</div><b className={l.utilization>100?'negative':undefined}>{l.utilization}%</b></div></td>
         <td className="align-right">{formatMinutes(l.loadMinutes)}</td>
@@ -217,17 +219,41 @@ function WorkCenters(){
   </div>
 }
 
+/** "12:00+60, 15:00+15" → breaks; null when any part is not a real clock time with 1–240 minutes. */
+function parseBreaks(text:string):{start:string;minutes:number}[]|null{
+  const parts=text.split(',').map(x=>x.trim()).filter(Boolean)
+  const out=parts.map(p=>{const m=/^([01]\d|2[0-3]):([0-5]\d)\s*\+\s*(\d{1,3})$/.exec(p);return m&&Number(m[3])>=1&&Number(m[3])<=240?{start:`${m[1]}:${m[2]}`,minutes:Number(m[3])}:null})
+  return out.every(Boolean)?out as {start:string;minutes:number}[]:null
+}
+
+/** Runtime-based next service: estimated from recorded usage, told apart from a confirmed PM date (audit #26). */
+function ForecastNote({forecast}:{forecast:RuntimeForecast}){
+  const tone=forecast.state==='due'?'danger':forecast.state==='estimated'?'':'warning'
+  return <div className={`inline-note ${tone}`}><Icon name={forecast.state==='estimated'?'clock':'info'}/>
+    <span>{forecast.state==='estimated'?<><b>Taxminiy servis: {forecast.dueDate}</b> · {forecast.reason}</>:forecast.state==='due'?<b>{forecast.reason}</b>:forecast.reason}
+      {forecast.scheduled?<> · Tasdiqlangan PM: <b>{forecast.scheduled.code} ({forecast.scheduled.date})</b></>:null}</span></div>
+}
+
+function RuntimeDue({machine,leftHours}:{machine:EquipmentType;leftHours?:number}){
+  const s=useApp().state
+  const f=runtimeForecast(s,machine,todayISO())
+  return <span className="cell-main">{leftHours!==undefined?`${leftHours} soat qoldi`:<span className="muted">—</span>}
+    <small title={f.reason}>{f.state==='estimated'?`≈ ${f.dueDate} (taxmin)`:f.state==='due'?'Hozir':f.state==='inactive'?'To‘xtagan':'Ma’lumot yetarli emas'}</small></span>
+}
+
 function WorkCenterModal({wc,onClose}:{wc:WorkCenter;onClose:()=>void}){
   const app=useApp()
   const policy=app.state.settings.policies
   const [days,setDays]=useState<number[]>(wc.calendar?.workingDays?.length?wc.calendar.workingDays:workCenterCalendar(app.state,{}).workingDays)
-  const form=useForm({name:wc.name,efficiency:String(wc.efficiency),costPerHour:String(wc.costPerHour),energyCostPerHour:wc.energyCostPerHour===undefined?'':String(wc.energyCostPerHour),shifts:String(wc.calendar?.shifts??1),shiftMinutes:wc.calendar?.shiftMinutes?String(wc.calendar.shiftMinutes):''},v=>({name:required(v.name,'Nomi'),efficiency:Number(v.efficiency)>0&&Number(v.efficiency)<=120?undefined:'1–120%',costPerHour:Number(v.costPerHour)>=0?undefined:'Stavka noto‘g‘ri',
-    energyCostPerHour:v.energyCostPerHour===''||Number(v.energyCostPerHour)>=0?undefined:'Manfiy bo‘lmasin',shifts:[1,2,3].includes(Number(v.shifts))?undefined:'1–3 smena',shiftMinutes:v.shiftMinutes===''||(Number(v.shiftMinutes)>=60&&Number(v.shiftMinutes)*Number(v.shifts||1)<=1440)?undefined:'60 min dan, sutkaga sig‘sin'}))
+  const form=useForm({name:wc.name,efficiency:String(wc.efficiency),costPerHour:String(wc.costPerHour),energyCostPerHour:wc.energyCostPerHour===undefined?'':String(wc.energyCostPerHour),shifts:String(wc.calendar?.shifts??1),shiftMinutes:wc.calendar?.shiftMinutes?String(wc.calendar.shiftMinutes):'',shiftStart:wc.calendar?.shiftStart||'08:00',breaks:(wc.calendar?.breaks||[]).map(b=>`${b.start}+${b.minutes}`).join(', '),parallel:String(wc.calendar?.parallel??1)},v=>({name:required(v.name,'Nomi'),efficiency:Number(v.efficiency)>0&&Number(v.efficiency)<=120?undefined:'1–120%',costPerHour:Number(v.costPerHour)>=0?undefined:'Stavka noto‘g‘ri',
+    energyCostPerHour:v.energyCostPerHour===''||Number(v.energyCostPerHour)>=0?undefined:'Manfiy bo‘lmasin',shifts:[1,2,3].includes(Number(v.shifts))?undefined:'1–3 smena',shiftMinutes:v.shiftMinutes===''||(Number(v.shiftMinutes)>=60&&Number(v.shiftMinutes)*Number(v.shifts||1)<=1440)?undefined:'60 min dan, sutkaga sig‘sin',
+    shiftStart:/^([01]\d|2[0-3]):[0-5]\d$/.test(v.shiftStart)?undefined:'HH:mm (masalan 08:00)',breaks:parseBreaks(v.breaks)===null?'Format: 12:00+60, 15:00+15':undefined,parallel:Number.isInteger(Number(v.parallel))&&Number(v.parallel)>=1&&Number(v.parallel)<=20?undefined:'1–20'}))
   const save=()=>form.submit(v=>{
     // Days equal to the company calendar are not stored, so a later company change still applies here.
     const own=[...days].sort().join()!==[...workCenterCalendar(app.state,{}).workingDays].sort().join()
     const r=app.updateEntity('workCenters',wc.id,{name:v.name.trim(),efficiency:Number(v.efficiency),costPerHour:Number(v.costPerHour),energyCostPerHour:v.energyCostPerHour===''?undefined:Number(v.energyCostPerHour),
-      calendar:{workingDays:own?days:undefined,shifts:Number(v.shifts),shiftMinutes:v.shiftMinutes===''?undefined:Number(v.shiftMinutes)}})
+      calendar:{workingDays:own?days:undefined,shifts:Number(v.shifts),shiftMinutes:v.shiftMinutes===''?undefined:Number(v.shiftMinutes),
+        shiftStart:v.shiftStart==='08:00'?undefined:v.shiftStart,breaks:parseBreaks(v.breaks)?.length?parseBreaks(v.breaks)!:undefined,parallel:Number(v.parallel)>1?Number(v.parallel):undefined}})
     if(r.ok)onClose();return r.ok
   })
   return <Modal open onClose={onClose} title={`${wc.code} — tahrirlash`} size="md" footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Bekor qilish</button><button type="button" className="primary-glass-btn" onClick={save}>Saqlash</button></>}>
@@ -238,6 +264,9 @@ function WorkCenterModal({wc,onClose}:{wc:WorkCenter;onClose:()=>void}){
       <Field label="Energiya / ishlash soati" hint="Bo‘sh = kiritilmagan (tannarxda belgilanadi)" error={form.error('energyCostPerHour')}><Input type="number" min="0" {...form.input('energyCostPerHour')}/></Field>
       <Field label="Smenalar soni" error={form.error('shifts')}><Select value={form.values.shifts} onChange={v=>form.set('shifts',v)}>{['1','2','3'].map(x=><option key={x} value={x}>{x}</option>)}</Select></Field>
       <Field label="Smena (min)" hint={`Bo‘sh = kompaniya: ${policy.shiftMinutes} min`} error={form.error('shiftMinutes')}><Input type="number" min="60" {...form.input('shiftMinutes')}/></Field>
+      <Field label="Smena boshlanishi" hint="Kompaniya vaqt zonasi bo‘yicha" error={form.error('shiftStart')}><Input type="time" {...form.input('shiftStart')}/></Field>
+      <Field label="Parallel operatsiyalar" hint="Bir vaqtda nechta ish bajarila oladi" error={form.error('parallel')}><Input type="number" min="1" max="20" step="1" {...form.input('parallel')}/></Field>
+      <Field className="span-2" label="Tanaffuslar" hint="Har ish kuni, ishlab chiqarishsiz vaqt: boshlanish+daqiqa, vergul bilan" error={form.error('breaks')}><Input {...form.input('breaks')} placeholder="12:00+60, 15:00+15"/></Field>
       <div className="field span-2"><label>Ish kunlari</label><WorkingDaysPicker value={days} onChange={setDays}/></div>
     </div>
   </Modal>
@@ -317,12 +346,12 @@ function Preventive(){
         <td><div className="cell-main"><b>{e.name}</b><small>{workCenterName(s,e.workCenterId)}</small></div></td>
         <td>{planLabel(due.plan)}</td>
         <td>{e.lastMaintenance||<span className="muted">—</span>}</td>
-        <td>{due.dueDate||(due.plan?.unit==='runtime'&&due.leftHours!==undefined?`${due.leftHours} soat qoldi`:<span className="muted">—</span>)}</td>
+        <td>{due.dueDate||(due.plan?.unit==='runtime'?<RuntimeDue machine={e} leftHours={due.leftHours}/>:<span className="muted">—</span>)}</td>
         <td><span className="cell-main"><StatusBadge tone={DUE_TONE[due.state]}>{DUE_LABEL[due.state]}</StatusBadge><small>{due.reason}</small></span></td>
         <td>{pm?<button type="button" className="link-btn" onClick={()=>navigate(`/equipment?view=maintenance&id=${pm.id}`)}>{pm.code}</button>:<span className="muted">—</span>}</td>
         {app.can('equipment','edit')&&<td className="action-col"><button type="button" className="icon-ghost" aria-label={`${e.name} — reja`} onClick={()=>setEdit(e)}><Icon name="edit" size={15}/></button></td>}
       </tr>})}
-    </tbody></table></div><p className="table-note">Ish soati rejasi hisoblagich ko‘rsatkichi bo‘lmasa “Ma’lumot yo‘q” — muddat taxmin qilinmaydi.</p></Card>}
+    </tbody></table></div><p className="table-note">Ish soati rejasi: taxminiy sana faqat qayd etilgan hisoblagich o‘lchovlaridan (kamida 2 ta, 7+ kun oralig‘ida) hisoblanadi; yetarli bo‘lmasa “Ma’lumot yetarli emas”. Taxmin rejadagi PM sanasini o‘zgartirmaydi.</p></Card>}
     {tab==='calendar'&&<Card title="Servis kalendari" subtitle="Rejadagi buyurtmalar va muddati keladigan preventive servislar">
       <div className="table-scroll"><table className="fit maintenance-calendar"><thead><tr>{weeks[0].map(d=><th key={d}>{weekdayShort(d)}</th>)}</tr></thead><tbody>
         {weeks.map(week=><tr key={week[0]}>{week.map(d=>{const items=calendar.filter(c=>c.date===d);return <td key={d} className={d===today?'is-today':undefined}><div className="cell-main"><small>{d.slice(5)}</small>{items.map((c,i)=>c.kind==='order'

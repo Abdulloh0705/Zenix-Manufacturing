@@ -8,7 +8,7 @@ import {CURRENCIES} from '../../../utils/format'
 import {Card,Confirm,Field,Icon,InfoGrid,Input,Modal,MoneyInput,PageHeader,Segmented,Select,StatusBadge,Toggle,required,useForm} from '../../../shared/ui'
 import {downloadText} from '../../../utils/exportData'
 import {fileSize} from '../../../utils/format'
-import {todayISO} from '../../../utils/dates'
+import {TIMEZONE_HINT,timeZoneOptions,todayISO} from '../../../utils/dates'
 import {DEFAULT_WORKING_DAYS} from '../../../domain/manufacturingEngine'
 import {WorkingDaysPicker} from '../../common/WorkingDays'
 
@@ -38,7 +38,7 @@ function Business(){
         <Field label="Kompaniya nomi" required error={form.error('name')}><Input disabled={!canEdit} {...form.input('name')}/></Field>
         <Field label="STIR / Tax ID"><Input disabled={!canEdit} {...form.input('taxId')}/></Field>
         <Field label="Asosiy valyuta" hint="Ko‘rsatish valyutasi — topbar’dagi Valyuta"><Input readOnly value="UZS · so‘m"/></Field>
-        <Field label="Vaqt zonasi"><Select value={form.values.timezone} disabled={!canEdit} onChange={v=>form.set('timezone',v)}>{['Asia/Tashkent','Asia/Almaty','Europe/Moscow','UTC'].map(x=><option key={x} value={x}>{x}</option>)}</Select></Field>
+        <Field label="Vaqt zonasi" hint={TIMEZONE_HINT}><Select value={form.values.timezone} disabled={!canEdit} onChange={v=>form.set('timezone',v)}>{timeZoneOptions(form.values.timezone).map(x=><option key={x} value={x}>{x}</option>)}</Select></Field>
       </div>
       {canEdit&&<div className="form-actions"><button type="button" className="ghost-btn" disabled={!form.dirty} onClick={()=>form.reset()}>Qaytarish</button><button type="button" className="primary-glass-btn" disabled={!form.dirty} onClick={()=>form.submit(v=>{app.saveSettings({company:{...v,name:v.name.trim()}});form.reset(v)})}><Icon name="check" size={16}/>Saqlash</button></div>}
     </Card>
@@ -118,7 +118,10 @@ function Notifications(){
       <Toggle checked={n.lowStock} disabled={!canEdit} onChange={v=>set('lowStock',v)} label="Xomashyo kamayishi" description="Reorder’dan past yoki MO material kutsa"/>
       <Toggle checked={n.quality} disabled={!canEdit} onChange={v=>set('quality',v)} label="Sifat muammolari" description="Failed / Scrap, qaytarishlar"/>
       <Toggle checked={n.maintenance} disabled={!canEdit} onChange={v=>set('maintenance',v)} label="Uskuna va maintenance" description="Downtime, servis"/>
-      <Toggle checked={false} disabled onChange={()=>undefined} label="Muddat kechikishi" description="Hozircha alohida xabar yaratilmaydi — kechikkan MOlar Boshqaruv paneli va Ishlab chiqarish → Umumiy’da ko‘rinadi" disabledReason="Bu tur uchun bildirishnoma manbai hali yo‘q"/>
+      <Toggle checked={n.delay} disabled={!canEdit} onChange={v=>set('delay',v)} label="Ishlab chiqarish kechikishi" description="Muddati o‘tgan ochiq MO — har bir muddat uchun bitta xabar"/>
+      <Toggle checked={n.production!==false} disabled={!canEdit} onChange={v=>set('production',v)} label="Ishlab chiqarish hodisalari" description="MO yakunlandi, rezerv, bekor qilindi"/>
+      <Toggle checked={n.purchase!==false} disabled={!canEdit} onChange={v=>set('purchase',v)} label="Xarid va qabul" description="Kechikkan PO, yangi PO, supplier almashtirishi"/>
+      <Toggle checked={n.mrp!==false} disabled={!canEdit} onChange={v=>set('mrp',v)} label="MRP tavsiyalari" description="Bugun ochilishi kerak bo‘lgan xarid / ishlab chiqarish (MRP hisobi, AI emas) — kuniga bitta"/>
       <Toggle checked={false} disabled onChange={()=>undefined} label="AI tavsiyalari" description="Hozircha alohida xabar yaratilmaydi — tavsiyalar ZENIX AI panelida" disabledReason="Bu tur uchun bildirishnoma manbai hali yo‘q"/>
     </Card>
   </div>

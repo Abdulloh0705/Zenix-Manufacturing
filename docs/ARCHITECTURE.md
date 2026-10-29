@@ -78,3 +78,28 @@ Sahifalar biznes ma’lumotini faqat `useApp()` orqali o‘qiydi va o‘zgartira
 ## Uslublar
 
 CSS manbalari (preprocessor yo‘q) `scripts/build-styles.mjs` orqali `src/styles.css`ga yig‘iladi: `tokens → base → controls → surfaces → data → overlays → shell → modules`. Generated faylni tahrirlamang.
+
+## Zaxira identifikatsiyasi, joylar va o‘lchov birliklari (Audit Phase 3, 2026-10-28)
+
+- **Stock key** (`src/domain/inventory.ts`): fizik item — material/mahsulot id, variant zaxirasi yoqilgan mahsulotda `productId~variantId`. Saqlanadigan yozuvlar `itemId` + `variantId` ni alohida saqlaydi; engine qatorlarni `keyOf` bilan taqqoslaydi. Kalit backend’da ham bir xil (item, variant) juftligi bo‘ladi.
+- **Joylar**: `StockBalance.bins` (joy → on-hand) balansning bo‘linishi; joysiz qism = onHand − Σbins. Alohida joy ledger’i yo‘q, shuning uchun ombor jami har doim joylar yig‘indisiga teng. LOT o‘z joyida (`LotRecord.location`); sarf LOT turgan joydan ayiriladi.
+- **UoM** (`src/domain/uom.ts`): yagona konversiya servisi; omborda hamma narsa item’ning ombor birligida. BOM qatoriga saqlashda `factor` yoziladi, hujjat qabulida yozilgan birlik `entered` sifatida saqlanadi.
+- **Sayt MRP** (`planning.ts runMrp`): har filial alohida; natijada `rows/suggestions` (`branchId` bilan) va `transfers` (faqat tavsiya).
+- **Migratsiya**: yangi maydonlar ixtiyoriy — sxema v4 qoladi, eski ma’lumot o‘zgartirilmaydi; noaniqliklar `inventoryIssues` orqali ko‘rsatiladi va faqat aniq amal (`allocateLegacyLots`, `assignVariantStock`, `moveStockBin`) bilan hal qilinadi.
+
+## Sana, debitorlik, eksport va sub-day sig‘im (Audit Phase 4, 2026-10-29)
+
+- **Sana qatlami** — `src/utils/dates.ts`. Sana-faqat qiymatlar sof kalendar; vaqt belgilari kompaniya IANA zonasida (`settings.company.timezone`, `setTimeZone`, globalThis orqali barcha bundle’larga umumiy). Brauzer zonasiga tayanilmaydi.
+- **Debitorlik** — `src/domain/receivables.ts` (o‘qish) + `actions.ts` (`postReceivable`, `recordCustomerPayment`, `adjustCustomerBalance`, yetkazish/qaytarish hook’lari). Yozuvlar faqat qo‘shiladi, `key` bilan idempotent.
+- **Eksport** — `src/utils/exportData.ts`: `exportRows('xlsx'|'csv')`, `toXlsx`, `zipStored`, `crc32`. Boshqa sahifalar faqat shu funksiyani chaqiradi.
+- **Sig‘im** — `workCenterWindows` (engine) → `workCenterDay` (kunlik) va `scheduleOperations` (finite, intervallar). `runtimeForecast`/`forecastWarnings` — `maintenance.ts`.
+
+## Serial, almashtirish, bildirishnoma va reja mashinalari (Audit Phase 5, 2026-10-29)
+
+- **Serial birlik = LOT yozuvi (miqdor 1).** `domain/serials.ts` faqat o‘qiydi: holat yozuvdan (ombor, joy, QC holati), chiqish sababi esa shu raqamli oxirgi manfiy ledger qatoridan. Ikkinchi inventar yo‘q; `addUnitMoves` serial birlik chiqqanda har biriga alohida qator yozadi.
+- **Supplier almashtirishi** asl PO’dagi `replacementId`li qabul sifatida yoziladi (`receiveGoods(..., rep)`): PO qatori/statusi o‘zgarmaydi, doim kirish QC. Hisoblar `replacementView` orqali qabullardan.
+- **Bildirishnomalar:** hodisa kaliti (`key`) bilan; holatga bog‘liq tekshiruv (`scanNotifications`) AppContext `execute` ichida faqat muvaffaqiyatli buyruqdan keyin, saqlash bilan birga (saqlanmasa — qaytariladi).
+- **Eski qaytarish krediti:** `receivableReconciliations` — qaror kutayotgan va qabul qilingan qarorlar; kredit kaliti qaytarishga bog‘langan.
+- **Vaqt:** devor-soat + `zoneHistory`; instantlar ISO UTC (auth). `parseDate(value)` (zona bermasdan) tarix bo‘yicha o‘qiydi.
+- **Sig‘im:** mashinasi bor WC — mashina yo‘laklari; mashinasiz WC — avvalgi `parallel` birliklar.
+- **Chegaralar:** bu brauzerdagi demo — RBAC, idempotentlik va atomiklik `execute` darajasida; server tomonidagi tranzaksiya, autentifikatsiya va ko‘p foydalanuvchi bir vaqtdaligi yo‘q.

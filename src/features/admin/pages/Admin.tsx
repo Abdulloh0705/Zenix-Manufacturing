@@ -9,7 +9,7 @@ import {assignRoleBlocker,employeeRemovalBlocker,isSuperAdminRole,roleManageBloc
 import {SCHEMA_VERSION} from '../../../domain/migrations'
 import {ACTIVITY_LIMIT} from '../../../domain/actions'
 import {AUTH_EVENT_LIMIT} from '../../../domain/auth'
-import {stamp} from '../../../utils/dates'
+import {TIMEZONE_HINT,stamp,timeZoneOptions} from '../../../utils/dates'
 import {fileSize,initials} from '../../../utils/format'
 import {PermissionMatrix} from '../components/PermissionMatrix'
 
@@ -321,7 +321,7 @@ function Organization(){
         <div className="form-grid">
           <Field label="Kompaniya nomi" required error={form.error('name')}><Input disabled={!canEdit} {...form.input('name')}/></Field>
           <Field label="STIR / Tax ID"><Input disabled={!canEdit} {...form.input('taxId')}/></Field>
-          <Field label="Vaqt zonasi" hint="Hozircha ma’lumot uchun"><Select value={form.values.timezone} disabled={!canEdit} onChange={v=>form.set('timezone',v)}>{['Asia/Tashkent','Asia/Almaty','Europe/Moscow','UTC'].map(x=><option key={x} value={x}>{x}</option>)}</Select></Field>
+          <Field label="Vaqt zonasi" hint={TIMEZONE_HINT}><Select value={form.values.timezone} disabled={!canEdit} onChange={v=>form.set('timezone',v)}>{timeZoneOptions(form.values.timezone).map(x=><option key={x} value={x}>{x}</option>)}</Select></Field>
           <Field label="Asosiy valyuta"><Input readOnly value="UZS · so‘m"/></Field>
         </div>
         {canEdit&&<div className="form-actions"><button type="button" className="primary-glass-btn" disabled={!form.dirty} onClick={()=>form.submit(v=>{app.saveSettings({company:{...c,...v,name:v.name.trim()}});form.reset(v)})}><Icon name="check" size={15}/>Saqlash</button></div>}

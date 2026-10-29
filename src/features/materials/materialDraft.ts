@@ -3,7 +3,8 @@
 import {storage} from '../../shared/lib/storage'
 import {stamp} from '../../utils/dates'
 
-export type MaterialFormValues={name:string;sku:string;category:string;unit:string;standardCost:string;minStock:string;reorderPoint:string;leadTime:string;lotTracking:boolean;expiryTracking:boolean;status:string;supplierId:string}
+/** `packUnit`/`packFactor`: one item-specific pack (e.g. quti = 24 dona, audit #24); absent on drafts saved before packs. */
+export type MaterialFormValues={name:string;sku:string;category:string;unit:string;standardCost:string;minStock:string;reorderPoint:string;leadTime:string;lotTracking:boolean;serialTracking?:boolean;expiryTracking:boolean;status:string;supplierId:string;packUnit?:string;packFactor?:string}
 export type MaterialDraft={values:MaterialFormValues;savedAt:string}
 type Handoff={target:string;values:MaterialFormValues}
 

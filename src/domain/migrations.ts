@@ -4,7 +4,13 @@ import type {ManufacturingState,PermissionAction,PermissionMap,Role} from '../ty
 import {SYSTEM_ROLES} from './access'
 import {actualOrderCost,estimateOrderCost} from './manufacturingEngine'
 
-export const SCHEMA_VERSION=4
+/**
+ * v5 (Phase 5): serial units, supplier replacements, keyed notifications, legacy-credit decisions and the zone
+ * history. Nothing stored changes shape, but a v4 build would write data that breaks these rules (serial material
+ * received without numbers, replacement receipts counted as PO receipts, returns credited without a decision) —
+ * so v5 data is marked, and a v4 build that knows the newer-version lock opens it read-only.
+ */
+export const SCHEMA_VERSION=5
 
 /** Role names and permissions the app shipped before system roles existed (schema ≤ 3). */
 const LEGACY_MODULES=['dashboard','production','products','materials','warehouse','purchases','sales','quality','equipment','employees','costs','reports','settings','ai']
@@ -75,6 +81,9 @@ export function migrateState(s:ManufacturingState):MigrationResult{
     next=freezeCompletedCosts(next)
     applied.push('v4: 8 ta tizim roli, execute huquqi, admin modullari, yakunlangan MO tannarxi muzlatildi')
   }
+  // v5 adds no stored shape to repair: lists it introduced start empty (normalizeLoaded), serial ranges saved before
+  // unit tracking stay readable as they are. Only the version mark changes, after a backup of the v4 data.
+  if(from<5)applied.push('v5: serial birliklar, supplier almashtirishi, kalitli bildirishnomalar, zona tarixi — mavjud yozuvlar o‘zgarmadi')
   return {state:{...next,schemaVersion:SCHEMA_VERSION},applied}
 }
 

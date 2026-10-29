@@ -5,12 +5,13 @@ import {useApp} from '../../../app/providers/AppProvider/AppContext'
 import {unbuildPreview} from '../../../domain/actions'
 import {Card,Checkbox,Confirm,Empty,Field,FilterSelect,Icon,InfoGrid,Input,KPI,Modal,MoreFilters,PageHeader,Progress,ResourceTable,Segmented,Select,StatusBadge,positive,useForm,useRecordParam,useSearchParamState} from '../../../shared/ui'
 import type {DowntimeReason,ProductionOrder} from '../../../types'
-import {calculateCapacityLoads,createMpsRows,createMrpPlan,deliveryRisk,isOpenOrder,issuedQty,jobCard,mpsCapacityByWeek,operationQueues,orderBlocker,plannedIssue,remainingQty,stockOf,weeklyProductionPlan} from '../../../domain/manufacturingEngine'
+import {calculateCapacityLoads,createMpsRows,createMrpPlan,deliveryRisk,isOpenOrder,issuedQty,itemName,jobCard,mpsCapacityByWeek,operationQueues,orderBlocker,plannedIssue,remainingQty,stockOf,weeklyProductionPlan} from '../../../domain/manufacturingEngine'
 import {runMrp,scheduleOperations} from '../../../domain/planning'
+import {forecastWarnings} from '../../../domain/maintenance'
 import type {MrpSuggestion} from '../../../domain/planning'
 import {addDays,daysBetween,formatMinutes,shortDate,stamp,todayISO} from '../../../utils/dates'
 import {cls,money,num,qty} from '../../../utils/format'
-import {employeeName,materialName,productName,supplierName,useNow,workCenterCode,workCenterName} from '../../common/lookups'
+import {employeeName,itemUnitOf,materialName,productName,supplierName,useNow,workCenterCode,workCenterName} from '../../common/lookups'
 import {BLOCKER_LABEL,OPEN_STATUSES,OperationOutputModal,OrderDrawer,OrderFormModal,OutputModal,PRIORITIES,ScrapModal,WorkOrderList,liveMinutes} from '../components/OrderParts'
 import {Overview} from './Overview'
 import {PurchasePlanModal,SourcingModal} from '../../purchases/components/Sourcing'
@@ -90,13 +91,18 @@ function Planning({open}:{open:Open}){
   // Finite schedule on the work-center calendars: when each order really finishes with the capacity it gets.
   const schedule=useMemo(()=>scheduleOperations(s),[s])
   const [conflict,setConflict]=useState<{o:ProductionOrder;day:string;message:string}|null>(null)
+  // Runtime services estimated inside two weeks with no PM yet: not in the capacity plan until scheduled (audit #26).
+  const serviceRisks=useMemo(()=>forecastWarnings(s,today,14),[s,today])
   // Moves are validated by the engine (past dates, running orders, unavailable resources need an explicit override).
   const reschedule=(o:ProductionOrder,day:string)=>{if(day===o.start)return;const r=app.rescheduleProductionOrder(o.id,day);if(!r.ok&&r.code==='needs-override')setConflict({o,day,message:r.message})}
   const onDrop=(e:DragEvent,day:string)=>{e.preventDefault();const o=orders.find(x=>x.id===e.dataTransfer.getData('text/plain'));if(o)reschedule(o,day)}
+  // Planned machine per operation (Phase 5): a plan, shown only for operations not started yet.
+  const machinesOf=(id:string)=>{const list=schedule.operations.filter(x=>x.orderId===id&&x.machineId).map(x=>`${x.name} → ${s.equipment.find(e=>e.id===x.machineId)?.name||x.machineId}`);return list.length?` · mashina: ${list.join(', ')}`:''}
   const finish=(o:ProductionOrder)=>{const p=schedule.orders.get(o.id);return p?.unscheduled?`rejaga sig‘madi: ${p.unscheduled}`:p?.end?`sig‘im bo‘yicha tugash ${p.end}${p.late?' — muddatdan kech':''}`:'operatsiyalar yakunlangan'}
   return <div className="page-stack">
     <PageHeader title="Rejalashtirish" subtitle="Sudrab ko‘chiring — davomiylik saqlanadi · kalendar, texnik xizmat va to‘xtashlar tekshiriladi"
       actions={<Segmented ariaLabel="Ko‘rinish" items={['Gantt','Calendar','Capacity']} value={mode} onChange={setMode}/>}/>
+    {serviceRisks.length>0&&<div className="inline-note warning"><Icon name="wrench"/><span>Servis prognozi (ish soati bo‘yicha, sig‘imga kiritilmagan — PM rejalashtirilmagan): {serviceRisks.map(x=>`${x.equipment.name} · ${workCenterCode(s,x.equipment.workCenterId)} ≈ ${x.forecast.dueDate}`).join('; ')}</span></div>}
     <div className="filter-strip">
       <FilterSelect label="Liniya" value={line} onChange={setLine} options={s.productionLines.map(l=>({value:l.id,label:l.name}))}/>
       {mode==='Capacity'&&<FilterSelect label="Yuklama" value={load} onChange={setLoad} options={[{value:'over',label:'Overload (>100%)'},{value:'high',label:'Yuqori (>85%)'}]}/>}
@@ -116,9 +122,13 @@ function Planning({open}:{open:Open}){
       {orders.length?orders.map(o=>{
         const startIdx=Math.max(0,daysBetween(days[0],o.start)),endIdx=Math.min(span-1,daysBetween(days[0],o.due))
         const visible=endIdx>=0&&startIdx<=span-1
+        const plan=schedule.orders.get(o.id)
+        const pStart=plan?.start?Math.max(0,daysBetween(days[0],plan.start.slice(0,10))):-1,pEnd=plan?.end?Math.min(span-1,daysBetween(days[0],plan.end.slice(0,10))):-1
+        const planVisible=plan?.start&&plan.end&&pEnd>=0&&pStart<=span-1
         return <div className="gantt-row" key={o.id}>
           <button type="button" className="gantt-label" onClick={()=>open(o.id)}><b>{o.code}</b><small>{productName(s,o.productId)} · {workCenterCode(s,o.workCenterId)}</small></button>
           {days.map(d=><div key={d} className={cls('gantt-cell',d===today&&'today')} onDragOver={e=>e.preventDefault()} onDrop={e=>onDrop(e,d)}/>)}
+          {planVisible&&<span className={cls('gantt-plan',plan?.late&&'late')} style={{gridColumn:`${pStart+2} / ${pEnd+3}`}} title={`Sig‘im bo‘yicha (finite schedule): ${plan!.start} → ${plan!.end}${machinesOf(o.id)}`} aria-hidden="true"/>}
           {visible&&<button type="button" draggable={app.can('production','edit')} onDragStart={e=>e.dataTransfer.setData('text/plain',o.id)} onClick={()=>open(o.id)} className={cls('gantt-bar',`p-${o.priority.toLowerCase()}`,(deliveryRisk(s,o)||schedule.orders.get(o.id)?.late)&&'risk')} style={{gridColumn:`${startIdx+2} / ${endIdx+3}`}} title={`${o.code}: ${o.start} → ${o.due} · ${o.progress}% · ${finish(o)}${o.scheduleOverride?` · override: ${o.scheduleOverride.reason}`:''}`}>
             <span className="gantt-progress" style={{width:`${o.progress}%`}}/><span className="gantt-text">{o.code} · {o.progress}%</span>
           </button>}
@@ -185,9 +195,10 @@ function MRP({open}:{open:Open}){
   const [short,setShort]=useSearchParamState('short')
   const purchases=short==='1'?shortages:plan.purchases
   const [sourcing,setSourcing]=useState<SourcingNeed|null>(null),[planBuy,setPlanBuy]=useState(false)
-  const [horizon,setHorizon]=useSearchParamState('h','8w')
+  const [horizon,setHorizon]=useSearchParamState('h','8w'),[site,setSite]=useSearchParamState('site')
   const options=horizon==='14d'?{bucket:'day' as const,horizonDays:14}:{bucket:'week' as const,horizonWeeks:Number(horizon.replace('w',''))||8}
-  const phased=useMemo(()=>runMrp(s,horizon==='14d'?{bucket:'day',horizonDays:14}:{bucket:'week',horizonWeeks:Number(horizon.replace('w',''))||8}),[s,horizon])
+  // Every branch is netted on its own stock, receipts and demand (audit #16); the filter only narrows what is shown.
+  const phased=useMemo(()=>runMrp(s,{...(horizon==='14d'?{bucket:'day' as const,horizonDays:14}:{bucket:'week' as const,horizonWeeks:Number(horizon.replace('w',''))||8}),branchId:site||undefined}),[s,horizon,site])
   const makes=phased.suggestions.filter(x=>x.type==='make'),buysTp=phased.suggestions.filter(x=>x.type==='buy')
   const needOf=(p:typeof buys[number]):SourcingNeed=>({materialId:p.materialId,need:p.suggested,needBy:p.needBy,source:'MRP'})
   const waiting=s.productionOrders.filter(o=>o.status==='Material kutilmoqda')
@@ -215,7 +226,9 @@ function MRP({open}:{open:Open}){
         <td className="align-right">{p.suggested>0&&<button type="button" className="soft-glass-btn compact" disabled={!canBuy} onClick={()=>setSourcing(needOf(p))}><Icon name="truck" size={14}/>Supplier</button>}</td>
       </tr>})}</tbody></table></div>}
     </Card>
+    <div className="filter-strip"><FilterSelect label="Filial (sayt)" value={site} onChange={setSite} options={s.branches.filter(b=>b.status!=='Arxiv').map(b=>({value:b.id,label:b.name}))}/><span className="soft-meta">Har filial o‘z ombori, kirimi va talabi bilan alohida rejalashtiriladi — boshqa filial qoldig‘i “mavjud” hisoblanmaydi</span></div>
     <MrpSuggestions plan={phased} options={options} horizon={horizon} setHorizon={setHorizon} onSupplier={sug=>setSourcing({materialId:sug.itemId,need:sug.qty,needBy:sug.needDate,source:'MRP'})}/>
+    <MrpTransfers plan={phased}/>
     <TimePhasedGrid plan={phased}/>
     {waiting.length>0&&<Card title="Material kutayotgan buyurtmalar">{waiting.map(o=><button type="button" key={o.id} className="list-row is-clickable" onClick={()=>open(o.id)}><span className="list-row-copy"><b>{o.code} · {productName(s,o.productId)}</b><small>{num(o.quantity)} · due {o.due}</small></span><StatusBadge>{o.status}</StatusBadge><Icon name="chevron" size={13} className="list-row-chevron"/></button>)}</Card>}
     {sourcing&&<SourcingModal need={sourcing} onClose={()=>setSourcing(null)}/>}
@@ -230,16 +243,17 @@ const REF_LABEL:Record<string,string>={sales:'Sotuv',forecast:'Forecast',mo:'MO'
 function MrpSuggestions({plan,options,horizon,setHorizon,onSupplier}:{plan:Phased;options:Parameters<typeof runMrp>[1];horizon:string;setHorizon:(v:string)=>void;onSupplier:(s:MrpSuggestion)=>void}){
   const app=useApp(),s=app.state
   const canMake=app.can('production','create'),canBuy=app.can('purchases','create')
-  const name=(id:string)=>s.products.find(p=>p.id===id)?.name||materialName(s,id)
+  const name=(id:string)=>itemName(s,id)
+  const branch=(id:string)=>s.branches.find(b=>b.id===id)?.name||id
   return <Card className="flush" title="Tavsiyalar · vaqt bo‘yicha" subtitle="Proyeksiya = oldingi + rejadagi kirim − yalpi talab · net = max(0, safety − proyeksiya) · lead time oldin buyurtma"
     actions={<Segmented ariaLabel="Rejalashtirish ufqi" items={[{value:'14d',label:'14 kun'},{value:'4w',label:'4 hafta'},{value:'8w',label:'8 hafta'},{value:'12w',label:'12 hafta'}]} value={horizon} onChange={setHorizon}/>}>
     {plan.issues.length>0&&<div className="inline-note warning"><Icon name="warning"/><span>{plan.issues.join(' · ')}</span></div>}
     {plan.suggestions.length?<div className="table-scroll"><table className="mrp-table"><thead><tr><th>Item</th><th>Tur</th><th className="align-right">Miqdor</th><th>Kerak</th><th>Buyurtma berish</th><th>Talab manbai</th><th>Make / buy</th><th className="align-right">Amal</th></tr></thead><tbody>{plan.suggestions.map(x=>{
-      const unit=s.products.find(p=>p.id===x.itemId)?.unit||s.rawMaterials.find(m=>m.id===x.itemId)?.unit||''
+      const unit=itemUnitOf(s,x.itemId)
       const demand=(x.origins.length?x.origins:x.refs)
       const allowed=x.type==='make'?canMake:canBuy
       return <tr key={x.key} className={x.pastDue?'row-danger':undefined}>
-        <td><div className="cell-main"><b>{name(x.itemId)}</b><small>L{x.level}{x.issues.length?` · ${x.issues.join(' · ')}`:''}</small></div></td>
+        <td><div className="cell-main"><b>{name(x.itemId)}</b><small>{branch(x.branchId)} · L{x.level}{x.issues.length?` · ${x.issues.join(' · ')}`:''}</small></div></td>
         <td><StatusBadge tone={x.type==='make'?'mfg':'info'}>{x.type==='make'?'Make':'Buy'}</StatusBadge></td>
         <td className="align-right"><b>{qty(x.qty,unit)}</b>{x.qty!==x.netQty&&<small className="cell-sub">net {num(x.netQty,2)}</small>}</td>
         <td>{x.needDate}</td>
@@ -256,14 +270,35 @@ function MrpSuggestions({plan,options,horizon,setHorizon,onSupplier}:{plan:Phase
 
 const PHASE_LINES:Array<{key:'gross'|'scheduled'|'plannedReceipt'|'projected';label:string;strong?:boolean}>=[{key:'gross',label:'Yalpi talab'},{key:'scheduled',label:'Rejadagi kirim'},{key:'plannedReceipt',label:'Tavsiya kirim'},{key:'projected',label:'Proyeksiya',strong:true}]
 
+/**
+ * Inter-branch transfer recommendations (audit #16): another site could spare stock for a shortage. Nothing moves here —
+ * the warehouse posts an actual transfer, after which MRP sees the stock at its new site.
+ */
+function MrpTransfers({plan}:{plan:Phased}){
+  const app=useApp(),s=app.state,navigate=useNavigate()
+  if(!plan.transfers.length)return null
+  const branch=(id:string)=>s.branches.find(b=>b.id===id)?.name||id
+  return <Card className="flush" title="Filiallararo transfer tavsiyalari" subtitle="Faqat tavsiya — zaxira transfer hujjati qayd etilgandagina ko‘chadi; xarid/ishlab chiqarish tavsiyasi o‘z joyida qoladi">
+    <div className="table-scroll"><table className="mrp-table"><thead><tr><th>Item</th><th>Yo‘nalish</th><th className="align-right">Miqdor</th><th>Kerak</th><th>Talab manbai</th><th className="align-right">Amal</th></tr></thead><tbody>
+      {plan.transfers.map(t=><tr key={t.key}>
+        <td>{itemName(s,t.itemId)}</td><td>{branch(t.fromBranchId)} → {branch(t.toBranchId)}</td>
+        <td className="align-right"><b>{qty(t.qty,itemUnitOf(s,t.itemId))}</b></td><td>{t.needDate}</td>
+        <td className="wrap">{t.refs.slice(0,3).map((r,i)=><small key={i} className="cell-sub">{REF_LABEL[r.kind]} {r.code} · {num(r.qty,2)}</small>)}</td>
+        <td className="align-right"><button type="button" className="soft-glass-btn compact" disabled={!app.can('warehouse','edit')} onClick={()=>navigate('/warehouse?view=transfers')}><Icon name="arrow-right" size={14}/>Transferga o‘tish</button></td>
+      </tr>)}
+    </tbody></table></div>
+  </Card>
+}
+
 /** The netting behind the suggestions, per item and bucket (items with any movement in the horizon). */
 function TimePhasedGrid({plan}:{plan:Phased}){
+  const s=useApp().state
   const rows=plan.rows.filter(r=>r.buckets.some(b=>b.gross||b.scheduled||b.plannedReceipt))
   if(!rows.length)return null
   return <Card className="flush" title="Vaqt bo‘yicha balans" subtitle={`Boshlang‘ich = available (qoldiq − rezerv − karantin) · safety stock bilan · ${plan.bucket==='day'?'kunlik':'haftalik'}`}>
     <div className="table-scroll"><table className="mps-grid"><thead><tr><th>Item</th><th>Qator</th>{plan.periods.map(p=><th key={p.start} className="align-right">{shortDate(p.start)}</th>)}</tr></thead>
-      <tbody>{rows.map(r=>PHASE_LINES.map((line,li)=><tr key={r.itemId+line.key} className={cls(li===0&&'group-start',line.strong&&'strong')}>
-        {li===0&&<td rowSpan={PHASE_LINES.length} className="mps-product"><div className="cell-main"><b>{r.name}</b><small>L{r.level} · {r.procurement==='make'?'Make':'Buy'} · {r.leadTime} kun{r.leadTimeSource==='missing'?' (kiritilmagan)':''}</small></div><small className="cell-sub">available {num(r.available,2)} · rezerv {num(r.reserved,2)}{r.quarantine?` · karantin ${num(r.quarantine,2)}`:''}{r.safety?` · safety ${num(r.safety)}`:''}</small></td>}
+      <tbody>{rows.map(r=>PHASE_LINES.map((line,li)=><tr key={r.branchId+r.itemId+line.key} className={cls(li===0&&'group-start',line.strong&&'strong')}>
+        {li===0&&<td rowSpan={PHASE_LINES.length} className="mps-product"><div className="cell-main"><b>{r.name}</b><small>{s.branches.find(b=>b.id===r.branchId)?.name||r.branchId} · L{r.level} · {r.procurement==='make'?'Make':'Buy'} · {r.leadTime} kun{r.leadTimeSource==='missing'?' (kiritilmagan)':''}</small></div><small className="cell-sub">available {num(r.available,2)} · rezerv {num(r.reserved,2)}{r.quarantine?` · karantin ${num(r.quarantine,2)}`:''}{r.safety?` · safety ${num(r.safety)}`:''}</small></td>}
         <td className="mps-line">{line.label}</td>
         {r.buckets.map(b=>{const v=b[line.key];return <td key={b.start} className={cls('align-right',line.key==='projected'&&v<r.safety&&'negative')}>{line.key==='plannedReceipt'?(v?<b className="mfg-text">+{num(v,2)}</b>:<span className="muted">—</span>):v?num(v,2):<span className="muted">{line.key==='projected'?num(v,2):'—'}</span>}</td>})}
       </tr>))}</tbody></table></div>
