@@ -292,8 +292,10 @@ test('P5-05: corrupted records are set aside or completed, counted and reported 
   assert.match(state.productionOrders[1].bomSnapshot.notes,/saqlanmagan/)
   assert.equal(state.stockBalances[0].onHand,12);assert.equal(state.stockBalances[0].reserved,0)
   assert.deepEqual(state.purchaseOrders[0].receipts,[])
-  assert.deepEqual(report.issues.find(i=>i.collection==='customers').duplicateIds,[s.customers[0].id],'duplicate ids are reported, both copies kept')
-  assert.equal(state.customers.length,s.customers.length)
+  assert.deepEqual(report.issues.find(i=>i.collection==='customers').duplicateIds,[s.customers[0].id],'duplicate ids are reported')
+  // Audit #14: the first copy stays in use, the later one is quarantined unchanged (no longer two records with one id).
+  assert.equal(state.customers.length,s.customers.length-1)
+  assert.deepEqual(state.quarantinedRecords,[{collection:'customers',id:s.customers[0].id,reason:'duplicate-id',record:s.customers[0]}])
   assert.equal(typeof state.settings.notifications,'object');assert.equal(typeof state.settings.policies.shiftMinutes,'number','broken settings groups fall back to defaults')
   assert.ok(PS.changedRecords(report))
   assert.match(PS.describeReport(report),/chetga olindi.*to‘ldirildi.*takroriy/)

@@ -200,7 +200,9 @@ test('P1-9/23: allocation spans warehouses (fractional balances too) and never o
   assert.equal(row.status,'Tasdiqlangan')
   assert.ok(row.items[0].reserved<=total+1e-6)
   refused(s,A.deliverSalesOrder(s,ctx(s),big.result.id),/yetarli emas/)
-  refused(s,A.deliverSalesOrder(s,ctx(s),big.result.id,{p4:-5}),/kamida bitta/)
+  // A negative delivery quantity is refused as such (audit #2), not clamped to 0.
+  refused(s,A.deliverSalesOrder(s,ctx(s),big.result.id,{p4:-5}),/manfiy/)
+  refused(s,A.deliverSalesOrder(s,ctx(s),big.result.id,{p4:0}),/kamida bitta/)
 })
 
 /* ------------------------------------------------------------ 8 returns -- */
@@ -266,7 +268,7 @@ test('P1-29: a return of a multi-lot delivery is split over the lots that were r
   const free=bal(s,'p3','w3')
   s={...s,lots:s.lots.filter(l=>!(l.itemId==='p3'&&l.warehouseId==='w3'))}
   s={...s,lots:[
-    {id:'lot-a',code:'LOT-P3-A',kind:'lot',itemId:'p3',itemType:'finished',qty:5,warehouseId:'w3',status:'available',sourceType:'adjustment',sourceId:'opening',sourceCode:'opening',createdAt:'2026-01-01 08:00',expiry:'2026-02-01',consumedBy:[]},
+    {id:'lot-a',code:'LOT-P3-A',kind:'lot',itemId:'p3',itemType:'finished',qty:5,warehouseId:'w3',status:'available',sourceType:'adjustment',sourceId:'opening',sourceCode:'opening',createdAt:'2026-01-01 08:00',expiry:'2099-02-01',consumedBy:[]},
     {id:'lot-b',code:'LOT-P3-B',kind:'lot',itemId:'p3',itemType:'finished',qty:free.onHand-5,warehouseId:'w3',status:'available',sourceType:'adjustment',sourceId:'opening',sourceCode:'opening',createdAt:'2026-01-02 08:00',consumedBy:[]},
     ...s.lots]}
   const so=A.createSalesOrder(s,ctx(s),{customerId:'cu1',mode:'Make-to-stock',lines:[{productId:'p3',qty:8}]});s=ok(so)
@@ -349,7 +351,8 @@ test('P1-6/7: quantities are validated — zero, negative, fractional units and 
   const s=fresh()
   refused(s,A.createProductionOrder(s,ctx(s),{productId:'p1',quantity:0}),/0 dan katta/)
   refused(s,A.createProductionOrder(s,ctx(s),{productId:'p1',quantity:-4}),/0 dan katta/)
-  refused(s,A.createProductionOrder(s,ctx(s),{productId:'p1',quantity:0.4}),/0 dan katta/)
+  // A fractional piece count is refused as such (audit #18), not floored to 0.
+  refused(s,A.createProductionOrder(s,ctx(s),{productId:'p1',quantity:0.4}),/butun son/)
   refused(s,A.createProductionOrder(s,ctx(s),{productId:'p-nope',quantity:4}),/tanlanmagan/)
   refused(s,A.createProductionOrder(s,ctx(s),{productId:'p1',quantity:4,warehouseId:'w-nope'}),/ombori/)
   refused(s,A.createProductionOrder(s,ctx(s),{productId:'p1',quantity:4,warehouseId:'w1'}),/ombori/)

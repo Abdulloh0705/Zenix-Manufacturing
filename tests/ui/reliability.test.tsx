@@ -1,5 +1,5 @@
 import './setup'
-import {byText,cleanup,click,flush,render} from './helpers'
+import {byText,cleanup,click,flush,render,type} from './helpers'
 import {STATE_KEY,location,mountApp,seedState,signIn} from './appFixture'
 import test,{afterEach} from 'node:test'
 import assert from 'node:assert/strict'
@@ -8,6 +8,7 @@ import App from '../../src/App'
 import {AppProvider} from '../../src/app/providers/AppProvider/AppContext'
 import {RootBoundary} from '../../src/app/RootBoundary'
 import {createInitialState} from '../../src/data/mockData'
+import {SCHEMA_VERSION} from '../../src/domain/migrations'
 
 const CORRUPT_KEY='zenix-manufacturing-v3-unreadable',REPAIR_KEY='zenix-manufacturing-v3-before-repair',SESSION_KEY='zenix-session-v1'
 const proto=Object.getPrototypeOf(localStorage) as Storage
@@ -60,6 +61,79 @@ test('a refused save shows a lasting warning until saving works again',async()=>
   await flush(60)
   assert.equal(document.querySelector('.storage-alert'),null,'the banner clears after a successful save')
   assert.equal(JSON.parse(localStorage.getItem(STATE_KEY)!).settings.fontSize,'large','the change made while failing is saved now too')
+})
+
+test('v4→v5 near the storage quota: when the pre-upgrade copy does not fit, the original stays stored and downloadable until the first change',async()=>{
+  signIn()
+  const v4={...createInitialState(),schemaVersion:4}
+  v4.employees=v4.employees.map(e=>e.id==='em1'?{...e,roleId:'role0'}:e)
+  const raw=JSON.stringify(v4)
+  localStorage.setItem(STATE_KEY,raw)
+  localStorage.setItem('zenix-manufacturing-v3-clean-start',JSON.stringify(new Date().toISOString()))
+  // Room for the working copy to be rewritten, not for a second full copy beside it.
+  const used=()=>{let n=0;for(let i=0;i<localStorage.length;i++){const k=localStorage.key(i)!;n+=k.length+(localStorage.getItem(k)||'').length}return n}
+  const limit=used()+Math.floor(raw.length/2)
+  proto.setItem=function(this:Storage,k:string,v:string){const old=localStorage.getItem(k);if(used()-(old===null?0:k.length+old.length)+k.length+v.length>limit)throw new DOMException('full','QuotaExceededError');return nativeSetItem.call(this,k,v)}
+  await mountRaw('/settings?view=system')
+  await flush(400)
+  window.dispatchEvent(new Event('pagehide'))
+  await flush(60)
+  assert.equal(localStorage.getItem('zenix-manufacturing-before-v5'),null,'the pre-upgrade copy did not fit')
+  assert.equal(localStorage.getItem(STATE_KEY),raw,'the v4 original is not written over by the load, the save timer or the close flush')
+  assert.ok(text().includes('Asl ma’lumot o‘zgartirilmadi'),'the user is told the original is held and where to download it')
+  assert.ok(text().includes('Asl ma’lumot (brauzerda nusxasi saqlanmadi)'),'the original is listed under Tiklash nusxalari')
+})
+
+/** Opens the new-customer dialog on Sales, types a name and presses save. */
+async function submitCustomer(name:string){
+  if(!dialog()){
+    await click([...document.querySelectorAll<HTMLButtonElement>('main button')].find(b=>/Yangi mijoz|Mijoz qo/.test(b.textContent||''))!)
+    await flush()
+    await type(dialog()!.querySelector<HTMLInputElement>('input')!,name)
+    const phone=[...dialog()!.querySelectorAll<HTMLInputElement>('input')].find(i=>/tel|phone|\+998/i.test(i.type+i.placeholder+i.name))
+    if(phone)await type(phone,'+998901112233')
+  }
+  await click([...dialog()!.querySelectorAll<HTMLButtonElement>('button')].find(b=>/Saqlash|Yaratish|Qo‘shish/.test(b.textContent||''))!)
+  await flush(60)
+}
+const storedCustomers=(name:string)=>(JSON.parse(localStorage.getItem(STATE_KEY)!).customers as {name:string}[]).filter(c=>c.name===name).length
+
+test('audit #9: an action whose save fails is undone, reported and its form stays open; retrying applies it once',async()=>{
+  await mountApp('/sales?view=customers')
+  proto.setItem=function(this:Storage,k:string,v:string){if(k===STATE_KEY)throw new DOMException('full','QuotaExceededError');return nativeSetItem.call(this,k,v)}
+  await submitCustomer('Saqlanmagan Mijoz')
+  assert.ok(dialog(),'the form is not closed as if it had been saved')
+  assert.ok(text().includes('Saqlanmadi'),'the user is told it was not saved')
+  assert.ok(!text().replace(dialog()!.textContent||'','').includes('Saqlanmagan Mijoz'),'the record is not shown as created')
+  assert.equal(storedCustomers('Saqlanmagan Mijoz'),0)
+  proto.setItem=nativeSetItem
+  await submitCustomer('Saqlanmagan Mijoz')
+  assert.equal(dialog(),null,'saving works again: the form closes')
+  assert.equal(storedCustomers('Saqlanmagan Mijoz'),1,'the retry creates it exactly once')
+})
+
+test('audit #8: data saved by a newer app version opens read-only — nothing is written, export is offered, no clean start',async()=>{
+  signIn()
+  const raw=JSON.stringify({...createInitialState(),schemaVersion:SCHEMA_VERSION+1,futureList:[{id:'f1'}]})
+  localStorage.setItem(STATE_KEY,raw)
+  await mountRaw('/')
+  assert.ok(text().includes('Ma’lumotlarni tiklash')&&text().includes('yangiroq versiyasida'),'the recovery screen explains why')
+  assert.ok(byText('Nusxani yuklab olish'),'the original can be exported')
+  assert.equal(byText('Toza holatda ochish'),null,'no way to replace it from this build')
+  window.dispatchEvent(new Event('pagehide'))
+  await flush(400)
+  assert.equal(localStorage.getItem(STATE_KEY),raw,'not downgraded by saves or the close flush')
+})
+
+test('audit #8: when another tab of a newer version saves, this tab stops writing instead of overwriting it',async()=>{
+  await mountApp('/sales?view=customers')
+  const newer=JSON.parse(localStorage.getItem(STATE_KEY)!)
+  newer.schemaVersion=SCHEMA_VERSION+1
+  const raw=JSON.stringify(newer)
+  nativeSetItem.call(localStorage,STATE_KEY,raw)
+  await submitCustomer('Eski Tab Mijozi')
+  assert.equal(localStorage.getItem(STATE_KEY),raw,'the newer data is left exactly as it was')
+  assert.ok(text().includes('yangiroq versiyasida'),'this tab switches to the read-only recovery screen')
 })
 
 test('a preference change continues from another tab’s newer save instead of overwriting it',async()=>{

@@ -1,15 +1,18 @@
 import {useState} from 'react'
 import {useNavigate,useSearchParams} from 'react-router-dom'
 import {useApp} from '../../../app/providers/AppProvider/AppContext'
-import {Card,Checkbox,Confirm,Drawer,Empty,Field,FilterSelect,Icon,InfoGrid,Input,KPI,Modal,MoneyInput,PageHeader,Progress,ResourceTable,Segmented,Select,StatusBadge,Tabs,Textarea,required,useForm,useRecordParam,useSearchParamState} from '../../../shared/ui'
+import {Card,Checkbox,Confirm,Drawer,RecordUnavailable,Empty,Field,FilterSelect,Icon,InfoGrid,Input,KPI,Modal,MoneyInput,PageHeader,Progress,ResourceTable,Segmented,Select,StatusBadge,Tabs,Textarea,required,useForm,useRecordParam,useSearchParamState} from '../../../shared/ui'
 import type {Customer,CustomerReturn,SalesOrder} from '../../../types'
-import {stockOf} from '../../../domain/manufacturingEngine'
-import {referenceBlocker} from '../../../domain/actions'
+import {productStockOf,returnSources} from '../../../domain/manufacturingEngine'
+import {serialTracked} from '../../../domain/serials'
+import {referenceBlocker,salesAvailable} from '../../../domain/actions'
 import {addDays,todayISO} from '../../../utils/dates'
 import {cls,compactMoney,money,num} from '../../../utils/format'
 import {customerName,productName,warehouseName} from '../../common/lookups'
 import {ActivityPanel,AttachmentsPanel} from '../../common/RecordPanels'
 import {QualityResolveModal} from '../../common/QualityResolveModal'
+import {AdjustModal,LedgerList,OrderReceivableInfo,PaymentModal,ReceivablesView} from '../components/Receivables'
+import {customerBalance,orderReceivable,paymentStatusOf} from '../../../domain/receivables'
 
 export default function Sales(){
   const [sp]=useSearchParams(),view=sp.get('view')||'overview'
@@ -17,6 +20,7 @@ export default function Sales(){
   if(view==='customers')return <Customers/>
   if(view==='delivery')return <Delivery/>
   if(view==='returns')return <Returns/>
+  if(view==='receivables')return <ReceivablesView/>
   return <Overview/>
 }
 
@@ -36,13 +40,14 @@ function Overview(){
       <KPI label="Yetkazishga tayyor" value={open.filter(o=>o.status==='Tayyor').length} sub="To‘liq rezerv" tone="mint" icon={<Icon name="check"/>} onClick={()=>navigate('/sales?view=delivery')}/>
       <KPI label="Ishlab chiqarishda (MTO)" value={open.filter(o=>o.status==='Ishlab chiqarishda').length} tone="purple" icon={<Icon name="factory"/>} onClick={()=>navigate('/sales?view=orders&status=Ishlab chiqarishda')}/>
       <KPI label="Kechikkan" value={late.length} sub="Sana o‘tgan" tone="pink" icon={<Icon name="clock"/>} onClick={()=>navigate('/sales?view=orders&late=1')}/>
+      <KPI label="Debitorlik qarzi" value={compactMoney(s.customers.reduce((a,c)=>a+Math.max(0,customerBalance(s,c.id)),0))} sub="ledger bo‘yicha" tone="orange" icon={<Icon name="wallet"/>} onClick={()=>navigate('/sales?view=receivables')}/>
     </div>
     <div className="two-col">
       <Card title="Ochiq buyurtmalar" subtitle="manba: rezerv yoki MO" actions={<button type="button" className="ghost-btn" onClick={()=>navigate('/sales?view=orders')}>Barchasi <Icon name="chevron" size={13}/></button>}>
         {open.length?<div className="stack-list">{open.map(o=>{const mo=s.productionOrders.find(m=>m.id===o.productionOrderId);return <button type="button" className="list-row is-clickable" key={o.id} onClick={()=>navigate(`/sales?view=orders&id=${o.id}`)}><span className="list-row-copy"><b>{o.code} · {customerName(s,o.customerId)}</b><small>{o.items.map(i=>`${productName(s,i.productId)} ${num(i.qty)}`).join(', ')} · {mo?`${mo.code} (${mo.status})`:`rezerv ${num(reservedQty(o))}/${num(openQty(o))}`}</small></span><StatusBadge>{o.status}</StatusBadge></button>})}</div>:<Empty compact title="Ochiq buyurtma yo‘q"/>}
       </Card>
       <Card title="Tayyor mahsulot" subtitle="sotuvga bo‘sh" actions={<button type="button" className="ghost-btn" onClick={()=>navigate('/warehouse?view=stock&type=finished')}>Ombor <Icon name="chevron" size={13}/></button>}>
-        <div className="stack-list">{finished.map(p=>{const st=stockOf(s,p.id);return <div className="list-row" key={p.id}><span className="list-row-copy"><b>{p.name}</b><small>on hand {num(st.onHand)} · rezerv {num(st.reserved)}</small></span><b className="num">{num(st.available)} {p.unit}</b></div>})}</div>
+        <div className="stack-list">{finished.map(p=>{const st=productStockOf(s,p.id);return <div className="list-row" key={p.id}><span className="list-row-copy"><b>{p.name}</b><small>on hand {num(st.onHand)} · rezerv {num(st.reserved)}</small></span><b className="num">{num(st.available)} {p.unit}</b></div>})}</div>
       </Card>
     </div>
   </div>
@@ -81,34 +86,38 @@ function SalesFormModal({onClose,onCreated,customerId}:{onClose:()=>void;onCreat
   const app=useApp(),s=app.state
   const products=s.products.filter(p=>p.status==='Faol'&&p.salePrice>0)
   const [lines,setLines]=useState<Line[]>([{productId:products[0]?.id||'',qty:'100',price:String(products[0]?.salePrice||0)}])
-  const form=useForm({customerId:customerId||s.customers.find(c=>c.status==='Faol')?.id||'',mode:'Make-to-stock' as SalesOrder['mode'],deliveryDate:addDays(todayISO(),3)},v=>({customerId:required(v.customerId,'Mijoz'),deliveryDate:v.deliveryDate<todayISO()?'O‘tgan sana':undefined}))
+  const form=useForm({customerId:customerId||s.customers.find(c=>c.status==='Faol')?.id||'',mode:'Make-to-stock' as SalesOrder['mode'],deliveryDate:addDays(todayISO(),3),branchId:''},v=>({customerId:required(v.customerId,'Mijoz'),deliveryDate:v.deliveryDate<todayISO()?'O‘tgan sana':undefined}))
+  // Free stock the seller could reserve now, of the line's own variant when the product tracks variant stock (audit #15).
+  const available=(l:Line)=>salesAvailable(s,app.currentEmployee,l.productId,todayISO(),l.variantId||undefined)
+  const needsVariant=(l:Line)=>Boolean(products.find(p=>p.id===l.productId)?.variantStock)&&!l.variantId
   const mto=form.values.mode==='Make-to-order'
   const visible=mto?lines.slice(0,1):lines
-  const lineError=(l:Line)=>!l.productId||!(Number(l.qty)>0)||Number(l.qty)%1!==0||Number(l.price)<0
+  const lineError=(l:Line)=>!l.productId||!(Number(l.qty)>0)||Number(l.qty)%1!==0||Number(l.price)<0||needsVariant(l)
   const hasErrors=visible.some(lineError)
   const total=visible.reduce((a,l)=>a+(Number(l.qty)||0)*(Number(l.price)||0),0)
-  const submit=()=>form.submit(v=>{if(hasErrors)return false;const r=app.createSalesOrder({customerId:v.customerId,mode:v.mode,deliveryDate:v.deliveryDate,lines:visible.map(l=>({productId:l.productId,variantId:l.variantId||undefined,qty:Number(l.qty),price:Number(l.price)}))});if(r.ok){onCreated?.(r.id!);onClose()}return r.ok})
+  const submit=()=>form.submit(v=>{if(hasErrors)return false;const r=app.createSalesOrder({customerId:v.customerId,mode:v.mode,deliveryDate:v.deliveryDate,branchId:v.branchId||undefined,lines:visible.map(l=>({productId:l.productId,variantId:l.variantId||undefined,qty:Number(l.qty),price:Number(l.price)}))});if(r.ok){onCreated?.(r.id!);onClose()}return r.ok})
   return <Modal open onClose={onClose} title="Yangi Sales Order" size="lg"
     footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Bekor qilish</button><span className="spacer"/><span className="soft-meta">Jami: <b>{money(total)}</b></span><button type="button" className="primary-glass-btn" onClick={submit}><Icon name="check" size={16}/>Yaratish</button></>}>
     <div className="form-stack">
       <div className="form-grid">
         <Field label="Mijoz" required error={form.error('customerId')}><Select value={form.values.customerId} onChange={v=>form.set('customerId',v)}>{s.customers.filter(c=>c.status!=='Arxiv').map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</Select></Field>
         <Field label="Yetkazish sanasi" error={form.error('deliveryDate')}><Input type="date" {...form.input('deliveryDate')}/></Field>
+        <Field label="Sotuv filiali (MRP)" hint="Bo‘sh: sizning filialingiz yoki rezerv ombori bo‘yicha"><Select value={form.values.branchId} onChange={v=>form.set('branchId',v)}><option value="">Avtomatik</option>{s.branches.filter(b=>b.status!=='Arxiv').map(b=><option key={b.id} value={b.id}>{b.name}</option>)}</Select></Field>
         <div className="field span-2"><label>Rejim</label><Segmented ariaLabel="Rejim" items={[{value:'Make-to-stock',label:'Ombordan (MTS)'},{value:'Make-to-order',label:'Buyurtmaga (MTO)'}]} value={form.values.mode} onChange={v=>form.set('mode',v as SalesOrder['mode'])}/></div>
       </div>
       <section className="editor-section">
         <div className="editor-head"><h4>Mahsulotlar</h4>{!mto&&<button type="button" className="secondary-glass-btn compact" onClick={()=>setLines(x=>[...x,{productId:products[0]?.id||'',qty:'1',price:String(products[0]?.salePrice||0)}])}><Icon name="plus" size={14}/>Qator</button>}</div>
-        <div className="table-scroll"><table className="fit editor-table"><thead><tr><th>Mahsulot</th><th className="align-right">Miqdor</th><th className="align-right">Narx</th><th className="align-right">Available</th><th/></tr></thead><tbody>{visible.map((l,i)=>{const st=stockOf(s,l.productId);return <tr key={i} className={lineError(l)?'row-danger':undefined}>
+        <div className="table-scroll"><table className="fit editor-table"><thead><tr><th>Mahsulot</th><th className="align-right">Miqdor</th><th className="align-right">Narx</th><th className="align-right">Available</th><th/></tr></thead><tbody>{visible.map((l,i)=>{const free=available(l);return <tr key={i} className={lineError(l)?'row-danger':undefined}>
           <td className="wide-cell"><Select value={l.productId} onChange={v=>setLines(x=>x.map((y,j)=>j===i?{...y,productId:v,variantId:'',price:String(products.find(p=>p.id===v)?.salePrice||0)}:y))} ariaLabel={`Mahsulot ${i+1}`}>{products.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</Select>
-            {(()=>{const p=products.find(x=>x.id===l.productId),vs=(p?.variants||[]).filter(v=>v.status==='Faol');return vs.length?<Select size="sm" value={l.variantId||''} onChange={v=>setLines(x=>x.map((y,j)=>j===i?{...y,variantId:v,price:String((p?.salePrice||0)+(vs.find(z=>z.id===v)?.priceDelta||0))}:y))} ariaLabel={`Variant ${i+1}`}><option value="">Variantsiz</option>{vs.map(v=><option key={v.id} value={v.id}>{v.code} · {v.attributes}</option>)}</Select>:null})()}</td>
+            {(()=>{const p=products.find(x=>x.id===l.productId),vs=(p?.variants||[]).filter(v=>v.status==='Faol');return vs.length?<Select size="sm" value={l.variantId||''} onChange={v=>setLines(x=>x.map((y,j)=>j===i?{...y,variantId:v,price:String((p?.salePrice||0)+(vs.find(z=>z.id===v)?.priceDelta||0))}:y))} ariaLabel={`Variant ${i+1}`}>{p?.variantStock?<option value="">Variant tanlang</option>:<option value="">Variantsiz</option>}{vs.map(v=><option key={v.id} value={v.id}>{v.code} · {v.attributes}</option>)}</Select>:null})()}</td>
           <td className="align-right"><input className="ui-input cell-input" type="number" min="1" step="1" aria-label="Miqdor" value={l.qty} onChange={e=>setLines(x=>x.map((y,j)=>j===i?{...y,qty:e.target.value}:y))}/></td>
           <td className="align-right"><div className="cell-money"><MoneyInput min="0" aria-label="Narx" value={l.price} onValue={v=>setLines(x=>x.map((y,j)=>j===i?{...y,price:v}:y))}/></div></td>
-          <td className={`align-right ${!mto&&st.available<(Number(l.qty)||0)?'negative':''}`}>{num(st.available)}</td>
+          <td className={`align-right ${!mto&&free<(Number(l.qty)||0)?'negative':''}`} title={products.find(p=>p.id===l.productId)?.variantStock?'Faqat shu variant qoldig‘i':undefined}>{needsVariant(l)?'—':num(free)}</td>
           <td className="align-right"><button type="button" className="icon-ghost danger" disabled={visible.length<2} aria-label="Qatorni o‘chirish" onClick={()=>setLines(x=>x.filter((_,j)=>j!==i))}><Icon name="trash" size={15}/></button></td>
         </tr>})}</tbody></table></div>
-        {hasErrors&&<small className="field-error">Har qatorda mahsulot va butun musbat miqdor bo‘lishi kerak.</small>}
+        {hasErrors&&<small className="field-error">Har qatorda mahsulot{visible.some(needsVariant)?', variant (variant bo‘yicha qoldiq)':''} va butun musbat miqdor bo‘lishi kerak.</small>}
       </section>
-      <div className={`inline-note ${!mto&&visible.some(l=>stockOf(s,l.productId).available<(Number(l.qty)||0))?'warning':''}`}><Icon name="info"/>{mto?'MO (qoralama) ochiladi; yakunlanganda shu buyurtmaga rezerv qilinadi.':visible.some(l=>stockOf(s,l.productId).available<(Number(l.qty)||0))?'Yetarli emas — mavjud qismi rezerv qilinadi, qolgani uchun MO kerak.':'Tayyor mahsulot darhol rezerv qilinadi.'}</div>
+      <div className={`inline-note ${!mto&&visible.some(l=>available(l)<(Number(l.qty)||0))?'warning':''}`}><Icon name="info"/>{mto?'MO (qoralama) ochiladi; yakunlanganda shu buyurtmaga rezerv qilinadi.':visible.some(l=>available(l)<(Number(l.qty)||0))?'Yetarli emas — mavjud qismi rezerv qilinadi, qolgani uchun MO kerak.':'Tayyor mahsulot darhol rezerv qilinadi.'}</div>
     </div>
   </Modal>
 }
@@ -116,21 +125,24 @@ function SalesFormModal({onClose,onCreated,customerId}:{onClose:()=>void;onCreat
 function SalesDrawer({soId,onClose}:{soId:string|null;onClose:()=>void}){
   const app=useApp()
   const so=app.state.salesOrders.find(o=>o.id===soId)
-  if(!so)return null
+  if(!so)return soId?<RecordUnavailable label="Sales order" onClose={onClose}/>:null
   return <SalesDrawerBody key={so.id} so={so} onClose={onClose}/>
 }
 
 function SalesDrawerBody({so,onClose}:{so:SalesOrder;onClose:()=>void}){
   const app=useApp(),s=app.state,navigate=useNavigate()
-  const [tab,setTab]=useState('lines'),[cancel,setCancel]=useState(false),[deliver,setDeliver]=useState(false),[ret,setRet]=useState(false)
+  const [tab,setTab]=useState('lines'),[cancel,setCancel]=useState(false),[deliver,setDeliver]=useState(false),[ret,setRet]=useState(false),[pay,setPay]=useState(false)
   const mo=s.productionOrders.find(o=>o.id===so.productionOrderId)
   const open=OPEN_SO.includes(so.status)
   const canEdit=app.can('sales','edit')
   const shipments=s.stockMovements.filter(m=>m.type==='Sale -'&&m.source===so.code)
+  const customer=s.customers.find(c=>c.id===so.customerId)
+  const ledgerStatus=orderReceivable(s,so.id).status
   const returns=s.returns.filter(r=>r.salesOrderId===so.id)
-  const shortage=so.items.some(i=>i.qty-i.delivered-(i.reserved||0)>stockOf(s,i.productId).available)
+  // Only stock this person may ship counts: active Finished/Mixed stores in their scope, unexpired, unreserved (audit #5).
+  const shortage=so.items.some(i=>i.qty-i.delivered-(i.reserved||0)>salesAvailable(s,app.currentEmployee,i.productId,todayISO(),i.variantId))
   return <Drawer open onClose={onClose} title={so.code} eyebrow="Sales order" icon="truck" size="lg" subtitle={`${customerName(s,so.customerId)} · yetkazish ${so.deliveryDate}`}
-    headerExtra={<><StatusBadge>{so.status}</StatusBadge><StatusBadge>{so.mode}</StatusBadge><StatusBadge>{so.paymentStatus}</StatusBadge></>}
+    headerExtra={<><StatusBadge>{so.status}</StatusBadge><StatusBadge>{so.mode}</StatusBadge><StatusBadge>{paymentStatusOf(s,so)}</StatusBadge></>}
     actions={<>
       {open&&canEdit&&<button type="button" className="ghost-btn" onClick={()=>setCancel(true)}><Icon name="x" size={15}/>Bekor qilish</button>}
       {so.status==='Yetkazildi'&&app.can('sales','create')&&<button type="button" className="secondary-glass-btn" onClick={()=>setRet(true)}><Icon name="undo" size={15}/>Qaytarish</button>}
@@ -144,16 +156,22 @@ function SalesDrawerBody({so,onClose}:{so:SalesOrder;onClose:()=>void}){
       {mo?<button type="button" className="list-row is-clickable" onClick={()=>navigate(`/production?view=orders&id=${mo.id}`)}><span className="list-row-copy"><b>{mo.code} · MTO ishlab chiqarish</b><small>{num(mo.completed)}/{num(mo.quantity)} · due {mo.due} · {mo.progress}%</small></span><StatusBadge>{mo.status}</StatusBadge></button>:<p className="soft-meta">Make-to-stock: tayyor mahsulot ombordan rezerv qilinadi.</p>}
       {shipments.length?<div className="stack-list">{shipments.map(m=><div className="list-row" key={m.id}><span className="list-row-copy"><b>{productName(s,m.itemId)} · {num(-m.qty)}</b><small>{m.date} · {warehouseName(s,m.warehouseId)}{m.lot?` · ${m.lot}`:''}</small></span>{m.lot&&<button type="button" className="ghost-btn" onClick={()=>navigate(`/reports?view=traceability&q=${encodeURIComponent(m.lot!.split('…')[0])}`)}>Trace</button>}</div>)}</div>:open?<Empty compact title="Hali jo‘natilmagan"/>:null}
     </>}
-    {tab==='finance'&&<div className="form-grid">
-      <Field label="To‘lov holati"><Select value={so.paymentStatus} disabled={!canEdit||so.status==='Bekor'} onChange={v=>app.updateSalesMeta(so.id,{paymentStatus:v})}>{['To‘lanmagan','Qisman','To‘langan'].map(x=><option key={x} value={x}>{x}</option>)}</Select></Field>
-      <Field label="Yetkazish sanasi"><Input type="date" value={so.deliveryDate} disabled={!canEdit||!open} onChange={e=>e.target.value&&app.updateSalesMeta(so.id,{deliveryDate:e.target.value})}/></Field>
-      <InfoGrid items={[{label:'Summa',value:money(so.total)},{label:'Mijoz qarzi',value:money(s.customers.find(c=>c.id===so.customerId)?.debt||0)}]}/>
+    {tab==='finance'&&<div className="form-stack">
+      <OrderReceivableInfo so={so}/>
+      <div className="form-grid">
+        {/* An invoiced order's payment status follows its ledger; only an order from before the ledger keeps a typed status. */}
+        <Field label="To‘lov holati" hint={ledgerStatus?'To‘lovlardan hisoblanadi':'Ledgerdan oldingi buyurtma'}><Select value={paymentStatusOf(s,so)} disabled={!canEdit||so.status==='Bekor'||Boolean(ledgerStatus)} onChange={v=>app.updateSalesMeta(so.id,{paymentStatus:v})}>{['To‘lanmagan','Qisman','To‘langan'].map(x=><option key={x} value={x}>{x}</option>)}</Select></Field>
+        <Field label="Yetkazish sanasi"><Input type="date" value={so.deliveryDate} disabled={!canEdit||!open} onChange={e=>e.target.value&&app.updateSalesMeta(so.id,{deliveryDate:e.target.value})}/></Field>
+      </div>
+      <InfoGrid items={[{label:'Buyurtma summasi',value:money(so.total)},{label:'Mijoz qarzi (ledger)',value:money(customerBalance(s,so.customerId))}]}/>
+      {canEdit&&customer&&ledgerStatus&&ledgerStatus!=='To‘langan'&&<div><button type="button" className="primary-glass-btn compact" onClick={()=>setPay(true)}><Icon name="wallet" size={15}/>To‘lov qabul qilish</button></div>}
     </div>}
+    {pay&&customer&&<PaymentModal customer={customer} order={so} onClose={()=>setPay(false)}/>}
     {tab==='returns'&&(returns.length?<div className="stack-list">{returns.map(r=><button type="button" key={r.id} className="list-row is-clickable" onClick={()=>navigate(`/sales?view=returns&id=${r.id}`)}><span className="list-row-copy"><b>{r.code} · {productName(s,r.productId)} {num(r.qty)}</b><small>{r.reason}</small></span><StatusBadge>{r.status}</StatusBadge></button>)}</div>:<Empty compact title="Qaytarish yo‘q"/>)}
     {tab==='docs'&&<AttachmentsPanel entityType="sales" entityId={so.id} canEdit={canEdit}/>}
     {tab==='history'&&<ActivityPanel sources={[so.code]}/>}
     <Confirm open={cancel} onClose={()=>setCancel(false)} onConfirm={()=>app.cancelSalesOrder(so.id)} danger title={`${so.code} bekor qilinsinmi?`} text={`Rezerv qaytariladi.${mo?` Bog‘langan ${mo.code}: qoralama bo‘lsa bekor qilinadi, aks holda ombor uchun davom etadi.`:''}`} confirmText="Buyurtmani bekor qilish"/>
-    <Confirm open={deliver} onClose={()=>setDeliver(false)} onConfirm={()=>app.deliverSalesOrder(so.id)} title="Yetkazib berish" text={`${so.items.map(i=>`${productName(s,i.productId)} × ${num(i.qty-i.delivered)}`).join(', ')} ombordan chiqim qilinadi (FIFO lot).`} confirmText="Yetkazildi"/>
+    <Confirm open={deliver} onClose={()=>setDeliver(false)} onConfirm={()=>app.deliverSalesOrder(so.id)} title="Yetkazib berish" text={`${so.items.map(i=>`${productName(s,i.productId)} × ${num(i.qty-i.delivered)}`).join(', ')} ombordan chiqim qilinadi (rezerv qilingan lotlar, keyin FEFO).`} confirmText="Yetkazildi"/>
     {ret&&<ReturnModal defaultSo={so.id} onClose={()=>setRet(false)}/>}
   </Drawer>
 }
@@ -175,7 +193,7 @@ function Customers(){
         {key:'status',label:'Status',value:c=>c.status,render:c=><StatusBadge>{c.status}</StatusBadge>},
         {key:'orders',label:'Buyurtmalar',align:'right',value:c=>s.salesOrders.filter(o=>o.customerId===c.id).length},
         {key:'revenue',label:'Savdo hajmi',align:'right',value:c=>s.salesOrders.filter(o=>o.customerId===c.id&&o.status!=='Bekor').reduce((a,o)=>a+o.total,0),render:c=>compactMoney(s.salesOrders.filter(o=>o.customerId===c.id&&o.status!=='Bekor').reduce((a,o)=>a+o.total,0))},
-        {key:'debt',label:'Qarz',align:'right',value:c=>c.debt,render:c=>money(c.debt)},
+        {key:'debt',label:'Qarz',align:'right',value:c=>customerBalance(s,c.id),render:c=>money(customerBalance(s,c.id))},
       ]}/>
     {edit&&<CustomerModal customer={edit==='new'?undefined:edit} onClose={()=>setEdit(null)}/>}
     {customer&&<CustomerDrawer key={customer.id} customer={customer} onClose={()=>setId(null)} onEdit={()=>setEdit(customer)}/>}
@@ -184,30 +202,37 @@ function Customers(){
 
 function CustomerModal({customer,onClose}:{customer?:Customer;onClose:()=>void}){
   const app=useApp(),s=app.state
-  const form=useForm({name:customer?.name||'',phone:customer?.phone||'+998 ',email:customer?.email||'',type:customer?.type||'B2B',status:customer?.status||'Faol',debt:String(customer?.debt??0)},v=>({name:required(v.name,'Nomi')||(s.customers.some(c=>c.id!==customer?.id&&c.name.toLowerCase()===v.name.trim().toLowerCase())?'Bu mijoz mavjud':undefined),phone:/\d{7,}/.test(v.phone.replace(/\D/g,''))?undefined:'Telefonni to‘liq kiriting',email:v.email&&!/^\S+@\S+\.\S+$/.test(v.email)?'Email noto‘g‘ri':undefined,debt:Number(v.debt)>=0?undefined:'Qarz manfiy bo‘lmasin'}))
+  const form=useForm({name:customer?.name||'',phone:customer?.phone||'+998 ',email:customer?.email||'',type:customer?.type||'B2B',status:customer?.status||'Faol',debt:''},v=>({name:required(v.name,'Nomi')||(s.customers.some(c=>c.id!==customer?.id&&c.name.toLowerCase()===v.name.trim().toLowerCase())?'Bu mijoz mavjud':undefined),phone:/\d{7,}/.test(v.phone.replace(/\D/g,''))?undefined:'Telefonni to‘liq kiriting',email:v.email&&!/^\S+@\S+\.\S+$/.test(v.email)?'Email noto‘g‘ri':undefined,debt:!v.debt||Number(v.debt)>=0?undefined:'Qarz manfiy bo‘lmasin'}))
   return <Modal open onClose={onClose} title={customer?'Mijozni tahrirlash':'Yangi mijoz'} size="md"
-    footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Bekor qilish</button><button type="button" className="primary-glass-btn" onClick={()=>form.submit(v=>{const payload={name:v.name.trim(),phone:v.phone.trim(),email:v.email.trim()||undefined,type:v.type,status:v.status,debt:Number(v.debt)};const r=customer?app.updateEntity('customers',customer.id,payload):app.createEntity('customers',payload);if(r.ok)onClose();return r.ok})}>Saqlash</button></>}>
+    footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Bekor qilish</button><button type="button" className="primary-glass-btn" onClick={()=>form.submit(v=>{const payload={name:v.name.trim(),phone:v.phone.trim(),email:v.email.trim()||undefined,type:v.type,status:v.status,...(customer?{}:{debt:Number(v.debt)||0})};const r=customer?app.updateEntity('customers',customer.id,payload):app.createEntity('customers',payload);if(r.ok)onClose();return r.ok})}>Saqlash</button></>}>
     <div className="form-grid">
       <Field className="span-2" label="Nomi" required error={form.error('name')}><Input {...form.input('name')} autoFocus/></Field>
       <Field label="Telefon" required error={form.error('phone')}><Input type="tel" {...form.input('phone')}/></Field>
       <Field label="Email" error={form.error('email')}><Input type="email" {...form.input('email')}/></Field>
       <Field label="Tur"><Select value={form.values.type} onChange={v=>form.set('type',v)}>{['B2B','Diler','Distribyutor','B2C'].map(x=><option key={x} value={x}>{x}</option>)}</Select></Field>
       <Field label="Status"><Select value={form.values.status} onChange={v=>form.set('status',v)}><option value="Faol">Faol</option><option value="Arxiv">Arxiv</option></Select></Field>
-      <Field label="Joriy qarz" error={form.error('debt')}><MoneyInput min="0" {...form.money('debt')}/></Field>
+      {customer?<Field label="Qarz (ledger)" hint="To‘lov, qaytarish yoki tasdiqlangan tuzatish orqali o‘zgaradi"><Input readOnly value={money(customerBalance(s,customer.id))}/></Field>
+        :<Field label="Boshlang‘ich qarz" hint="Ixtiyoriy · ledgerga boshlang‘ich qoldiq bo‘lib yoziladi" error={form.error('debt')}><MoneyInput min="0" {...form.money('debt')}/></Field>}
     </div>
   </Modal>
 }
 
 function CustomerDrawer({customer,onClose,onEdit}:{customer:Customer;onClose:()=>void;onEdit:()=>void}){
   const app=useApp(),s=app.state,navigate=useNavigate()
-  const [remove,setRemove]=useState(false),[order,setOrder]=useState(false)
+  const [remove,setRemove]=useState(false),[order,setOrder]=useState(false),[pay,setPay]=useState(false),[adjust,setAdjust]=useState(false),[tab,setTab]=useState('orders')
+  const balance=customerBalance(s,customer.id)
   const orders=s.salesOrders.filter(o=>o.customerId===customer.id)
   const returns=s.returns.filter(r=>r.customerId===customer.id)
   const blocker=referenceBlocker(s,'customers',customer.id)
+  const customerLedgerCount=(s.receivables||[]).filter(e=>e.customerId===customer.id).length
   return <Drawer open onClose={onClose} title={customer.name} eyebrow="Mijoz" icon="users" size="lg" subtitle={`${customer.phone}${customer.email?` · ${customer.email}`:''} · ${customer.type}`} headerExtra={<StatusBadge>{customer.status}</StatusBadge>}
     actions={<>{app.can('sales','delete')&&<button type="button" className="ghost-btn" onClick={()=>setRemove(true)}><Icon name="trash" size={15}/>O‘chirish</button>}<span className="spacer"/>{app.can('sales','create')&&customer.status==='Faol'&&<button type="button" className="secondary-glass-btn" onClick={()=>setOrder(true)}><Icon name="plus" size={15}/>Yangi buyurtma</button>}{app.can('sales','edit')&&<button type="button" className="primary-glass-btn" onClick={onEdit}><Icon name="edit" size={16}/>Tahrirlash</button>}</>}>
-    <InfoGrid items={[{label:'Buyurtmalar',value:orders.length},{label:'Savdo hajmi',value:money(orders.filter(o=>o.status!=='Bekor').reduce((a,o)=>a+o.total,0))},{label:'Ochiq',value:orders.filter(o=>OPEN_SO.includes(o.status)).length},{label:'Qarz',value:money(customer.debt),tone:customer.debt>0?'warning':undefined},{label:'Qaytarishlar',value:returns.length}]}/>
-    {orders.length?<div className="stack-list">{orders.map(o=><button type="button" className="list-row is-clickable" key={o.id} onClick={()=>navigate(`/sales?view=orders&id=${o.id}`)}><span className="list-row-copy"><b>{o.code}</b><small>{o.items.map(i=>`${productName(s,i.productId)} ${num(i.qty)}`).join(', ')} · {o.deliveryDate}</small></span><span className="list-row-meta"><b>{compactMoney(o.total)}</b><StatusBadge>{o.status}</StatusBadge></span></button>)}</div>:<Empty compact title="Buyurtma yo‘q"/>}
+    <InfoGrid items={[{label:'Buyurtmalar',value:orders.length},{label:'Savdo hajmi',value:money(orders.filter(o=>o.status!=='Bekor').reduce((a,o)=>a+o.total,0))},{label:'Ochiq',value:orders.filter(o=>OPEN_SO.includes(o.status)).length},{label:'Qarz (ledger)',value:money(balance),tone:balance>0.005?'warning':undefined},{label:'Qaytarishlar',value:returns.length}]}/>
+    <div className="form-actions">{app.can('sales','edit')&&<button type="button" className="secondary-glass-btn compact" disabled={balance<=0.005} title={balance<=0.005?'Ochiq qarz yo‘q':undefined} onClick={()=>setPay(true)}><Icon name="wallet" size={15}/>To‘lov qabul qilish</button>}{app.can('sales','approve')&&<button type="button" className="ghost-btn compact" onClick={()=>setAdjust(true)}><Icon name="edit" size={15}/>Qarzni tuzatish</button>}</div>
+    <Tabs items={[{value:'orders',label:'Buyurtmalar',count:orders.length},{value:'ledger',label:'Qarz tarixi',count:customerLedgerCount}]} active={tab} onChange={setTab}/>
+    {tab==='ledger'?<LedgerList customerId={customer.id}/>:orders.length?<div className="stack-list">{orders.map(o=><button type="button" className="list-row is-clickable" key={o.id} onClick={()=>navigate(`/sales?view=orders&id=${o.id}`)}><span className="list-row-copy"><b>{o.code}</b><small>{o.items.map(i=>`${productName(s,i.productId)} ${num(i.qty)}`).join(', ')} · {o.deliveryDate}</small></span><span className="list-row-meta"><b>{compactMoney(o.total)}</b><StatusBadge>{paymentStatusOf(s,o)}</StatusBadge><StatusBadge>{o.status}</StatusBadge></span></button>)}</div>:<Empty compact title="Buyurtma yo‘q"/>}
+    {pay&&<PaymentModal customer={customer} onClose={()=>setPay(false)}/>}
+    {adjust&&<AdjustModal customer={customer} onClose={()=>setAdjust(false)}/>}
     <AttachmentsPanel entityType="customer" entityId={customer.id} canEdit={app.can('sales','edit')}/>
     {order&&<SalesFormModal customerId={customer.id} onClose={()=>setOrder(false)}/>}
     <Confirm open={remove} onClose={()=>setRemove(false)} onConfirm={()=>{if(app.deleteEntity('customers',customer.id).ok)onClose()}} danger title="Mijoz o‘chirilsinmi?" text={blocker?`O‘chirib bo‘lmaydi: ${blocker}. Status’ni “Arxiv” qiling.`:'Mijoz butunlay o‘chiriladi.'} confirmText="O‘chirish"/>
@@ -221,12 +246,12 @@ function Delivery(){
   return <div className="page-stack">
     <PageHeader title="Yetkazib berish" subtitle="Sana bo‘yicha navbat · lot FIFO"/>
     {rows.length?<div className="card flush"><div className="table-scroll"><table className="delivery-table"><thead><tr><th>Buyurtma</th><th>Mahsulot</th><th className="align-right">Yetkaziladi</th><th className="align-right">Rezerv</th><th className="align-right">Available</th><th>Sana</th><th>Holat</th><th className="align-right">Amal</th></tr></thead><tbody>
-      {rows.map(o=>{const ready=o.items.some(i=>(i.reserved||0)+stockOf(s,i.productId).available>0);const late=o.deliveryDate<todayISO();return o.items.map((i,idx)=><tr key={o.id+i.productId} className={cls(idx===0&&'group-start',late&&'row-danger')}>
+      {rows.map(o=>{const ready=o.items.some(i=>(i.reserved||0)+salesAvailable(s,app.currentEmployee,i.productId,todayISO(),i.variantId)>0);const late=o.deliveryDate<todayISO();return o.items.map((i,idx)=><tr key={o.id+i.productId} className={cls(idx===0&&'group-start',late&&'row-danger')}>
         {idx===0&&<td rowSpan={o.items.length}><div className="cell-main"><button type="button" className="link-btn" onClick={()=>navigate(`/sales?view=orders&id=${o.id}`)}><b>{o.code}</b></button><small>{customerName(s,o.customerId)} · {o.mode}</small></div></td>}
         <td>{productName(s,i.productId)}</td>
         <td className="align-right"><b>{num(i.qty-i.delivered)}</b></td>
         <td className="align-right">{num(i.reserved||0)}</td>
-        <td className="align-right">{num(stockOf(s,i.productId).available)}</td>
+        <td className="align-right">{num(salesAvailable(s,app.currentEmployee,i.productId,todayISO(),i.variantId))}</td>
         {idx===0&&<td rowSpan={o.items.length} className={late?'negative':undefined}>{o.deliveryDate}</td>}
         {idx===0&&<td rowSpan={o.items.length}><StatusBadge tone={late?'danger':ready?'success':'warning'}>{late?'Kechikkan':ready?'Tayyor':o.status}</StatusBadge></td>}
         {idx===0&&<td rowSpan={o.items.length} className="align-right"><button type="button" className="primary-glass-btn compact" disabled={!ready||!app.can('sales','edit')} title={ready?undefined:'Yetkazish uchun available yoki rezerv stock yo‘q'} onClick={()=>setConfirm(o)}><Icon name="truck" size={14}/>Yetkazildi</button></td>}
@@ -244,7 +269,7 @@ function DeliveryModal({order,onClose}:{order:SalesOrder;onClose:()=>void}){
   const save=()=>{if(errors.length||total<=0)return;const r=app.deliverSalesOrder(order.id,Object.fromEntries(order.items.map(i=>[i.productId,Number(amounts[i.productId])||0])));if(r.ok)onClose()}
   return <Modal open onClose={onClose} title="Yetkazib berish" eyebrow={order.code} subtitle="Qisman yoki to‘liq yetkazish · rezerv avval ishlatiladi" size="md"
     footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Bekor qilish</button><button type="button" className="primary-glass-btn" disabled={Boolean(errors.length)||total<=0||!app.can('sales','edit')} onClick={save}><Icon name="truck" size={15}/>Yetkazishni tasdiqlash</button></>}>
-    <div className="stack-list">{order.items.map(i=>{const open=i.qty-i.delivered,available=stockOf(s,i.productId).available;return <div className="list-row" key={i.productId}><span className="list-row-copy"><b>{productName(s,i.productId)}</b><small>Qolgan {num(open)} · rezerv {num(i.reserved||0)} · available {num(available)}</small></span><div style={{width:120}}><Input type="number" min="0" max={open} step="1" value={amounts[i.productId]||''} onChange={e=>setAmounts(x=>({...x,[i.productId]:e.target.value}))}/></div></div>})}</div>
+    <div className="stack-list">{order.items.map(i=>{const open=i.qty-i.delivered,available=salesAvailable(s,app.currentEmployee,i.productId,todayISO(),i.variantId);return <div className="list-row" key={i.productId}><span className="list-row-copy"><b>{productName(s,i.productId)}</b><small>Qolgan {num(open)} · rezerv {num(i.reserved||0)} · available {num(available)}</small></span><div style={{width:120}}><Input type="number" min="0" max={open} step="1" value={amounts[i.productId]||''} onChange={e=>setAmounts(x=>({...x,[i.productId]:e.target.value}))}/></div></div>})}</div>
     {errors.length>0&&<div className="inline-note warning"><Icon name="warning"/>{errors[0]}</div>}
   </Modal>
 }
@@ -255,12 +280,18 @@ function ReturnModal({defaultSo,onClose}:{defaultSo?:string;onClose:()=>void}){
   const form=useForm({salesOrderId:defaultSo||delivered[0]?.id||'',productId:'',qty:'1',reason:''},v=>{const so=s.salesOrders.find(o=>o.id===v.salesOrderId);const line=so?.items.find(i=>i.productId===(v.productId||so?.items[0]?.productId));const returned=s.returns.filter(r=>r.salesOrderId===v.salesOrderId&&r.productId===line?.productId).reduce((a,r)=>a+r.qty,0);const max=(line?.delivered||0)-returned;return {salesOrderId:so?undefined:'Buyurtma tanlang',qty:!(Number(v.qty)>0)?'Miqdor kiriting':Number(v.qty)>max?`Maksimum ${max}`:undefined,reason:required(v.reason,'Sabab')}})
   const so=s.salesOrders.find(o=>o.id===form.values.salesOrderId)
   const productId=form.values.productId||so?.items[0]?.productId||''
+  // Serial-tracked units come back by their numbers: the units this order shipped and no return took back (audit #25).
+  const units=so&&serialTracked(s,productId)?returnSources(s,so,productId,0).units:[]
+  const [serials,setSerials]=useState<string[]>([])
+  const serialError=units.length&&serials.length!==Number(form.values.qty)?`${form.values.qty} ta serial tanlang (${serials.length})`:undefined
   return <Modal open onClose={onClose} title="Mijoz qaytarishi" subtitle="Inspection → omborga / rework / scrap" size="md"
-    footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Bekor qilish</button><button type="button" className="primary-glass-btn" onClick={()=>form.submit(v=>{const r=app.createReturn({salesOrderId:v.salesOrderId,productId,qty:Number(v.qty),reason:v.reason});if(r.ok)onClose();return r.ok})}>Inspectionga yuborish</button></>}>
+    footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Bekor qilish</button><button type="button" className="primary-glass-btn" disabled={Boolean(serialError)} onClick={()=>form.submit(v=>{const r=app.createReturn({salesOrderId:v.salesOrderId,productId,qty:Number(v.qty),reason:v.reason,...(units.length?{serials}:{})});if(r.ok)onClose();return r.ok})}>Inspectionga yuborish</button></>}>
     {delivered.length?<div className="form-grid">
       <Field label="Sales order" required error={form.error('salesOrderId')}><Select value={form.values.salesOrderId} onChange={v=>{form.set('salesOrderId',v);form.set('productId','')}}>{delivered.map(o=><option key={o.id} value={o.id}>{o.code} · {customerName(s,o.customerId)}</option>)}</Select></Field>
       <Field label="Mahsulot"><Select value={productId} onChange={v=>form.set('productId',v)}>{(so?.items||[]).filter(i=>i.delivered>0).map(i=><option key={i.productId} value={i.productId}>{productName(s,i.productId)} · {num(i.delivered)} yetkazilgan</option>)}</Select></Field>
       <Field label="Miqdor" required error={form.error('qty')}><Input type="number" min="1" {...form.input('qty')}/></Field>
+      {units.length>0&&<div className="field span-2"><label>Qaytarilayotgan serial raqamlar {serialError?<small className="field-error">{serialError}</small>:null}</label>
+        <div className="badge-row">{units.map(code=><Checkbox key={code} label={code} checked={serials.includes(code)} onChange={on=>setSerials(x=>on?[...x,code]:x.filter(c=>c!==code))}/>)}</div></div>}
       <Field className="span-2" label="Sabab" required error={form.error('reason')}><Textarea {...form.input('reason')} placeholder="Nuqson tavsifi"/></Field>
     </div>:<Empty compact title="Yetkazilgan buyurtma yo‘q"/>}
   </Modal>

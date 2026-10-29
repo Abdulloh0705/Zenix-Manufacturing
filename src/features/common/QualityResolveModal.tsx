@@ -1,6 +1,6 @@
 import {useState} from 'react'
 import {useApp} from '../../app/providers/AppProvider/AppContext'
-import {Field,Icon,Input,Modal,Segmented,StatusBadge,Textarea,useForm} from '../../shared/ui'
+import {Checkbox,Field,Icon,Input,Modal,Segmented,StatusBadge,Textarea,useForm} from '../../shared/ui'
 import type {QualityCheck} from '../../types'
 import {sourceLabel} from '../../domain/actions'
 import {receiptQuantities,rejectedOpen} from '../../domain/supplierMaterials'
@@ -26,6 +26,9 @@ function ResolveForm({check,onClose}:{check:QualityCheck;onClose:()=>void}){
   const po=check.sourceType==='purchase'?s.purchaseOrders.find(p=>p.id===check.sourceId):undefined
   const receipt=po?.receipts.find(r=>r.id===check.receiptId)
   const receiptQty=receipt?.qty??0,unit=itemUnitOf(s,check.itemId)
+  // Serial units of this receipt still in QC: a partial decision names which ones are rejected (audit #25).
+  const units=receipt?.lot?s.lots.filter(l=>l.kind==='serial'&&l.batch===receipt.lot&&l.itemId===check.itemId&&l.qty>0&&l.status==='quarantine').map(l=>l.code).sort():[]
+  const [rejected,setRejected]=useState<string[]>([])
   const form=useForm({status:'Passed' as QualityCheck['status'],reason:'',measured:check.measured||'',qty:'',accepted:String(receiptQty)},v=>{
     const acc=Number(v.accepted),split=Boolean(receipt)&&(v.status==='Passed'||v.status==='Failed')
     return {reason:(v.status!=='Passed'||(split&&acc<receiptQty))&&!v.reason.trim()?'Rad etilgan qism yoki Hold / Failed / Rework / Scrap uchun sabab majburiy':undefined,qty:v.qty!==''&&!(Number.isInteger(Number(v.qty))&&Number(v.qty)>0)?'Musbat butun son':undefined,
@@ -35,7 +38,7 @@ function ResolveForm({check,onClose}:{check:QualityCheck;onClose:()=>void}){
   const reasonNeeded=form.values.status!=='Passed'||(splitting&&Number(form.values.accepted)<receiptQty)
   const save=()=>form.submit(v=>{
     const r=splitting
-      ?app.inspectReceipt(check.id,Number(v.accepted),v.reason.trim(),v.measured.trim())
+      ?app.inspectReceipt(check.id,Number(v.accepted),v.reason.trim(),v.measured.trim(),units.length?rejected:undefined)
       :app.resolveQuality(check.id,v.status,v.reason.trim(),v.measured.trim(),order&&v.status==='Scrap'&&v.qty!==''?Number(v.qty):undefined)
     if(r.ok)onClose();return r.ok
   })
@@ -54,6 +57,8 @@ function ResolveForm({check,onClose}:{check:QualityCheck;onClose:()=>void}){
       {readOnly?<div className="detail-grid cols-2"><div className="info-cell"><span>Natija</span><b><StatusBadge>{check.status}</StatusBadge></b></div><div className="info-cell"><span>O‘lchov</span><b>{check.measured||'—'}</b></div><div className="info-cell"><span>Inspector</span><b>{s.employees.find(e=>e.id===check.inspectorId)?.name||'—'}</b></div><div className="info-cell"><span>Sana</span><b>{check.date}</b></div>{check.reason&&<div className="info-cell span-all"><span>Izoh</span><b>{check.reason}</b></div>}{split&&split.inspection!=='pending'&&<div className="info-cell span-all"><span>Qabul taqsimoti</span><b>{num(split.accepted,3)} qabul · {num(split.rejected,3)} rad · {num(split.returned,3)} qaytarilgan · {num(split.scrapped,3)} scrap {unit}{open>0?` · qaror kutmoqda ${num(open,3)}`:''}</b></div>}</div>:<>
         <div className="field"><label>Natija</label><Segmented ariaLabel="Natija" items={check.sourceType==='subcontract'?['Passed','Scrap']:RESULTS} value={form.values.status} onChange={v=>form.set('status',v as QualityCheck['status'])}/></div>
         {splitting&&<Field label={`Qabul qilinadigan miqdor (${unit})`} error={form.error('accepted')} hint={`Qabul: ${num(receiptQty,3)} ${unit} · qolgani rad etiladi va karantinda qoladi (qaytarish yoki scrap)`}><Input type="number" min="0" step="any" max={receiptQty} value={form.values.accepted} onChange={e=>form.set('accepted',e.target.value)}/></Field>}
+        {splitting&&units.length>0&&Number(form.values.accepted)<receiptQty&&<div className="field"><label>Rad etilgan serial raqamlar ({rejected.length}/{Math.max(0,receiptQty-Number(form.values.accepted))})</label>
+          <div className="badge-row">{units.map(code=><Checkbox key={code} label={code} checked={rejected.includes(code)} onChange={on=>setRejected(r=>on?[...r,code]:r.filter(x=>x!==code))}/>)}</div></div>}
         <Field label="O‘lchov / kuzatuv"><Input value={form.values.measured} onChange={e=>form.set('measured',e.target.value)} placeholder="Masalan: 0.18 mm, vizual OK"/></Field>
         {order&&form.values.status==='Scrap'&&<Field label="Scrap miqdori" error={form.error('qty')} hint={`${order.code}: material sarflanadi, scrap hisobga olinadi · bo‘sh = faqat qaror`}><Input type="number" min="1" step="1" {...form.input('qty')}/></Field>}
         <Field label="Sabab / izoh" required={reasonNeeded} error={form.error('reason')}><Textarea {...form.input('reason')} placeholder={reasonNeeded?'Nuqson tavsifi, joyi va miqdori':'Ixtiyoriy izoh'}/></Field>

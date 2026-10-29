@@ -146,7 +146,12 @@ test('BUG-12: an item unit cannot change once quantities exist in it, and BOM li
   s=createInitialState()
   const draft=A.createBomDraft(s,ctx(s),'p1');s=ok(draft)
   const bom=s.boms.find(b=>b.id===draft.result.id)
-  refused(A.saveBom(s,ctx(s),{...bom,components:bom.components.map(c=>c.materialId==='rm1'?{...c,unit:'g'}:c)}),/birligi/)
+  // Audit #24 superseded "no conversion": a compatible unit is stored with its exact factor; another dimension is refused.
+  refused(A.saveBom(s,ctx(s),{...bom,components:bom.components.map(c=>c.materialId==='rm1'?{...c,unit:'l'}:c)}),/konversiyasi mumkin emas/)
+  refused(A.saveBom(s,ctx(s),{...bom,components:bom.components.map(c=>c.materialId==='rm1'?{...c,unit:'quti'}:c)}),/koeffitsiyenti yo‘q/)
+  const saved=ok(A.saveBom(s,ctx(s),{...bom,components:bom.components.map(c=>c.materialId==='rm1'?{...c,unit:'g',qty:c.qty*1000}:c)}))
+  const line=saved.boms.find(b=>b.id===bom.id).components.find(c=>c.materialId==='rm1')
+  assert.equal(line.factor,0.001)
 })
 
 test('BUG-13: the same output report submitted twice is posted once',()=>{
@@ -369,10 +374,13 @@ test('B3-05: expired material is neither received nor issued',()=>{
   // Older data: an expired lot is the only usable stock left.
   s={...s,lots:s.lots.map(l=>l.itemId==='rm1'&&l.qty>0?{...l,expiry:addDays(today(),-1)}:l)}
   const c=A.createProductionOrder(s,ctx(s),{productId:'p1',quantity:1});s=ok(c)
-  s=ok(A.transitionProduction(s,ctx(s),c.result.id,'Tasdiqlangan'))
-  s=ok(A.transitionProduction(s,ctx(s),c.result.id,'Jarayonda'))
-  const r=A.reportOutput(s,ctx(s),c.result.id,1,0)
-  if(r.result.ok)assert.ok(!r.state.productionOrders.find(o=>o.id===c.result.id).consumed.some(x=>x.lot&&s.lots.find(l=>l.code===x.lot)?.expiry<today()),'no expired lot consumed')
+  // Expired stock is not reservable either (audit #10): confirmation waits for material instead of reserving it.
+  const confirmed=A.transitionProduction(s,ctx(s),c.result.id,'Tasdiqlangan')
+  assert.equal(confirmed.result.ok,false)
+  assert.match(confirmed.result.message,/Alyuminiy billet/)
+  const mo=confirmed.state.productionOrders.find(o=>o.id===c.result.id)
+  assert.equal(mo.status,'Material kutilmoqda')
+  assert.equal(mo.materialReserved,false,'no reservation on expired stock')
 })
 
 test('B3-06: a draft under an open ECO is activated only by applying the ECO',()=>{

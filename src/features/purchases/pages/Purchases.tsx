@@ -2,11 +2,13 @@ import {useRef,useState} from 'react'
 import type {CSSProperties} from 'react'
 import {useNavigate,useSearchParams} from 'react-router-dom'
 import {useApp} from '../../../app/providers/AppProvider/AppContext'
-import {Card,Checkbox,Confirm,Drawer,Empty,Field,FilterSelect,Icon,InfoGrid,Input,KPI,Modal,MoneyInput,PageHeader,Progress,ResourceTable,Select,StatusBadge,Tabs,required,useForm,useRecordParam,useSearchParamState} from '../../../shared/ui'
+import {Card,Checkbox,Confirm,Drawer,RecordUnavailable,Empty,Field,FilterSelect,Icon,InfoGrid,Input,KPI,Modal,MoneyInput,PageHeader,Progress,ResourceTable,Select,StatusBadge,Tabs,Textarea,required,useForm,useRecordParam,useSearchParamState} from '../../../shared/ui'
 import type {CurrencyCode,PurchaseOrder,SubcontractOrder,Supplier,SupplierMaterial} from '../../../types'
 import {activeBomFor,createMrpPlan,perUnit,stockOf} from '../../../domain/manufacturingEngine'
 import {needsSecondApprover,referenceBlocker} from '../../../domain/actions'
-import {SUPPLY_CURRENCIES,linkBlock,linksOfSupplier,receiptQuantities,rejectedOpen,supplierPerformance,supplierPurchaseHistory} from '../../../domain/supplierMaterials'
+import {convertQty,unitOptions} from '../../../domain/uom'
+import {SUPPLY_CURRENCIES,linkBlock,linksOfSupplier,receiptQuantities,rejectedOpen,replaceableQty,replacementView,supplierPerformance,supplierPurchaseHistory} from '../../../domain/supplierMaterials'
+import {parseSerials} from '../../../domain/serials'
 import {QualityResolveModal} from '../../common/QualityResolveModal'
 import {CURRENCIES,quoteMoney} from '../../../utils/format'
 import {LinkTermsTable,PurchasePlanModal,SourcingModal,SupplierMaterialModal,conversionText,quoteText} from '../components/Sourcing'
@@ -22,6 +24,7 @@ export default function Purchases(){
   if(view==='orders')return <Orders/>
   if(view==='suppliers')return <Suppliers/>
   if(view==='receiving')return <Receiving/>
+  if(view==='replacements')return <Replacements/>
   if(view==='requests')return <Requests/>
   if(view==='subcontracting')return <Subcontracting/>
   return <Overview/>
@@ -188,7 +191,7 @@ function receiptStatus(s:ReturnType<typeof useApp>['state'],po:PurchaseOrder,r:P
 function PurchaseDrawer({poId,onClose}:{poId:string|null;onClose:()=>void}){
   const app=useApp()
   const po=app.state.purchaseOrders.find(p=>p.id===poId)
-  if(!po)return null
+  if(!po)return poId?<RecordUnavailable label="Purchase order" onClose={onClose}/>:null
   return <PurchaseDrawerBody key={po.id} po={po} onClose={onClose}/>
 }
 
@@ -423,30 +426,120 @@ function ReceiveLine({po,item}:{po:PurchaseOrder;item:PurchaseOrder['items'][num
   const app=useApp(),s=app.state
   const m=s.rawMaterials.find(x=>x.id===item.materialId)
   const remaining=Math.round((item.qty-item.received)*1000)/1000
-  const [amount,setAmount]=useState(String(remaining)),[lot,setLot]=useState(''),[supplierLot,setSupplierLot]=useState(''),[location,setLocation]=useState(''),[expiry,setExpiry]=useState(''),[warehouseId,setWarehouseId]=useState(po.warehouseId)
+  const [amount,setAmount]=useState(String(remaining)),[lot,setLot]=useState(''),[supplierLot,setSupplierLot]=useState(''),[location,setLocation]=useState(''),[expiry,setExpiry]=useState(''),[warehouseId,setWarehouseId]=useState(po.warehouseId),[serials,setSerials]=useState('')
   const locations=s.warehouses.find(w=>w.id===warehouseId)?.locations||[]
   // One key per receipt form: a repeated submit of the same receipt is refused by the domain, never double-posted.
   const [key]=useState(()=>`${po.id}-${item.materialId}-${item.received}-${Date.now().toString(36)}`)
-  const value=Number(amount)
-  const error=remaining<=0?undefined:!(value>0)?'Miqdor kiriting':value>remaining?`Maksimum ${num(remaining,3)}`:undefined
+  // Typed in the stock unit, a unit of the same dimension, a pack unit or the PO line's purchase unit (audit #24).
+  const [unit,setUnit]=useState(m?.unit||'')
+  const units=m?[...new Set([...unitOptions(m),...(item.purchaseUnit&&item.unitFactor?[item.purchaseUnit]:[])])]:[]
+  const converted=m?convertQty({...m,packs:[...(m.packs||[]),...(item.purchaseUnit&&item.unitFactor&&item.purchaseUnit!==m.unit&&!(m.packs||[]).some(p=>p.unit===item.purchaseUnit)?[{unit:item.purchaseUnit,factor:item.unitFactor}]:[])]},Number(amount),unit||m.unit):{error:''}
+  const value='error' in converted?Number.NaN:converted.value
+  const error=remaining<=0?undefined:'error' in converted&&amount!==''?converted.error:!(value>0)?'Miqdor kiriting':value>remaining+1e-9?`Maksimum ${num(remaining,3)} ${m?.unit||''}`:undefined
   const expiryError=m?.expiryTracking&&!expiry?'Expiry sanasini kiriting':undefined
+  // Serial material (audit #25): one typed / scanned number per unit, checked here and again by the domain.
+  const serialList=parseSerials(serials)
+  const serialError=!m?.serialTracking?undefined:'error' in serialList?serialList.error:serialList.serials.length!==value?`${Number.isFinite(value)?value:0} ta serial kerak, ${serialList.serials.length} ta kiritildi`:undefined
   const points=s.qualityControlPoints.filter(c=>c.active&&c.scope==='Incoming'&&(!c.productId||c.productId===item.materialId))
   const mandatory=points.some(c=>c.blocking)
   const needsQc=mandatory||(s.settings.policies.autoQualityChecks&&points.length>0)
   const conv=item.purchaseUnit&&item.unitFactor&&(item.purchaseUnit!==m?.unit||item.unitFactor!==1)
-  const fields=3+(m?.lotTracking!==false?2:0)+(m?.expiryTracking?1:0)
+  const fields=3+(m?.lotTracking!==false?2:0)+(m?.expiryTracking?1:0)+(m?.serialTracking?1:0)
   return <div className="receive-line receive-line-wh" style={{'--receive-fields':remaining>0?fields:0} as CSSProperties}>
     <div className="receive-copy"><b>{m?.name}</b><small>{m?.sku} · {num(item.received,3)}/{num(item.qty,3)} {m?.unit} · qolgan {num(remaining,3)}{conv?` · ${num(remaining/item.unitFactor!,3)} ${item.purchaseUnit}`:''}{needsQc?mandatory?' · majburiy kirish QC (karantin)':' · incoming QC':''}</small><Progress value={item.received/Math.max(1e-9,item.qty)*100}/></div>
     {remaining>0?<>
-      <Field label={`Miqdor (${m?.unit||''})`} error={error}><Input type="number" min="0" step="any" max={remaining} value={amount} onChange={e=>setAmount(e.target.value)}/></Field>
+      <Field label={`Miqdor (${unit||m?.unit||''})`} error={error} hint={unit&&unit!==m?.unit&&!('error' in converted)?`= ${num(converted.value,3)} ${m?.unit}`:undefined}><div className="inline-row"><Input type="number" min="0" step="any" aria-label={`Miqdor (${unit||m?.unit||''})`} value={amount} onChange={e=>setAmount(e.target.value)}/>{units.length>1&&<Select value={unit} onChange={setUnit} ariaLabel="Birlik" size="sm">{units.map(u=><option key={u} value={u}>{u}</option>)}</Select>}</div></Field>
       <Field label="Ombor"><Select value={warehouseId} onChange={v=>{setWarehouseId(v);setLocation('')}}>{rawStores(s).map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</Select></Field>
-      <Field label="Joy"><Select value={location} onChange={setLocation}><option value="">—</option>{locations.map(l=><option key={l} value={l}>{l}</option>)}</Select></Field>
+      <Field label="Joy" hint={location?undefined:'Bo‘sh: joysiz qabul'}><Select value={location} onChange={setLocation}><option value="">Joysiz</option>{locations.map(l=><option key={l} value={l}>{l}</option>)}</Select></Field>
       {m?.lotTracking!==false&&<Field label="Supplier lot"><Input value={supplierLot} onChange={e=>setSupplierLot(e.target.value)} placeholder="Supplier hujjatidagi lot"/></Field>}
       {m?.lotTracking!==false&&<Field label="Ichki lot"><Input value={lot} onChange={e=>setLot(e.target.value)} placeholder="Bo‘sh — avtomatik" title="Bo‘sh qoldirilsa ichki lot raqami avtomatik beriladi"/></Field>}
       {m?.expiryTracking&&<Field label="Expiry" required error={expiryError}><Input type="date" value={expiry} onChange={e=>setExpiry(e.target.value)}/></Field>}
-      <button type="button" className="primary-glass-btn receive-btn" disabled={Boolean(error||expiryError)||!(app.can('purchases','edit')||app.can('warehouse','edit'))} onClick={()=>app.receivePurchase(po.id,item.materialId,value,lot,expiry,{warehouseId,key,supplierLot,location})}><Icon name="download" size={16}/>{value<remaining?'Qisman qabul':'Qabul'}</button>
+      {m?.serialTracking&&<Field label="Serial raqamlar" required error={serials?serialError:undefined} hint="Har bir birlik uchun bitta — bo‘sh joy, vergul yoki yangi qator bilan"><Textarea rows={2} value={serials} onChange={e=>setSerials(e.target.value)} aria-label="Serial raqamlar"/></Field>}
+      <button type="button" className="primary-glass-btn receive-btn" disabled={Boolean(error||expiryError||serialError)||!(app.can('purchases','edit')||app.can('warehouse','edit'))} onClick={()=>app.receivePurchase(po.id,item.materialId,Number(amount),lot,expiry,{warehouseId,key,supplierLot,location,unit:unit&&unit!==m?.unit?unit:undefined,...(m?.serialTracking?{serials}:{})})}><Icon name="download" size={16}/>{value<remaining?'Qisman qabul':'Qabul'}</button>
     </>:<StatusBadge tone="success">To‘liq qabul qilingan</StatusBadge>}
   </div>
+}
+
+/**
+ * Supplier replacement (audit #27): returned units waiting for a request, open requests with their received /
+ * accepted / outstanding quantities, receipt of replacement goods (always into incoming QC) and closing what will not come.
+ */
+function Replacements(){
+  const app=useApp(),s=app.state
+  const [ask,setAsk]=useState<{qcId:string;open:number;label:string}|null>(null)
+  const [receive,setReceive]=useState<string|null>(null)
+  const [close,setClose]=useState<string|null>(null)
+  const [focus]=useSearchParamState('id')
+  const reps=s.supplierReplacements||[]
+  const waiting=s.purchaseOrders.flatMap(po=>po.receipts.map(r=>({po,r,open:replaceableQty(s,po,r),qc:s.qualityChecks.find(q=>q.sourceType==='purchase'&&q.receiptId===r.id)}))).filter(x=>x.open>1e-9&&x.qc)
+  const canEdit=app.can('purchases','edit')
+  return <div className="page-stack">
+    <PageHeader title="Supplier almashtirishi" subtitle="Qaytarish → almashtirish so‘rovi → qabul → kirish QC → available. Asl PO qayta ochilmaydi."/>
+    <Card title={`Qaytarilgan, almashtirish so‘ralmagan (${waiting.length})`}>
+      {waiting.length?<div className="table-scroll"><table className="fit"><thead><tr><th>PO</th><th>Supplier</th><th>Material</th><th>Lot</th><th className="align-right">Ochiq</th><th/></tr></thead><tbody>
+        {waiting.map(x=><tr key={x.r.id}><td>{x.po.code}</td><td>{supplierName(s,x.po.supplierId)}</td><td>{materialName(s,x.r.materialId)}</td><td>{x.r.lot||'—'}</td><td className="align-right">{num(x.open,3)}</td>
+          <td className="align-right"><button type="button" className="soft-glass-btn compact" disabled={!canEdit} onClick={()=>setAsk({qcId:x.qc!.id,open:x.open,label:`${x.po.code} · ${materialName(s,x.r.materialId)}`})}>Almashtirish so‘rash</button></td></tr>)}
+      </tbody></table></div>:<Empty icon="check" title="Kutilayotgan qaytarish yo‘q" text="Rad etilgan kirim supplierga qaytarilgach shu yerda ko‘rinadi"/>}
+    </Card>
+    <Card title={`So‘rovlar (${reps.length})`} className="flush">
+      {reps.length?<div className="table-scroll"><table className="fit"><thead><tr><th>So‘rov</th><th>PO · supplier</th><th>Material</th><th className="align-right">So‘ralgan</th><th className="align-right">Kelgan</th><th className="align-right">Qabul (QC)</th><th className="align-right">Rad</th><th className="align-right">Qolgan</th><th>Holat</th><th/></tr></thead><tbody>
+        {reps.map(rep=>{const v=replacementView(s,rep);const open=rep.status==='Kutilmoqda'||rep.status==='Qisman';return <tr key={rep.id} className={focus===rep.id?'row-picked':undefined}>
+          <td><div className="cell-main"><b>{rep.code}</b><small>{rep.createdAt}</small></div></td>
+          <td>{v.po?.code||'—'}<small className="cell-sub">{supplierName(s,rep.supplierId)}</small></td>
+          <td>{materialName(s,rep.materialId)}<small className="cell-sub">{(rep.lots||[]).slice(0,3).join(', ')}</small></td>
+          <td className="align-right">{num(v.requested,3)}</td><td className="align-right">{num(v.received,3)}</td><td className="align-right">{num(v.accepted,3)}{v.pending>0?<small className="cell-sub">QC: {num(v.pending,3)}</small>:null}</td><td className="align-right">{num(v.rejected,3)}</td><td className="align-right"><b>{num(v.outstanding,3)}</b></td>
+          <td><StatusBadge tone={rep.status==='Yopildi'?'success':rep.status==='Bekor'?'neutral':'warning'}>{rep.status}</StatusBadge></td>
+          <td className="align-right">{open&&<span className="inline-row"><button type="button" className="primary-glass-btn compact" disabled={!(canEdit&&app.can('warehouse','edit'))} onClick={()=>setReceive(rep.id)}>Qabul</button><button type="button" className="ghost-btn compact" disabled={!canEdit} onClick={()=>setClose(rep.id)}>Yopish</button></span>}</td>
+        </tr>})}
+      </tbody></table></div>:<Empty title="Almashtirish so‘rovi yo‘q"/>}
+    </Card>
+    {ask&&<AskReplacementModal {...ask} onClose={()=>setAsk(null)}/>}
+    {receive&&<ReceiveReplacementModal id={receive} onClose={()=>setReceive(null)}/>}
+    {close&&<CloseReplacementModal id={close} onClose={()=>setClose(null)}/>}
+  </div>
+}
+
+function AskReplacementModal({qcId,open,label,onClose}:{qcId:string;open:number;label:string;onClose:()=>void}){
+  const app=useApp()
+  const [key]=useState(()=>`rpl-${qcId}-${Date.now().toString(36)}`)
+  const form=useForm({qty:String(open),note:''},v=>({qty:Number(v.qty)>0&&Number(v.qty)<=open+1e-9?undefined:`0 dan ${open} gacha`}))
+  return <Modal open onClose={onClose} title="Almashtirish so‘rash" subtitle={label} footer={<><button type="button" className="ghost-btn" onClick={onClose}>Bekor</button><button type="button" className="primary-glass-btn" onClick={()=>form.submit(v=>{if(app.requestSupplierReplacement({qualityCheckId:qcId,qty:v.qty,note:v.note,key}).ok)onClose()})}>So‘rash</button></>}>
+    <div className="form-grid"><Field label="Miqdor" required error={form.error('qty')}><Input type="number" min="0" step="any" {...form.input('qty')}/></Field><Field label="Izoh"><Input {...form.input('note')}/></Field></div>
+  </Modal>
+}
+
+function ReceiveReplacementModal({id,onClose}:{id:string;onClose:()=>void}){
+  const app=useApp(),s=app.state
+  const rep=(s.supplierReplacements||[]).find(r=>r.id===id)
+  const v=rep?replacementView(s,rep):undefined
+  const m=s.rawMaterials.find(x=>x.id===rep?.materialId)
+  const [key]=useState(()=>`rplrc-${id}-${Date.now().toString(36)}`)
+  const po=v?.po
+  const form=useForm({qty:String(v?.outstanding||''),lot:'',location:'',expiry:'',serials:'',warehouseId:po?.warehouseId||''},x=>{
+    const n=Number(x.qty),list=parseSerials(x.serials)
+    return {qty:n>0&&n<=(v?.outstanding||0)+1e-9?undefined:`0 dan ${v?.outstanding} gacha`,expiry:m?.expiryTracking&&!x.expiry?'Expiry kiriting':undefined,
+      serials:!m?.serialTracking?undefined:'error' in list?list.error:list.serials.length!==n?`${n} ta serial kerak`:undefined}
+  })
+  if(!rep||!v||!po)return null
+  const locations=s.warehouses.find(w=>w.id===form.values.warehouseId)?.locations||[]
+  return <Modal open onClose={onClose} title={`${rep.code} — almashtirishni qabul qilish`} subtitle={`${materialName(s,rep.materialId)} · qolgan ${num(v.outstanding,3)} ${m?.unit||''} · kirish QC majburiy`} footer={<><button type="button" className="ghost-btn" onClick={onClose}>Bekor</button><button type="button" className="primary-glass-btn" onClick={()=>form.submit(x=>{if(app.receiveSupplierReplacement(rep.id,Number(x.qty),{key,lot:x.lot,expiry:x.expiry,location:x.location,warehouseId:x.warehouseId,...(m?.serialTracking?{serials:x.serials}:{})}).ok)onClose()})}><Icon name="download" size={15}/>Qabul</button></>}>
+    <div className="form-grid">
+      <Field label={`Miqdor (${m?.unit||''})`} required error={form.error('qty')}><Input type="number" min="0" step="any" {...form.input('qty')}/></Field>
+      <Field label="Ombor"><Select value={form.values.warehouseId} onChange={x=>{form.set('warehouseId',x);form.set('location','')}}>{rawStores(s).map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</Select></Field>
+      <Field label="Joy"><Select value={form.values.location} onChange={x=>form.set('location',x)}><option value="">Joysiz</option>{locations.map(l=><option key={l} value={l}>{l}</option>)}</Select></Field>
+      <Field label="Ichki lot"><Input placeholder="Bo‘sh — avtomatik" {...form.input('lot')}/></Field>
+      {m?.expiryTracking&&<Field label="Expiry" required error={form.error('expiry')}><Input type="date" {...form.input('expiry')}/></Field>}
+      {m?.serialTracking&&<Field label="Serial raqamlar" required error={form.error('serials')}><Textarea rows={2} aria-label="Serial raqamlar" value={form.values.serials} onChange={e=>form.set('serials',e.target.value)}/></Field>}
+    </div>
+  </Modal>
+}
+
+function CloseReplacementModal({id,onClose}:{id:string;onClose:()=>void}){
+  const app=useApp()
+  const form=useForm({reason:''},v=>({reason:v.reason.trim().length>=3?undefined:'Sabab yozing'}))
+  return <Modal open onClose={onClose} title="Almashtirish so‘rovini yopish" subtitle="Kelmaydigan qism endi kutilmaydi; qabul qilinganlari o‘zgarmaydi" footer={<><button type="button" className="ghost-btn" onClick={onClose}>Bekor</button><button type="button" className="danger-glass-btn" onClick={()=>form.submit(v=>{if(app.closeSupplierReplacement(id,v.reason).ok)onClose()})}>Yopish</button></>}>
+    <Field label="Sabab" required error={form.error('reason')}><Input {...form.input('reason')}/></Field>
+  </Modal>
 }
 
 function Subcontracting(){

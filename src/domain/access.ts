@@ -21,7 +21,7 @@ export const PERMISSION_MODULES:Array<{key:string;label:string;icon:string;actio
   {key:'materials',label:'Xomashyo',icon:'layers',actions:['view','create','edit','delete','export']},
   {key:'warehouse',label:'Ombor',icon:'warehouse',actions:['view','create','edit','delete','export']},
   {key:'purchases',label:'Xaridlar',icon:'cart',actions:['view','create','edit','delete','approve','export']},
-  {key:'sales',label:'Sotuv',icon:'truck',actions:['view','create','edit','delete','export']},
+  {key:'sales',label:'Sotuv',icon:'truck',actions:['view','create','edit','delete','approve','export']},
   {key:'quality',label:'Sifat',icon:'shield',actions:['view','create','edit','delete','approve','export']},
   {key:'equipment',label:'Uskunalar',icon:'wrench',actions:['view','create','edit','delete','approve','export']},
   {key:'employees',label:'Xodimlar',icon:'users',actions:['view','create','edit','delete','export']},
@@ -75,7 +75,7 @@ export const ACTION_RULES:Record<string,Rules|((args:unknown[])=>Rules)>={
   },
   reportOutput:PROD_RUN,recordScrap:PROD_RUN,issueExtraMaterial:[['production','edit']],startWorkOrder:PROD_RUN,pauseWorkOrder:PROD_RUN,finishWorkOrder:PROD_RUN,recordMaterialScan:PROD_RUN,
   splitProduction:[['production','edit']],mergeProduction:[['production','edit']],createBackorder:[['production','edit']],unbuildProduct:[['production','edit']],checkAvailability:[['production','edit']],
-  setForecast:[['production','edit']],rollUpCosts:[['products','edit']],
+  setForecast:[['production','edit']],rollUpCosts:[['products','edit']],refreshMaterialReservation:[['production','edit']],
   // Job cards: operators run and report their operation; assigning people and moving dates is planning.
   reportOperationOutput:PROD_RUN,markSetupDone:PROD_RUN,assignWorkOrder:[['production','edit']],rescheduleProductionOrder:[['production','edit']],
   // An MRP suggestion becomes a draft PO (purchases.create) or a draft MO (production.create).
@@ -88,8 +88,15 @@ export const ACTION_RULES:Record<string,Rules|((args:unknown[])=>Rules)>={
   confirmPurchase:[['purchases','approve']],markPurchaseInTransit:[['purchases','edit']],cancelPurchase:[['purchases','edit']],closePurchaseShort:[['purchases','edit']],updatePurchaseMeta:[['purchases','edit']],receivePurchase:[['purchases','edit'],['warehouse','edit']],returnPurchaseToSupplier:[['purchases','edit'],['warehouse','edit']],advanceSubcontract:[['purchases','edit']],
   // Draft lines are purchasing work; an inspection decision and the write-off of rejected goods are quality decisions.
   updatePurchaseDraft:[['purchases','edit']],inspectReceipt:[['quality','edit']],scrapRejectedReceipt:[['quality','edit']],
-  createSalesOrder:[['sales','create']],reserveSalesOrder:[['sales','edit']],deliverSalesOrder:[['sales','edit'],['warehouse','edit']],cancelSalesOrder:[['sales','edit']],updateSalesMeta:[['sales','edit']],createReturn:[['sales','create'],['quality','edit']],dispositionReturn:[['quality','edit']],
+  // Supplier replacement (audit #27): asking / closing is purchasing work; receiving moves stock too.
+  requestSupplierReplacement:[['purchases','edit']],closeSupplierReplacement:[['purchases','edit']],receiveSupplierReplacement:[['purchases','edit'],['warehouse','edit']],
+  // A credit decision on a pre-ledger order changes what a customer owes: the same right as a manual adjustment.
+  resolveReturnCredit:[['sales','approve']],
+  createSalesOrder:[['sales','create']],reserveSalesOrder:[['sales','edit']],deliverSalesOrder:[['sales','edit'],['warehouse','edit']],cancelSalesOrder:[['sales','edit']],updateSalesMeta:[['sales','edit']],recordCustomerPayment:[['sales','edit']],adjustCustomerBalance:[['sales','approve']],createReturn:[['sales','create'],['quality','edit']],dispositionReturn:[['quality','edit']],
   transferStock:[['warehouse','edit']],adjustStock:[['warehouse','edit']],countStock:[['warehouse','edit']],
+  // Phase 3: location moves and reconciliation are warehouse work; switching variant stock is product master data.
+  moveStockBin:[['warehouse','edit']],assignVariantStock:[['warehouse','edit']],setVariantStock:[['products','edit']],
+  allocateLegacyLots:args=>args[0]==='mo'?[['warehouse','edit'],['production','edit']]:[['warehouse','edit'],['sales','edit']],
   startDowntime:[['equipment','edit'],...PROD_RUN],endDowntime:[['equipment','edit'],...PROD_RUN],approveMaintenanceRequest:[['equipment','approve']],startMaintenance:[['equipment','edit']],completeMaintenance:[['equipment','edit']],cancelMaintenance:[['equipment','edit']],planPreventiveMaintenance:[['equipment','edit']],advanceRepair:[['equipment','edit']],
   // Operators hold equipment.create to raise requests; planning an order is maintenance planning work.
   createMaintenanceOrder:[['equipment','edit']],updateMaintenanceOrder:[['equipment','edit']],saveMaintenancePlan:[['equipment','edit']],recordEquipmentRuntime:[['equipment','edit']],
@@ -206,17 +213,16 @@ export function scopeTargets(s:S,name:string,args:unknown[]):ScopeTargets{
     t.workCenters.push(...centers.filter(Boolean));if(o.warehouseId)t.warehouses.push(o.warehouseId)
   }
   const addPo=(id:unknown)=>{const po=s.purchaseOrders.find(x=>x.id===id);if(po?.warehouseId)t.warehouses.push(po.warehouseId)}
-  const addSo=(id:unknown)=>{
-    const so=s.salesOrders.find(x=>x.id===id)
-    for(const i of so?.items||[]){if(i.warehouseId)t.warehouses.push(i.warehouseId);for(const r of i.reservations||[])t.warehouses.push(r.warehouseId)}
-  }
+  const addSo=(id:unknown)=>{const so=s.salesOrders.find(x=>x.id===id);if(so)t.warehouses.push(...salesOrderSites(s,so))}
   const addLine=(lineId:unknown)=>{const line=s.productionLines.find(l=>l.id===lineId);if(line)t.branches.push(line.branchId)}
   switch(name){
     case 'reportOutput':case 'recordScrap':case 'recordMaterialScan':case 'transitionProduction':case 'issueExtraMaterial':
-    case 'shortCloseProduction':case 'splitProduction':case 'createBackorder':case 'checkAvailability':case 'createReworkOrder':case 'rescheduleProductionOrder':addOrder(order(args[0]));break
+    case 'shortCloseProduction':case 'splitProduction':case 'createBackorder':case 'checkAvailability':case 'createReworkOrder':case 'rescheduleProductionOrder':case 'refreshMaterialReservation':addOrder(order(args[0]));break
     case 'confirmMrpSuggestion':{
-      // A buy suggestion becomes a PO into the default raw store; a make suggestion an MO on the default line.
-      if(String(args[0]).startsWith('buy:'))t.warehouses.push(rawWarehouseFor(s,s.settings.defaultWarehouseId))
+      // A suggestion becomes a document at its planning site (key …@branch, audit #16); older keys mean the default site.
+      const site=String(args[0]).split('@')[1]
+      if(site)t.branches.push(site)
+      else if(String(args[0]).startsWith('buy:'))t.warehouses.push(rawWarehouseFor(s,s.settings.defaultWarehouseId))
       else addLine(s.settings.defaultLineId)
       break
     }
@@ -239,6 +245,14 @@ export function scopeTargets(s:S,name:string,args:unknown[]):ScopeTargets{
       break
     }
     case 'updatePurchaseDraft':{addPo(args[0]);const p=args[1] as {warehouseId?:string}|undefined;if(p?.warehouseId)t.warehouses.push(p.warehouseId);break}
+    case 'requestSupplierReplacement':{const p=args[0] as {qualityCheckId?:string}|undefined;const q=s.qualityChecks.find(x=>x.id===p?.qualityCheckId),po=s.purchaseOrders.find(x=>x.id===q?.sourceId);const wh=po?.receipts.find(r=>r.id===q?.receiptId)?.warehouseId||po?.warehouseId;if(wh)t.warehouses.push(wh);break}
+    case 'receiveSupplierReplacement':case 'closeSupplierReplacement':{
+      const rep=(s.supplierReplacements||[]).find(x=>x.id===args[0]),po=s.purchaseOrders.find(x=>x.id===rep?.purchaseOrderId)
+      const wh=(name==='receiveSupplierReplacement'?(args[2] as {warehouseId?:string}|undefined)?.warehouseId:undefined)||po?.receipts.find(r=>r.id===rep?.receiptId)?.warehouseId||po?.warehouseId
+      if(wh)t.warehouses.push(wh)
+      break
+    }
+    case 'resolveReturnCredit':{const p=args[0] as {returnId?:string}|undefined;t.warehouses.push(...returnWarehouses(s,p?.returnId));break}
     case 'returnPurchaseToSupplier':case 'inspectReceipt':case 'scrapRejectedReceipt':{
       const q=s.qualityChecks.find(x=>x.id===args[0]),po=s.purchaseOrders.find(x=>x.id===q?.sourceId)
       const wh=po?.receipts.find(r=>r.id===q?.receiptId)?.warehouseId||po?.warehouseId
@@ -254,7 +268,9 @@ export function scopeTargets(s:S,name:string,args:unknown[]):ScopeTargets{
     case 'createPurchaseOrder':{const p=args[0] as {warehouseId?:string}|undefined;if(p?.warehouseId)t.warehouses.push(p.warehouseId);break}
     case 'createPurchaseOrders':for(const p of Array.isArray(args[0])?args[0] as {warehouseId?:string}[]:[])if(p?.warehouseId)t.warehouses.push(p.warehouseId);break
     case 'confirmPurchase':case 'markPurchaseInTransit':case 'cancelPurchase':case 'closePurchaseShort':case 'updatePurchaseMeta':addPo(args[0]);break
-    case 'cancelSalesOrder':addSo(args[0]);break
+    // Every change of a sales order is bound to where it sits (reservations, shipments, its MOs) — audit #6.
+    case 'cancelSalesOrder':case 'reserveSalesOrder':case 'updateSalesMeta':addSo(args[0]);break
+    case 'createQualityAlert':{const p=args[0] as {sourceId?:string}|undefined;addOrder(order(p?.sourceId));break}
     case 'advanceSubcontract':{const sc=s.subcontractOrders.find(x=>x.id===args[0]);if(sc?.warehouseId)t.warehouses.push(sc.warehouseId);break}
     case 'createEntity':case 'updateEntity':case 'deleteEntity':case 'duplicateEntity':{
       // Location-bound master data: a branch-scoped role manages only its own branch's sites (P1-2).
@@ -283,14 +299,55 @@ export function scopeTargets(s:S,name:string,args:unknown[]):ScopeTargets{
     }
     case 'approveMaintenanceRequest':{const r=s.maintenanceRequests.find(x=>x.id===args[0]),e=s.equipment.find(x=>x.id===r?.equipmentId);if(e)t.workCenters.push(e.workCenterId);break}
     case 'endDowntime':{const ev=s.downtimeEvents.find(x=>x.id===args[0]);if(ev)t.workCenters.push(ev.workCenterId);break}
-    case 'createQualityCheck':{const p=args[0] as {sourceType?:string;sourceId?:string}|undefined;if(p?.sourceType==='production')addOrder(order(p.sourceId));break}
+    case 'createQualityCheck':{
+      const p=args[0] as {sourceType?:string;sourceId?:string}|undefined
+      if(p?.sourceType==='production')addOrder(order(p.sourceId))
+      if(p?.sourceType==='purchase')addPo(p.sourceId)
+      if(p?.sourceType==='return')t.warehouses.push(...returnWarehouses(s,p.sourceId))
+      break
+    }
     case 'transferStock':t.warehouses.push(String(args[1]),String(args[2]));break
+    case 'moveStockBin':case 'assignVariantStock':{const p=args[0] as {warehouseId?:string}|undefined;t.warehouses.push(String(p?.warehouseId||''));break}
+    case 'allocateLegacyLots':{if(args[0]==='mo')addOrder(order(args[1]));else addSo(args[1]);break}
     case 'adjustStock':t.warehouses.push(String(args[1]));break
     case 'countStock':{const b=s.stockBalances.find(x=>x.id===args[0]);if(b)t.warehouses.push(b.warehouseId);break}
     case 'receivePurchase':{const po=s.purchaseOrders.find(x=>x.id===args[0]);const wh=(args[5] as {warehouseId?:string}|undefined)?.warehouseId||po?.warehouseId;if(wh)t.warehouses.push(wh);break}
     case 'deliverSalesOrder':addSo(args[0]);break
   }
   return t
+}
+
+/**
+ * The one gate for a domain command (audit #6): the role's rule for these exact arguments, then its location scope,
+ * both against the data the command runs on. Viewing a module never implies changing it; a command without a rule is
+ * refused. (Demo authorization in the browser — a real deployment repeats this on the server.)
+ */
+export function commandBlocker(s:S,actor:Employee|undefined,name:string,args:unknown[]):string|null{
+  if(!actor)return 'Avval tizimga kiring'
+  if(!allowedBy(roleOf(s,actor.id),actionRules(name,args)??[['__unlisted__','view']]))return 'Rolingizda bu amal uchun ruxsat yo‘q'
+  return scopeBlocker(s,actor,name,args)
+}
+
+/**
+ * Warehouses an actor may hold, move, reserve or ship stock in (audit #5/#6): null for an unrestricted role; the home
+ * warehouse for a warehouse-bound role; otherwise every warehouse of the employee's branch (none without one).
+ */
+export function stockScope(s:S,actor:Employee|undefined):Set<string>|null{
+  const role=roleOf(s,actor?.id)
+  if(!actor||!role||isSuperAdminRole(role)||!role.scope||role.scope==='all')return null
+  const home=homeOf(s,actor)
+  if(role.scope==='warehouse'&&home.warehouse)return new Set([home.warehouse.id])
+  return new Set(home.branchId?s.warehouses.filter(w=>w.branchId===home.branchId).map(w=>w.id):[])
+}
+
+/** Where a sales order sits: the stores it reserves in, the stores it shipped from and its MOs' output stores. */
+export function salesOrderSites(s:S,so:S['salesOrders'][number],shippedFrom?:Map<string,Set<string>>):string[]{
+  const sites=new Set<string>()
+  for(const i of so.items){if(i.warehouseId)sites.add(i.warehouseId);for(const r of i.reservations||[])sites.add(r.warehouseId)}
+  if(shippedFrom)for(const w of shippedFrom.get(so.code)||[])sites.add(w)
+  else for(const m of s.stockMovements)if(m.type==='Sale -'&&m.source===so.code)sites.add(m.warehouseId)
+  for(const id of so.productionOrderIds?.length?so.productionOrderIds:so.productionOrderId?[so.productionOrderId]:[]){const o=s.productionOrders.find(x=>x.id===id);if(o?.warehouseId)sites.add(o.warehouseId)}
+  return [...sites]
 }
 
 /**
@@ -305,6 +362,9 @@ export function scopeBlocker(s:S,actor:Employee|undefined,name:string,args:unkno
   if(!t.workCenters.length&&!t.warehouses.length&&!t.branches.length)return null
   const home=homeOf(s,actor)
   if(!home.branchId)return `“${role.name}” roli joy bilan cheklangan, lekin sizga ish markazi yoki ombor biriktirilmagan — administratorga murojaat qiling`
+  // An id that matches no site has no branch to compare: a scoped role may not act on it (audit #3).
+  const unknown=[...t.warehouses.filter(id=>id&&!s.warehouses.some(w=>w.id===id)),...t.workCenters.filter(id=>id&&!s.workCenters.some(w=>w.id===id))]
+  if(unknown.length)return `Noma’lum ombor yoki ish markazi (${[...new Set(unknown)].join(', ')}) — “${role.name}” roli joy bilan cheklangan`
   const centerName=(id:string)=>s.workCenters.find(w=>w.id===id)?.name||id
   if(role.scope==='workcenter'&&home.workCenter&&t.workCenters.length&&!t.workCenters.includes(home.workCenter.id))
     return `Bu ish ${[...new Set(t.workCenters)].map(centerName).join(', ')} ish markaziga tegishli — siz faqat ${home.workCenter.name}da ishlaysiz`
@@ -352,8 +412,12 @@ export function homeOf(s:S,actor:Employee){
  * What a scoped role reads (P1-2): location-bound records outside the employee's scope are left out, so lists,
  * dashboards and exports show the same world the role may act on. "workcenter": its own work center's orders and
  * events, its branch's stock; "warehouse": its warehouse's stock (its branch without one), its branch's orders;
- * "branch": everything of its branch. Master data (warehouses, work centers, items) stays complete so names resolve.
- * "all", Super Admin and an unknown employee keep the full data (the session is checked elsewhere).
+ * "branch": everything of its branch. Master data (warehouses, work centers, items, customers, suppliers, people)
+ * stays complete so names resolve and new documents can be made. Records tied to a hidden document — sales orders
+ * by where they sit, returns, checks, alerts, costs, attachments, notifications and the activity feed — leave with it
+ * (audit #7); a sales order that sits nowhere yet is a shared queue. Global search, deep links, dashboards and
+ * reports all read this view, so they show what the lists show. "all", Super Admin and an unknown employee keep the
+ * full data (the session is checked elsewhere).
  */
 export function scopedView(s:S,actor:Employee|undefined):S{
   const role=roleOf(s,actor?.id)
@@ -371,21 +435,55 @@ export function scopedView(s:S,actor:Employee|undefined):S{
   const purchaseOrders=s.purchaseOrders.filter(p=>stockWarehouses.has(p.warehouseId)||p.receipts.some(r=>r.warehouseId&&stockWarehouses.has(r.warehouseId)))
   const purchaseIds=new Set(purchaseOrders.map(p=>p.id))
   const centerOf=(equipmentId:string)=>s.equipment.find(e=>e.id===equipmentId)?.workCenterId||''
+  const shippedFrom=new Map<string,Set<string>>()
+  for(const m of s.stockMovements)if(m.type==='Sale -'){const set=shippedFrom.get(m.source)||new Set<string>();set.add(m.warehouseId);shippedFrom.set(m.source,set)}
+  const salesOrders=s.salesOrders.filter(so=>{const sites=salesOrderSites(s,so,shippedFrom);return !sites.length||sites.some(w=>branchWarehouses.has(w))})
+  const salesIds=new Set(salesOrders.map(o=>o.id))
+  const returns=s.returns.filter(r=>r.warehouseId?branchWarehouses.has(r.warehouseId):salesIds.has(r.salesOrderId))
+  const returnIds=new Set(returns.map(r=>r.id))
+  const subcontractOrders=s.subcontractOrders.filter(o=>!o.warehouseId||branchWarehouses.has(o.warehouseId))
+  const subcontractIds=new Set(subcontractOrders.map(o=>o.id))
+  const qualityChecks=s.qualityChecks.filter(q=>q.sourceType==='production'?orderIds.has(q.sourceId):q.sourceType==='purchase'?purchaseIds.has(q.sourceId):q.sourceType==='return'?returnIds.has(q.sourceId):subcontractIds.has(q.sourceId))
+  const stockMovements=s.stockMovements.filter(m=>stockWarehouses.has(m.warehouseId))
+  // Ids and document codes the view leaves out: anything pointing at them (alert, cost, file, message, log line) goes too.
+  const hiddenIds=new Set<string>(),hiddenCodes=new Set<string>()
+  const hide=<T extends {id:string;code?:string}>(all:T[],kept:Set<string>)=>{for(const r of all)if(!kept.has(r.id)){hiddenIds.add(r.id);if(r.code)hiddenCodes.add(r.code)}}
+  hide(s.productionOrders,orderIds);hide(s.purchaseOrders,purchaseIds);hide(s.salesOrders,salesIds);hide(s.returns,returnIds);hide(s.subcontractOrders,subcontractIds)
+  hide(s.qualityChecks,new Set(qualityChecks.map(q=>q.id)))
+  const equipment=s.equipment.filter(e=>branchCenters.has(e.workCenterId))
+  const maintenanceOrders=s.maintenanceOrders.filter(m=>branchCenters.has(centerOf(m.equipmentId)))
+  hide(s.equipment,new Set(equipment.map(e=>e.id)));hide(s.maintenanceOrders,new Set(maintenanceOrders.map(m=>m.id)))
+  // Stock documents (transfers, adjustments…) seen only in hidden stores; a visible order keeps its code.
+  const visibleRefs=new Set(stockMovements.map(m=>m.source))
+  for(const m of s.stockMovements)if(!visibleRefs.has(m.source))hiddenCodes.add(m.source)
+  for(const list of [productionOrders,purchaseOrders,salesOrders,returns,subcontractOrders])for(const r of list)hiddenCodes.delete(r.code)
+  const linkedId=(path?:string)=>/[?&]id=([^&]+)/.exec(path||'')?.[1]
+  const qualityAlerts=s.qualityAlerts.filter(a=>!hiddenIds.has(a.sourceId))
+  hide(s.qualityAlerts,new Set(qualityAlerts.map(a=>a.id)))
   return {...s,
     productionOrders,
     stockBalances:s.stockBalances.filter(b=>stockWarehouses.has(b.warehouseId)),
-    stockMovements:s.stockMovements.filter(m=>stockWarehouses.has(m.warehouseId)),
+    stockMovements,
     lots:s.lots.filter(l=>stockWarehouses.has(l.warehouseId)),
     purchaseOrders,
+    salesOrders,
     timeLogs:s.timeLogs.filter(l=>orderIds.has(l.orderId)),
     downtimeEvents:s.downtimeEvents.filter(d=>centers.has(d.workCenterId)),
-    equipment:s.equipment.filter(e=>branchCenters.has(e.workCenterId)),
-    maintenanceOrders:s.maintenanceOrders.filter(m=>branchCenters.has(centerOf(m.equipmentId))),
+    equipment,
+    maintenanceOrders,
     maintenanceRequests:s.maintenanceRequests.filter(m=>branchCenters.has(centerOf(m.equipmentId))),
     repairOrders:s.repairOrders.filter(m=>branchCenters.has(centerOf(m.equipmentId))),
-    qualityChecks:s.qualityChecks.filter(q=>q.sourceType==='production'?orderIds.has(q.sourceId):q.sourceType==='purchase'?purchaseIds.has(q.sourceId):true),
-    subcontractOrders:s.subcontractOrders.filter(o=>!o.warehouseId||branchWarehouses.has(o.warehouseId)),
-    returns:s.returns.filter(r=>!r.warehouseId||branchWarehouses.has(r.warehouseId)),
+    qualityChecks,
+    qualityAlerts,
+    subcontractOrders,
+    returns,
+    expenses:s.expenses.filter(e=>!hiddenIds.has(e.sourceId)),
+    attachments:s.attachments.filter(a=>!hiddenIds.has(a.entityId)),
+    // A notification of another site's event stays with that site (audit #27).
+    notifications:s.notifications.filter(n=>{const id=linkedId(n.path);return (!n.branchId||n.branchId===home.branchId)&&(!id||!hiddenIds.has(id))}),
+    supplierReplacements:(s.supplierReplacements||[]).filter(r=>purchaseIds.has(r.purchaseOrderId)),
+    receivableReconciliations:(s.receivableReconciliations||[]).filter(r=>salesIds.has(r.salesOrderId)),
+    activity:s.activity.filter(a=>!a.source||!hiddenCodes.has(a.source)),
   }
 }
 

@@ -424,6 +424,12 @@ test('BUG-01: orders saved before per-order reservations derive them and stay is
   const comp=rawOf(s,orderOf(s,a))[0]
   assert.ok(Math.abs(holdOf(s,a,comp.materialId)-plannedIssue(orderOf(s,a),comp.materialId))<1e-6,'derived = plan − issued')
   const heldB=holdOf(s,b.id,comp.materialId)
+  // Phase 3: a derived (pre-pin) reservation of a lot-tracked material is never issued from an arbitrary lot —
+  // it is reconciled to real lots first, keeping its quantity and warehouse.
+  const blocked=A.recordMaterialScan(s,ctx(s),a,skuOf(s,comp.materialId))
+  assert.equal(blocked.result.ok,false);assert.match(blocked.result.message,/LOT bilan bog‘lash/);assert.equal(blocked.state,s)
+  const pinned=A.allocateLegacyLots(s,ctx(s),'mo',a);assert.ok(pinned.result.ok,pinned.result.message);s=pinned.state
+  assert.ok(Math.abs(holdOf(s,a,comp.materialId)-plannedIssue(orderOf(s,a),comp.materialId))<1e-6,'reconciliation keeps the quantity')
   const r=A.recordMaterialScan(s,ctx(s),a,skuOf(s,comp.materialId))
   assert.ok(r.result.ok,r.result.message)
   assert.ok(Array.isArray(orderOf(r.state,a).reservations),'records are written on first issue')
@@ -536,6 +542,8 @@ test('BUG-02: completion returns a remaining reservation to free stock',()=>{
   s={...s,productionOrders:s.productionOrders.map(o=>o.id===id?{...o,reservations:o.reservations.map(r=>r.materialId===m?{...r,qty:r.qty+0.5}:r)}:o),
     stockBalances:s.stockBalances.map(b=>b.warehouseId===wh&&b.itemId===m?{...b,reserved:b.reserved+0.5}:b)}
   assertReservationsBacked(s)
+  // The 0.5 holds no lot (older data): Phase 3 reconciles it to a real lot before anything is issued.
+  const pinned=A.allocateLegacyLots(s,ctx(s),'mo',id);assert.ok(pinned.result.ok,pinned.result.message);s=pinned.state
   const done=completeOrder(s,id)
   assert.ok(Math.abs(reservedOf(s,m)-reservedOf(done,m)-holdOf(s,id,m))<1e-6,'everything the order held, including the leftover, is released')
   assertReservationsBacked(done)

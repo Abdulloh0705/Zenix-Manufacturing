@@ -1,4 +1,4 @@
-import {parseDate} from './dates'
+import {isAmbiguousStamp,parseDate} from './dates'
 
 
 const decimalFormat=new Intl.NumberFormat('uz-UZ',{maximumFractionDigits:1})
@@ -55,6 +55,8 @@ export const cls=(...parts:Array<string|false|undefined|null>)=>parts.filter(Boo
 export function relativeTime(value?:string,now=new Date()){
   if(!value)return '—'
   if(!/^\d{4}-\d{2}-\d{2}/.test(value))return value
+  // Written around a company zone change: how long ago it was is not known to the hour — the stored text is shown.
+  if(isAmbiguousStamp(value))return `${value} (vaqt noaniq)`
   const diff=Math.round((now.getTime()-parseDate(value).getTime())/60000)
   if(diff<1)return 'hozirgina'
   if(diff<60)return `${diff} daqiqa oldin`

@@ -8,7 +8,7 @@ import type {ActivityItem,ManufacturingState} from '../../../types'
 import {COST_VARIANCE_ALERT,CONTROL_PERIODS as P,QUEUE_FILTERS,inQueue,productionControl} from '../../../domain/productionControl'
 import type {ControlExceptionId,OrderOperation,ProductionControl,QueueFilter} from '../../../domain/productionControl'
 import type {EquipmentActivity,OrderMaterialStatus,OrderUrgency} from '../../../domain/manufacturingEngine'
-import {addDays,daysBetween,formatMinutes,longDate,minutesBetween,shortDate,stamp} from '../../../utils/dates'
+import {addDays,daysBetween,displayStamp,formatMinutes,isAmbiguousStamp,longDate,minutesBetween,shortDate,stamp} from '../../../utils/dates'
 import {cls,compactDuration as hours,compactMoney,currencyMeta,num,qty,signed} from '../../../utils/format'
 import {employeeName,equipmentName,itemUnitOf,materialName,productName,useNow,workCenterName} from '../../common/lookups'
 import {BarList} from '../../common/charts'
@@ -30,7 +30,8 @@ const SHORTAGES_PATH='/materials?view=shortages'
 const TODAY_REPORT='/reports?view=production&days=1'
 const signedMoney=(v:number)=>signed(v,x=>compactMoney(x,{symbol:false}))
 const names=(list:string[])=>{const u=[...new Set(list)];return u.slice(0,3).join(', ')+(u.length>3?` +${u.length-3}`:'')}
-const eventTime=(at:string,today:string)=>at.slice(0,10)===today?at.slice(11,16):`${shortDate(at)} ${at.slice(11,16)}`
+// In today's company zone; a time written around a zone change is shown as written and marked (≈).
+const eventTime=(raw:string,today:string)=>{const at=displayStamp(raw).slice(0,16),mark=isAmbiguousStamp(raw)?' ≈':'';return (at.slice(0,10)===today?at.slice(11,16):`${shortDate(at)} ${at.slice(11,16)}`)+mark}
 const rowKey=(run:()=>void)=>(e:{key:string;preventDefault:()=>void})=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();run()}}
 const loadTone=(utilization:number,stopped=false)=>stopped||utilization>100?'danger' as const:utilization>85?'warning' as const:'success' as const
 

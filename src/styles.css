@@ -1170,6 +1170,8 @@ tr.total td{font-weight:var(--fw-bold);border-top:2px solid var(--line-strong)}
 .gantt-cell.today{background:var(--mfg-soft)}
 .gantt-bar{position:relative;align-self:center;height:26px;margin:0 4px;border-radius:var(--r-sm);background:var(--mfg-soft);overflow:hidden;display:flex;align-items:center;cursor:grab;z-index:1;min-width:0}
 .gantt-bar.risk{background:var(--danger-soft);border-left-color:var(--danger)}
+.gantt-plan{align-self:end;height:4px;margin:0 4px 5px;border-radius:2px;background:var(--info);opacity:.85;pointer-events:none}
+.gantt-plan.late{background:var(--danger)}
 .gantt-progress{position:absolute;inset:0 auto 0 0;background:color-mix(in srgb,var(--mfg) 22%,transparent)}
 .gantt-text{position:relative;padding:0 var(--sp-2);font-size:var(--fs-xs);font-weight:var(--fw-semibold);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .mfg-text{color:var(--mfg)}
@@ -1362,6 +1364,10 @@ tr.total td{font-weight:var(--fw-bold);border-top:2px solid var(--line-strong)}
 .location-list{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:var(--sp-2)}
 .location-chip{display:inline-flex;align-items:center;gap:5px;min-height:30px;padding:0 3px 0 10px;border-radius:var(--r-pill);background:var(--surface-3);font-size:var(--fs-xs);font-weight:var(--fw-semibold);font-family:var(--font-mono)}
 .location-chip button{display:grid;place-items:center;width:24px;height:24px;border-radius:50%;color:var(--text-3)}
+.location-chip button:disabled{opacity:.4;cursor:not-allowed}
+/* Phase 3: variant stock panel and the inventory reconciliation card */
+.variant-stock{display:grid;gap:var(--sp-3);margin-top:var(--sp-4);padding-top:var(--sp-3);border-top:1px solid var(--line)}
+.reconcile-card .table-scroll{margin-top:var(--sp-2)}
 .location-chip button:hover{background:var(--danger-soft);color:var(--danger)}
 .scan-result{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:var(--sp-3);align-items:center;padding:var(--sp-3);border-radius:var(--r-md);border:1px solid var(--accent-line);background:var(--accent-soft)}
 .scan-result>div:nth-child(2){display:grid;gap:2px;min-width:0}

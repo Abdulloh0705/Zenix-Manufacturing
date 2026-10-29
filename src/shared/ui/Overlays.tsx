@@ -2,6 +2,7 @@ import {useEffect,useId,useLayoutEffect,useMemo,useRef,useState} from 'react'
 import type {CSSProperties,ReactNode,RefObject} from 'react'
 import {createPortal} from 'react-dom'
 import {Icon} from './Icon'
+import {Empty} from './DataDisplay'
 
 /* -------------------------------------------------------------------------------------------------
  * Overlay stack
@@ -213,4 +214,15 @@ export function Drawer({open,onClose,title,eyebrow,subtitle,children,actions,siz
 
 export function Confirm({open,onClose,onConfirm,title='Tasdiqlaysizmi?',text='Bu amalni davom ettirmoqchimisiz?',confirmText='Tasdiqlash',danger=false,children}:{open:boolean;onClose:()=>void;onConfirm:()=>void;title?:string;text?:ReactNode;confirmText?:string;danger?:boolean;children?:ReactNode}){
   return <Modal open={open} onClose={onClose} title={title} size="sm" footer={<><button type="button" className="secondary-glass-btn" data-autofocus={danger?true:undefined} onClick={onClose}>Bekor qilish</button><button type="button" data-autofocus={danger?undefined:true} className={danger?'danger-glass-btn':'primary-glass-btn'} onClick={()=>{onConfirm();onClose()}}><Icon name={danger?'trash':'check'} size={16}/>{confirmText}</button></>}><div className={`confirm-copy ${danger?'danger':''}`}><Icon name={danger?'warning':'info'} size={18}/><div><p>{text}</p>{children}</div></div></Modal>
+}
+
+/**
+ * A deep link (search result, message, pasted URL) to a record this person cannot open: gone, or outside their
+ * branch / warehouse scope (audit #7). The page explains it instead of silently opening nothing.
+ */
+export function RecordUnavailable({label,onClose}:{label:string;onClose:()=>void}){
+  return <Drawer open onClose={onClose} title={label} eyebrow="Yozuv ochilmadi" icon="lock" size="md">
+    <Empty icon="lock" title="Yozuv topilmadi yoki ko‘rish ruxsati yo‘q" text="Bu yozuv o‘chirilgan yoki sizning filial / ombor doirangizdan tashqarida. Kerak bo‘lsa administratorga murojaat qiling."
+      action={<button type="button" className="secondary-glass-btn" onClick={onClose}>Yopish</button>}/>
+  </Drawer>
 }

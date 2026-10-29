@@ -6,7 +6,7 @@ import type {ProductionStatus} from '../../../types'
 import {DASHBOARD_PERIODS as P,dashboardSnapshot} from '../../../domain/dashboard'
 import {deliveryRisk} from '../../../domain/manufacturingEngine'
 import type {MaterialStockState} from '../../../domain/manufacturingEngine'
-import {longDate,parseDate,shortDate} from '../../../utils/dates'
+import {dayOfMonth,displayStamp,isAmbiguousStamp,longDate,shortDate} from '../../../utils/dates'
 import {cls,compactDuration as hours,compactMoney,num,qty} from '../../../utils/format'
 import {equipmentName,itemUnitOf,materialName,productName,workCenterCode} from '../../common/lookups'
 import {BarList,ColumnChart,StackedBar} from '../../common/charts'
@@ -23,7 +23,8 @@ const names=(list:string[])=>{const u=[...new Set(list)];return u.slice(0,3).joi
 const ordersPath=(query='')=>`/production?view=orders${query?`&${query}`:''}`
 const statusPath=(status:string)=>ordersPath(`status=${encodeURIComponent(status)}`)
 const signedMoney=(v:number)=>`${v>0?'+':''}${compactMoney(v)}`
-const eventTime=(stamp:string,today:string)=>stamp.slice(0,10)===today?stamp.slice(11,16):`${shortDate(stamp)} ${stamp.slice(11,16)}`
+// In today's company zone; a time written around a zone change is shown as written and marked (≈).
+const eventTime=(raw:string,today:string)=>{const stamp=displayStamp(raw).slice(0,16),mark=isAmbiguousStamp(raw)?' ≈':'';return (stamp.slice(0,10)===today?stamp.slice(11,16):`${shortDate(stamp)} ${stamp.slice(11,16)}`)+mark}
 
 export default function Dashboard(){
   const app=useApp(),s=app.state,navigate=useNavigate()
@@ -82,7 +83,7 @@ export default function Dashboard(){
       <Card className="dash-panel dash-trend" title="Ishlab chiqarish" subtitle={`fakt ${num(output.trendProduced)} / reja ${num(output.trendPlanned)}${trendPct===null?'':` · ${trendPct}%`}`}
         actions={<><Segmented ariaLabel="Trend davri" items={[{value:'7',label:'7 kun'},{value:'30',label:'30 kun'}]} value={String(trendDays)} onChange={setTrend}/>{link('Hisobot',`/reports?view=production&days=${trendDays}`)}</>}>
         <ColumnChart title={`Oxirgi ${trendDays} kun: fakt va reja`} height={188} unit="dona" valueLabel="Fakt" referenceLabel="Reja" tickEvery={trendDays===30?5:1}
-          data={output.trend.map(x=>({label:trendDays===7?x.label:String(parseDate(x.date).getDate()),value:x.produced,reference:x.planned,detail:shortDate(x.date)}))}/>
+          data={output.trend.map(x=>({label:trendDays===7?x.label:String(dayOfMonth(x.date)),value:x.produced,reference:x.planned,detail:shortDate(x.date)}))}/>
       </Card>
 
       <Card className="dash-panel dash-status" title="Buyurtmalar holati" subtitle={`${d.open.length} ochiq`} actions={link('Buyurtmalar',ordersPath())}>

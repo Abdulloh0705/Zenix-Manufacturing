@@ -3,16 +3,18 @@ import type {ReactNode} from 'react'
 import {createInitialState} from '../../../data/mockData'
 import {storage} from '../../../shared/lib/storage'
 import {createSyncedSlot} from '../../../shared/lib/syncedState'
+import type {WriteResult} from '../../../shared/lib/syncedState'
 import {applyAppearance,normalizePrefs,resolveTheme} from '../../theme/preferences'
 import * as A from '../../../domain/actions'
 import type {Ctx,EntityKey,Outcome} from '../../../domain/actions'
 import type {ActionResult,AppearanceFamily,CurrencyCode,Employee,ManufacturingState,PermissionAction,Role,SettingsState,ThemeMode} from '../../../types'
 import {setDisplayCurrency} from '../../../utils/format'
 import {clearTransactions,holdsOnlyDemoRecords,TRANSACTION_KEYS} from '../../../domain/reset'
-import {stamp} from '../../../utils/dates'
-import {actionRules,allowedBy,entityRules,hasPermission,roleOf,scopeBlocker,scopedView} from '../../../domain/access'
+import {recordZoneChange,setTimeZone,setZoneHistory,stamp} from '../../../utils/dates'
+import {scanNotifications} from '../../../domain/notifications'
+import {actionRules,allowedBy,commandBlocker,entityRules,hasPermission,roleOf,scopeBlocker,scopedView} from '../../../domain/access'
 import {SCHEMA_VERSION} from '../../../domain/migrations'
-import {changedRecords,describeReport,looksLikeState,prepareStored} from '../../../domain/persistence'
+import {changedRecords,describeReport,isNewerSchemaText,looksLikeState,newerSchema,prepareStored,strictStringify} from '../../../domain/persistence'
 import * as Auth from '../../../domain/auth'
 import type {Account,AuthOutcome,AuthStore,SecurityPolicy,Session,SessionProblem} from '../../../domain/auth'
 import {PBKDF2_ITERATIONS,hashPassword,makeCredential,randomSalt,verifyPassword} from '../../../shared/lib/crypto'
@@ -27,7 +29,9 @@ const CLEAN_KEY='zenix-manufacturing-v3-clean-start'
 /** Stored text that could not be read is kept here (with a timestamp) before anything is written over it (BUG-14). */
 const CORRUPT_KEY='zenix-manufacturing-v3-unreadable'
 /** The data exactly as it was before its first schema upgrade (written once, never overwritten). */
-const MIGRATION_BACKUP_KEY='zenix-manufacturing-before-v4'
+/** Copy of the data as it was before an upgrade to version N (one per target version, so a later upgrade keeps its own copy). */
+const migrationBackupKey=(version:number)=>`zenix-manufacturing-before-v${version}`
+const MIGRATION_BACKUP_KEY=migrationBackupKey(SCHEMA_VERSION)
 /** The stored text as it was before load-time repair set aside or completed broken records (latest repair). */
 const REPAIR_KEY='zenix-manufacturing-v3-before-repair'
 /** Accounts, password hashes, sign-in policy and the security log — never part of the business data, a backup or a reset. */
@@ -43,8 +47,11 @@ export type ToastTone='success'|'warning'|'danger'|'info'
 export type Toast={id:string;message:string;tone:ToastTone}
 export type UiPreferences=Pick<SettingsState,'theme'|'appearance'|'currency'|'fontSize'|'reducedMotion'|'uiDensity'|'tableDensity'>
 export type {EntityKey}
-/** Stored business data that could not be opened: nothing is written over it until the user chooses what to do. */
-export type Recovery={reason:'unreadable'|'crashed';raw:string}
+/**
+ * Stored business data that could not be opened: nothing is written over it until the user chooses what to do.
+ * 'newer': saved by a newer version of the app (`version`) — this build only offers export and reload (audit #8).
+ */
+export type Recovery={reason:'unreadable'|'crashed'|'newer';raw:string;version?:number}
 /** A copy kept aside by the app (unreadable data, pre-upgrade or pre-repair data) that the user can download. */
 export type RecoveryCopy={key:string;label:string;savedAt?:string;text:string}
 
@@ -58,17 +65,18 @@ const ATTACHMENT_MODULE:Record<string,string>={product:'products',bom:'products'
 type Bound<F>=F extends (s:ManufacturingState,ctx:Ctx,...args:infer P)=>Outcome?(...args:P)=>ActionResult:never
 type DomainApi={
   createProductionOrder:Bound<typeof A.createProductionOrder>;updateProductionOrder:Bound<typeof A.updateProductionOrder>;transitionProduction:Bound<typeof A.transitionProduction>;shortCloseProduction:Bound<typeof A.shortCloseProduction>;reportOutput:Bound<typeof A.reportOutput>;recordScrap:Bound<typeof A.recordScrap>;
-  splitProduction:Bound<typeof A.splitProduction>;mergeProduction:Bound<typeof A.mergeProduction>;createBackorder:Bound<typeof A.createBackorder>;unbuildProduct:Bound<typeof A.unbuildProduct>;issueExtraMaterial:Bound<typeof A.issueExtraMaterial>;checkAvailability:Bound<typeof A.checkAvailability>;
+  splitProduction:Bound<typeof A.splitProduction>;mergeProduction:Bound<typeof A.mergeProduction>;createBackorder:Bound<typeof A.createBackorder>;unbuildProduct:Bound<typeof A.unbuildProduct>;issueExtraMaterial:Bound<typeof A.issueExtraMaterial>;checkAvailability:Bound<typeof A.checkAvailability>;refreshMaterialReservation:Bound<typeof A.refreshMaterialReservation>;
   startWorkOrder:Bound<typeof A.startWorkOrder>;pauseWorkOrder:Bound<typeof A.pauseWorkOrder>;finishWorkOrder:Bound<typeof A.finishWorkOrder>;markSetupDone:Bound<typeof A.markSetupDone>;reportOperationOutput:Bound<typeof A.reportOperationOutput>;assignWorkOrder:Bound<typeof A.assignWorkOrder>;rescheduleProductionOrder:Bound<typeof A.rescheduleProductionOrder>;confirmMrpSuggestion:Bound<typeof A.confirmMrpSuggestion>;setForecast:Bound<typeof A.setForecast>;recordMaterialScan:Bound<typeof A.recordMaterialScan>;rollUpCosts:Bound<typeof A.rollUpCosts>;createReworkOrder:Bound<typeof A.createReworkOrder>;
   createQualityCheck:Bound<typeof A.createQualityCheck>;resolveQuality:Bound<typeof A.resolveQuality>;createQualityAlert:Bound<typeof A.createQualityAlert>;
   createPurchaseOrder:Bound<typeof A.createPurchaseOrder>;createPurchaseOrders:Bound<typeof A.createPurchaseOrders>;linkSupplierMaterial:Bound<typeof A.linkSupplierMaterial>;updateSupplierMaterial:Bound<typeof A.updateSupplierMaterial>;removeSupplierMaterial:Bound<typeof A.removeSupplierMaterial>;setPreferredSupplier:Bound<typeof A.setPreferredSupplier>;saveSupplier:(p:Parameters<typeof A.saveSupplier>[2])=>ActionResult;confirmPurchase:Bound<typeof A.confirmPurchase>;markPurchaseInTransit:Bound<typeof A.markPurchaseInTransit>;cancelPurchase:Bound<typeof A.cancelPurchase>;closePurchaseShort:Bound<typeof A.closePurchaseShort>;updatePurchaseMeta:Bound<typeof A.updatePurchaseMeta>;receivePurchase:Bound<typeof A.receivePurchase>;returnPurchaseToSupplier:Bound<typeof A.returnPurchaseToSupplier>;updatePurchaseDraft:Bound<typeof A.updatePurchaseDraft>;inspectReceipt:Bound<typeof A.inspectReceipt>;scrapRejectedReceipt:Bound<typeof A.scrapRejectedReceipt>;advanceSubcontract:Bound<typeof A.advanceSubcontract>;
-  createSalesOrder:Bound<typeof A.createSalesOrder>;reserveSalesOrder:Bound<typeof A.reserveSalesOrder>;deliverSalesOrder:Bound<typeof A.deliverSalesOrder>;cancelSalesOrder:Bound<typeof A.cancelSalesOrder>;updateSalesMeta:Bound<typeof A.updateSalesMeta>;createReturn:Bound<typeof A.createReturn>;dispositionReturn:Bound<typeof A.dispositionReturn>;
+  createSalesOrder:Bound<typeof A.createSalesOrder>;reserveSalesOrder:Bound<typeof A.reserveSalesOrder>;deliverSalesOrder:Bound<typeof A.deliverSalesOrder>;resolveReturnCredit:Bound<typeof A.resolveReturnCredit>;requestSupplierReplacement:Bound<typeof A.requestSupplierReplacement>;receiveSupplierReplacement:Bound<typeof A.receiveSupplierReplacement>;closeSupplierReplacement:Bound<typeof A.closeSupplierReplacement>;cancelSalesOrder:Bound<typeof A.cancelSalesOrder>;updateSalesMeta:Bound<typeof A.updateSalesMeta>;recordCustomerPayment:Bound<typeof A.recordCustomerPayment>;adjustCustomerBalance:Bound<typeof A.adjustCustomerBalance>;createReturn:Bound<typeof A.createReturn>;dispositionReturn:Bound<typeof A.dispositionReturn>;
   transferStock:Bound<typeof A.transferStock>;adjustStock:Bound<typeof A.adjustStock>;countStock:Bound<typeof A.countStock>;
+  moveStockBin:Bound<typeof A.moveStockBin>;assignVariantStock:Bound<typeof A.assignVariantStock>;setVariantStock:Bound<typeof A.setVariantStock>;allocateLegacyLots:Bound<typeof A.allocateLegacyLots>;
   startDowntime:Bound<typeof A.startDowntime>;endDowntime:Bound<typeof A.endDowntime>;approveMaintenanceRequest:Bound<typeof A.approveMaintenanceRequest>;startMaintenance:Bound<typeof A.startMaintenance>;completeMaintenance:Bound<typeof A.completeMaintenance>;cancelMaintenance:Bound<typeof A.cancelMaintenance>;planPreventiveMaintenance:Bound<typeof A.planPreventiveMaintenance>;advanceRepair:Bound<typeof A.advanceRepair>;createMaintenanceOrder:Bound<typeof A.createMaintenanceOrder>;updateMaintenanceOrder:Bound<typeof A.updateMaintenanceOrder>;saveMaintenancePlan:Bound<typeof A.saveMaintenancePlan>;recordEquipmentRuntime:Bound<typeof A.recordEquipmentRuntime>;
   createBomDraft:Bound<typeof A.createBomDraft>;saveBom:Bound<typeof A.saveBom>;deleteBomDraft:Bound<typeof A.deleteBomDraft>;activateBom:Bound<typeof A.activateBom>;createEngineeringChange:Bound<typeof A.createEngineeringChange>;setEcoStatus:Bound<typeof A.setEcoStatus>;applyEngineeringChange:Bound<typeof A.applyEngineeringChange>;cancelEngineeringChange:Bound<typeof A.cancelEngineeringChange>;archiveBom:Bound<typeof A.archiveBom>;saveRouting:Bound<typeof A.saveRouting>;copyRouting:Bound<typeof A.copyRouting>;saveVariant:Bound<typeof A.saveVariant>;
   updateRolePermission:Bound<typeof A.updateRolePermission>;createRole:Bound<typeof A.createRole>;duplicateRole:Bound<typeof A.duplicateRole>;updateRole:Bound<typeof A.updateRole>;deleteRole:Bound<typeof A.deleteRole>;addAttachment:Bound<typeof A.addAttachment>;removeAttachment:Bound<typeof A.removeAttachment>;
 }
-const DOMAIN_ACTIONS={createProductionOrder:A.createProductionOrder,updateProductionOrder:A.updateProductionOrder,transitionProduction:A.transitionProduction,shortCloseProduction:A.shortCloseProduction,reportOutput:A.reportOutput,recordScrap:A.recordScrap,issueExtraMaterial:A.issueExtraMaterial,splitProduction:A.splitProduction,mergeProduction:A.mergeProduction,createBackorder:A.createBackorder,unbuildProduct:A.unbuildProduct,checkAvailability:A.checkAvailability,startWorkOrder:A.startWorkOrder,pauseWorkOrder:A.pauseWorkOrder,finishWorkOrder:A.finishWorkOrder,markSetupDone:A.markSetupDone,reportOperationOutput:A.reportOperationOutput,assignWorkOrder:A.assignWorkOrder,rescheduleProductionOrder:A.rescheduleProductionOrder,confirmMrpSuggestion:A.confirmMrpSuggestion,setForecast:A.setForecast,recordMaterialScan:A.recordMaterialScan,rollUpCosts:A.rollUpCosts,createReworkOrder:A.createReworkOrder,createQualityCheck:A.createQualityCheck,resolveQuality:A.resolveQuality,createQualityAlert:A.createQualityAlert,createPurchaseOrder:A.createPurchaseOrder,createPurchaseOrders:A.createPurchaseOrders,linkSupplierMaterial:A.linkSupplierMaterial,updateSupplierMaterial:A.updateSupplierMaterial,removeSupplierMaterial:A.removeSupplierMaterial,setPreferredSupplier:A.setPreferredSupplier,confirmPurchase:A.confirmPurchase,markPurchaseInTransit:A.markPurchaseInTransit,cancelPurchase:A.cancelPurchase,closePurchaseShort:A.closePurchaseShort,updatePurchaseMeta:A.updatePurchaseMeta,receivePurchase:A.receivePurchase,returnPurchaseToSupplier:A.returnPurchaseToSupplier,updatePurchaseDraft:A.updatePurchaseDraft,inspectReceipt:A.inspectReceipt,scrapRejectedReceipt:A.scrapRejectedReceipt,advanceSubcontract:A.advanceSubcontract,createSalesOrder:A.createSalesOrder,reserveSalesOrder:A.reserveSalesOrder,deliverSalesOrder:A.deliverSalesOrder,cancelSalesOrder:A.cancelSalesOrder,updateSalesMeta:A.updateSalesMeta,createReturn:A.createReturn,dispositionReturn:A.dispositionReturn,transferStock:A.transferStock,adjustStock:A.adjustStock,countStock:A.countStock,startDowntime:A.startDowntime,endDowntime:A.endDowntime,approveMaintenanceRequest:A.approveMaintenanceRequest,startMaintenance:A.startMaintenance,completeMaintenance:A.completeMaintenance,cancelMaintenance:A.cancelMaintenance,planPreventiveMaintenance:A.planPreventiveMaintenance,advanceRepair:A.advanceRepair,createMaintenanceOrder:A.createMaintenanceOrder,updateMaintenanceOrder:A.updateMaintenanceOrder,saveMaintenancePlan:A.saveMaintenancePlan,recordEquipmentRuntime:A.recordEquipmentRuntime,createBomDraft:A.createBomDraft,saveBom:A.saveBom,deleteBomDraft:A.deleteBomDraft,activateBom:A.activateBom,createEngineeringChange:A.createEngineeringChange,setEcoStatus:A.setEcoStatus,applyEngineeringChange:A.applyEngineeringChange,cancelEngineeringChange:A.cancelEngineeringChange,archiveBom:A.archiveBom,saveRouting:A.saveRouting,copyRouting:A.copyRouting,saveVariant:A.saveVariant,updateRolePermission:A.updateRolePermission,createRole:A.createRole,duplicateRole:A.duplicateRole,updateRole:A.updateRole,deleteRole:A.deleteRole,addAttachment:A.addAttachment,removeAttachment:A.removeAttachment} as const
+const DOMAIN_ACTIONS={createProductionOrder:A.createProductionOrder,updateProductionOrder:A.updateProductionOrder,transitionProduction:A.transitionProduction,shortCloseProduction:A.shortCloseProduction,reportOutput:A.reportOutput,recordScrap:A.recordScrap,issueExtraMaterial:A.issueExtraMaterial,splitProduction:A.splitProduction,mergeProduction:A.mergeProduction,createBackorder:A.createBackorder,unbuildProduct:A.unbuildProduct,checkAvailability:A.checkAvailability,refreshMaterialReservation:A.refreshMaterialReservation,startWorkOrder:A.startWorkOrder,pauseWorkOrder:A.pauseWorkOrder,finishWorkOrder:A.finishWorkOrder,markSetupDone:A.markSetupDone,reportOperationOutput:A.reportOperationOutput,assignWorkOrder:A.assignWorkOrder,rescheduleProductionOrder:A.rescheduleProductionOrder,confirmMrpSuggestion:A.confirmMrpSuggestion,setForecast:A.setForecast,recordMaterialScan:A.recordMaterialScan,rollUpCosts:A.rollUpCosts,createReworkOrder:A.createReworkOrder,createQualityCheck:A.createQualityCheck,resolveQuality:A.resolveQuality,createQualityAlert:A.createQualityAlert,createPurchaseOrder:A.createPurchaseOrder,createPurchaseOrders:A.createPurchaseOrders,linkSupplierMaterial:A.linkSupplierMaterial,updateSupplierMaterial:A.updateSupplierMaterial,removeSupplierMaterial:A.removeSupplierMaterial,setPreferredSupplier:A.setPreferredSupplier,confirmPurchase:A.confirmPurchase,markPurchaseInTransit:A.markPurchaseInTransit,cancelPurchase:A.cancelPurchase,closePurchaseShort:A.closePurchaseShort,updatePurchaseMeta:A.updatePurchaseMeta,receivePurchase:A.receivePurchase,returnPurchaseToSupplier:A.returnPurchaseToSupplier,updatePurchaseDraft:A.updatePurchaseDraft,inspectReceipt:A.inspectReceipt,scrapRejectedReceipt:A.scrapRejectedReceipt,requestSupplierReplacement:A.requestSupplierReplacement,receiveSupplierReplacement:A.receiveSupplierReplacement,closeSupplierReplacement:A.closeSupplierReplacement,advanceSubcontract:A.advanceSubcontract,createSalesOrder:A.createSalesOrder,reserveSalesOrder:A.reserveSalesOrder,deliverSalesOrder:A.deliverSalesOrder,cancelSalesOrder:A.cancelSalesOrder,updateSalesMeta:A.updateSalesMeta,recordCustomerPayment:A.recordCustomerPayment,adjustCustomerBalance:A.adjustCustomerBalance,resolveReturnCredit:A.resolveReturnCredit,createReturn:A.createReturn,dispositionReturn:A.dispositionReturn,transferStock:A.transferStock,moveStockBin:A.moveStockBin,assignVariantStock:A.assignVariantStock,setVariantStock:A.setVariantStock,allocateLegacyLots:A.allocateLegacyLots,adjustStock:A.adjustStock,countStock:A.countStock,startDowntime:A.startDowntime,endDowntime:A.endDowntime,approveMaintenanceRequest:A.approveMaintenanceRequest,startMaintenance:A.startMaintenance,completeMaintenance:A.completeMaintenance,cancelMaintenance:A.cancelMaintenance,planPreventiveMaintenance:A.planPreventiveMaintenance,advanceRepair:A.advanceRepair,createMaintenanceOrder:A.createMaintenanceOrder,updateMaintenanceOrder:A.updateMaintenanceOrder,saveMaintenancePlan:A.saveMaintenancePlan,recordEquipmentRuntime:A.recordEquipmentRuntime,createBomDraft:A.createBomDraft,saveBom:A.saveBom,deleteBomDraft:A.deleteBomDraft,activateBom:A.activateBom,createEngineeringChange:A.createEngineeringChange,setEcoStatus:A.setEcoStatus,applyEngineeringChange:A.applyEngineeringChange,cancelEngineeringChange:A.cancelEngineeringChange,archiveBom:A.archiveBom,saveRouting:A.saveRouting,copyRouting:A.copyRouting,saveVariant:A.saveVariant,updateRolePermission:A.updateRolePermission,createRole:A.createRole,duplicateRole:A.duplicateRole,updateRole:A.updateRole,deleteRole:A.deleteRole,addAttachment:A.addAttachment,removeAttachment:A.removeAttachment} as const
 
 type AppContextValue=DomainApi&{
   state:ManufacturingState;resolvedTheme:'light'|'dark';toasts:Toast[];dismissToast:(id:string)=>void;
@@ -102,13 +110,16 @@ const NO_ROLE:Role={id:'',name:'—',scope:'all',permissions:{}}
 const NOTICE:Record<SessionProblem|'logout'|'elsewhere',string>={missing:'',logout:'Tizimdan chiqdingiz.',expired:'Session muddati tugadi — qayta kiring.',idle:'Uzoq vaqt harakatsizlik sababli session yopildi — qayta kiring.',blocked:'Akkauntingiz bloklangan yoki o‘zgartirilgan — administratorga murojaat qiling.',elsewhere:'Boshqa oynada tizimdan chiqildi.',credentials:'Parolingiz o‘zgartirildi — yangi parol bilan qayta kiring.'}
 
 type Notice={text:string;tone:ToastTone}
-type Boot={state:ManufacturingState;recovery:Recovery|null;notices:Notice[]}
+/** `unsaved`: the stored text, kept only in memory because its copy did not fit before an upgrade or repair. */
+type Boot={state:ManufacturingState;recovery:Recovery|null;notices:Notice[];unsaved?:RecoveryCopy}
 
-/** Stored text → state (repair, new defaults, migrations); null when it is not ZENIX data at all. */
+/** Stored text → state (repair, new defaults, migrations); null when it is not ZENIX data at all or of a newer schema. */
 const parseStored=(raw:string):ManufacturingState|null=>{
   const parsed=JSON.parse(raw) as unknown
-  return looksLikeState(parsed)?prepareStored(parsed,createInitialState()).state:null
+  return looksLikeState(parsed)&&newerSchema(parsed)===undefined?prepareStored(parsed,createInitialState()).state:null
 }
+/** What a save did: 'suspended' while recovery mode keeps the stored data untouched. */
+type SaveOutcome=WriteResult|'suspended'
 
 /**
  * Opens the stored data. Unreadable data, or data that cannot be loaded at all, is never replaced
@@ -122,17 +133,26 @@ function hydrate():Boot{
   let parsed:unknown
   try{parsed=JSON.parse(raw)}catch{parsed=undefined}
   if(!looksLikeState(parsed))return {state:seed,recovery:{reason:'unreadable',raw},notices:[]}
+  // A newer app version saved this: loading it here would migrate it "back" and the next save would downgrade it (audit #8).
+  const newer=newerSchema(parsed)
+  if(newer!==undefined)return {state:seed,recovery:{reason:'newer',raw,version:newer},notices:[]}
   try{
     const {state,report}=prepareStored(parsed,seed)
     const notices:Notice[]=[]
-    if(changedRecords(report)&&!storage.setRaw(REPAIR_KEY,JSON.stringify({savedAt:stamp(new Date()),raw})))notices.push({text:'Tiklashdan oldingi nusxa saqlanmadi (brauzer xotirasi to‘la) — Tizim → Backup eksport qiling.',tone:'danger'})
+    // A copy that does not fit (storage near quota) is kept in memory instead, and the stored original is not
+    // written over by the load itself — only by the user's first change, after they were told to download it.
+    let unsaved:RecoveryCopy|undefined
+    const original:RecoveryCopy={key:'original',label:'Asl ma’lumot (brauzerda nusxasi saqlanmadi)',savedAt:stamp(new Date()),text:raw}
+    const HELD='Asl ma’lumot o‘zgartirilmadi — birinchi o‘zgarishdan oldin uni Tizim → Tiklash nusxalari bo‘limidan yuklab oling.'
+    if(changedRecords(report)&&!storage.setRaw(REPAIR_KEY,JSON.stringify({savedAt:stamp(new Date()),raw}))){unsaved=original;notices.push({text:`Tiklashdan oldingi nusxa saqlanmadi (brauzer xotirasi to‘la). ${HELD}`,tone:'danger'})}
     if(report.migrations.length){
       const kept=storage.getRaw(MIGRATION_BACKUP_KEY)!==null||storage.set(MIGRATION_BACKUP_KEY,{savedAt:stamp(new Date()),from:parsed.schemaVersion??3,to:SCHEMA_VERSION,state:parsed})
-      notices.push(kept?{text:`Ma’lumotlar v${SCHEMA_VERSION} ga yangilandi (rollar va ruxsatlar). Oldingi nusxa zaxirada saqlandi.`,tone:'info'}:{text:`Ma’lumotlar v${SCHEMA_VERSION} ga yangilandi, lekin zaxira nusxasi saqlanmadi (brauzer xotirasi to‘la) — Tizim → Backup eksport qiling.`,tone:'warning'})
+      if(!kept)unsaved=original
+      notices.push(kept?{text:`Ma’lumotlar v${SCHEMA_VERSION} ga yangilandi (${report.migrations.map(m=>m.split(':')[0]).join(', ')}). Oldingi nusxa zaxirada saqlandi.`,tone:'info'}:{text:`Ma’lumotlar v${SCHEMA_VERSION} ga yangilandi, lekin zaxira nusxasi saqlanmadi (brauzer xotirasi to‘la). ${HELD}`,tone:'warning'})
     }
     const found=describeReport(report)
     if(found)notices.push({text:`Saqlangan ma’lumot tekshirildi: ${found}. Asl nusxa Tizim → Tiklash nusxalari bo‘limida.`,tone:'warning'})
-    return {state:hydrateLoaded(parsed,state),recovery:null,notices}
+    return {state:hydrateLoaded(parsed,state),recovery:null,notices,unsaved}
   }catch(error){
     console.error('Stored data could not be loaded',error)
     return {state:seed,recovery:{reason:'crashed',raw},notices:[]}
@@ -182,26 +202,44 @@ export function AppProvider({children}:{children:ReactNode}){
   const [authNotice,setAuthNotice]=useState('')
   const storageWarned=useRef(false)
   /** The stored copy shared with other tabs: read before every action, written right after it (BUG-14). */
-  const slot=useRef(createSyncedSlot<ManufacturingState>(storage,STORAGE_KEY,parseStored,storage.getRaw(STORAGE_KEY))).current
+  // Data of a newer schema is never written over, and a value JSON cannot keep (NaN, ±Infinity) stops the save.
+  const slot=useRef(createSyncedSlot<ManufacturingState>(storage,STORAGE_KEY,parseStored,storage.getRaw(STORAGE_KEY),{locked:isNewerSchemaText,stringify:strictStringify})).current
 
-  /** Saves now; false when nothing could be saved. Suspended in recovery mode, so unreadable data is never overwritten. */
-  const persist=(value:ManufacturingState):boolean=>{
-    if(recoveryRef.current)return false
+  /** Another tab of a newer app version saved: this tab stops writing and offers export / reload (audit #8). */
+  const enterNewerRecovery=(raw:string)=>{
+    let version:number|undefined
+    try{version=newerSchema(JSON.parse(raw))}catch{version=undefined}
+    const next:Recovery={reason:'newer',raw,version}
+    recoveryRef.current=next;setRecovery(next)
+  }
+
+  /** Saves now; true only when the data is durably stored. Suspended in recovery mode, so unreadable data is never overwritten. */
+  const persist=(value:ManufacturingState):boolean=>{const out=save(value);return out==='saved'||out==='same'}
+  const save=(value:ManufacturingState):SaveOutcome=>{
+    if(recoveryRef.current)return 'suspended'
+    // The loaded data, unchanged, is not saved over an original that has no copy aside (see hydrate).
+    if(boot.unsaved&&value===boot.state)return 'same'
     const out=slot.write(value)
+    if(out==='locked'){enterNewerRecovery(storage.getRaw(STORAGE_KEY)||'');return out}
+    if(out==='invalid'){
+      console.error('State not saved: it holds a number JSON cannot store')
+      pushToast('Ma’lumotda saqlab bo‘lmaydigan son (NaN/cheksiz) bor — o‘zgarish saqlanmadi.','danger')
+      return out
+    }
     if(out==='conflict'){
       // Another tab saved in between: its data wins, and this tab says what it could not keep.
       const base=slot.latest(value)
       if(base.changed){stateRef.current=base.state;setState(base.state)}
       pushToast('Boshqa oynada ma’lumot o‘zgartirildi — shu oynadagi oxirgi o‘zgarish saqlanmadi, uni qayta bajaring.','warning')
-      return false
+      return out
     }
-    if(out!=='failed'){if(storageWarned.current){storageWarned.current=false;setStorageError(false)}return true}
+    if(out!=='failed'){if(storageWarned.current){storageWarned.current=false;setStorageError(false)}return out}
     setStorageError(true)
     if(!storageWarned.current){
       storageWarned.current=true
       pushToast('Brauzer xotirasi to‘ldi — oxirgi o‘zgarishlar saqlanmadi. Katta hujjatlarni o‘chiring yoki Tizim → Eksport qiling.','danger')
     }
-    return false
+    return out
   }
 
   useEffect(()=>{
@@ -218,6 +256,7 @@ export function AppProvider({children}:{children:ReactNode}){
     // Another tab saved: continue from its data instead of overwriting it with this tab's older copy (BUG-14).
     const synced=(e:StorageEvent)=>{
       if(e.key!==STORAGE_KEY)return
+      if(isNewerSchemaText(e.newValue)){enterNewerRecovery(e.newValue!);return}
       const next=slot.receive(e.newValue)
       if(!next)return
       stateRef.current=next;setState(next)
@@ -253,6 +292,9 @@ export function AppProvider({children}:{children:ReactNode}){
   const currentRole=(session&&roleOf(state,currentEmployee.id))||NO_ROLE
   const can=useCallback((module:string,action:PermissionAction='view')=>Boolean(session)&&hasPermission(currentRole,module,action),[currentRole,session])
   // A scoped role reads only its branch / warehouse / work center (P1-2); actions still validate against the full data.
+  // Every date helper reads "today" and wall-clock times in the company timezone (audit #20); set before anything renders.
+  setTimeZone(state.settings.company?.timezone)
+  setZoneHistory(state.settings.company?.zoneHistory)
   const view=useMemo(()=>scopedView(state,session?currentEmployee:undefined),[state,session,currentEmployee])
 
   function pushToast(message:string,tone:ToastTone='success'){
@@ -277,7 +319,8 @@ export function AppProvider({children}:{children:ReactNode}){
     }
     stateRef.current=next;setState(next)
   }
-  const activityArchive=()=>storage.get<ManufacturingState['activity']>(ACTIVITY_ARCHIVE_KEY,[])
+  // An action rolled back after a failed save may leave archived entries that are still in the working data.
+  const activityArchive=()=>{const live=new Set(stateRef.current.activity.map(a=>a.id));return storage.get<ManufacturingState['activity']>(ACTIVITY_ARCHIVE_KEY,[]).filter(a=>!live.has(a.id))}
   const me=()=>sessionRef.current?.employeeId||''
   const actor=()=>stateRef.current.employees.find(e=>e.id===me())
   const makeCtx=():Ctx=>({now:new Date(),user:actor()||NOBODY,id:uid})
@@ -290,15 +333,37 @@ export function AppProvider({children}:{children:ReactNode}){
     const base=slot.latest(stateRef.current)
     if(base.changed){stateRef.current=base.state;setState(base.state)}
     let out:Outcome
-    try{out=fn(stateRef.current,makeCtx())}catch(error){console.error(`[${name}]`,error);const message=error instanceof A.StockError?error.message:'Kutilmagan xatolik — amal bajarilmadi';pushToast(message,'danger');return {ok:false,message}}
+    const ctx=makeCtx()
+    try{out=fn(stateRef.current,ctx)}catch(error){console.error(`[${name}]`,error);const message=error instanceof A.StockError?error.message:'Kutilmagan xatolik — amal bajarilmadi';pushToast(message,'danger');return {ok:false,message}}
     // Whatever the action, at least one Super Admin must still be able to sign in (A-H2), checked with the accounts too.
     if(out.result.ok&&!Auth.superAdminInvariant(authRef.current,out.state)){const message='Bu amal oxirgi faol Super Admin kirish huquqini olib qo‘yadi — bajarilmadi';pushToast(message,'danger');return {ok:false,message}}
+    // Conditions the committed command leaves behind (delays, shortages, due services…) become keyed notifications
+    // (audit #27); only after success, so a refused command never announces anything. A scan error never undoes the command.
+    if(out.result.ok){try{out={...out,state:scanNotifications(out.state,ctx)}}catch(error){console.error('[notifications]',error)}}
+    if(!out.result.ok){
+      // A refusal may still record something (an order put on "material wait"): that is kept and saved as before.
+      if(out.state!==stateRef.current){commit(out.state);persist(stateRef.current)}
+      pushToast(out.result.message,'warning');return out.result
+    }
+    const before=stateRef.current
     commit(out.state)
     // Saved at once rather than after the debounce: a tab closed or another tab acting right after cannot lose it.
     // What is saved is the committed state (older activity already moved to its archive).
-    const saved=out.result.ok?persist(stateRef.current):true
-    if(!saved){pushToast(`${out.result.message} — lekin brauzerda saqlanmadi`,'warning');return out.result}
-    if(!out.result.ok||!silentSuccess)pushToast(out.result.message,out.result.ok?'success':'warning')
+    const saved=save(stateRef.current)
+    if(saved!=='saved'&&saved!=='same'){
+      // Success means durably saved (audit #9): an action that could not be saved is undone here, so the form stays
+      // open with what was typed and pressing save again cannot apply it twice. On a conflict the other tab's data is
+      // already in place; with newer-version data nothing is written at all.
+      if(saved==='failed'||saved==='invalid'){stateRef.current=before;setState(before)}
+      const why=saved==='conflict'?'boshqa oynada ma’lumot o‘zgardi — yangilangan ma’lumot bilan qayta bajaring'
+        :saved==='locked'||saved==='suspended'?'saqlangan ma’lumot ilovaning yangiroq versiyasiga tegishli — sahifani yangilang'
+        :saved==='invalid'?'ma’lumotda saqlab bo‘lmaydigan son bor'
+        :'brauzer xotirasiga yozib bo‘lmadi — joy bo‘shating (Tizim → Eksport, katta hujjatlarni o‘chirish) va qayta urinib ko‘ring'
+      const message=`Saqlanmadi: ${why}. Amal bajarilmadi.`
+      pushToast(message,'danger')
+      return {ok:false,message,code:'not-saved'}
+    }
+    if(!silentSuccess)pushToast(out.result.message,'success')
     return out.result
   }
   /** Changes outside domain actions (preferences, settings, read marks) start from the newest save too, and are saved at once. */
@@ -311,9 +376,10 @@ export function AppProvider({children}:{children:ReactNode}){
   }
 
   // Every domain action is checked against its rule for these exact arguments (e.g. running vs cancelling an order).
-  // The role's scope (own work center / branch) is checked on the same call, against the data it touches (A-H6).
+  // The role's rule and scope (own work center / branch / warehouse) are checked again on the same call, against
+  // the very data it runs on, by the one domain gate (A-H6 / audit #6).
   const domain=Object.fromEntries(Object.entries(DOMAIN_ACTIONS).map(([name,fn])=>[name,(...args:unknown[])=>execute(name,(s,ctx)=>{
-    const outside=scopeBlocker(s,ctx.user,name,args)
+    const outside=commandBlocker(s,ctx.user,name,args)
     return outside?{state:s,result:{ok:false,message:outside}}:(fn as (s:ManufacturingState,ctx:Ctx,...a:unknown[])=>Outcome)(s,ctx,...args)
   },actionRules(name,args)??[['__unlisted__','view']])])) as unknown as DomainApi
 
@@ -345,7 +411,9 @@ export function AppProvider({children}:{children:ReactNode}){
     const businessChange=Object.keys(patch).some(k=>!UI_KEYS.includes(k as keyof UiPreferences))
     if(businessChange&&!allowed([['settings','edit']])){pushToast('Sozlamalarni o‘zgartirish uchun ruxsat yo‘q','danger');return}
     commitLatest(s=>{
-      const next={...s,settings:{...s.settings,...patch}}
+      // A company clock change keeps the zone history, so timestamps written before it keep their real instant.
+      const company=patch.company&&patch.company.timezone!==s.settings.company.timezone?recordZoneChange(s.settings.company,patch.company,new Date()):patch.company
+      const next={...s,settings:{...s.settings,...patch,...(company?{company}:{})}}
       return businessChange?A.logActivity(next,makeCtx(),'Sozlamani o‘zgartirdi','Sozlamalar',Object.keys(patch).join(', ')):next
     })
     if(businessChange)pushToast('Sozlamalar saqlandi')
@@ -367,6 +435,9 @@ export function AppProvider({children}:{children:ReactNode}){
   const replaceAll=(data:unknown,reason:string):ActionResult=>{
     if(!allowed([['settings','edit']])){const message='Backup tiklash uchun ruxsat yo‘q';pushToast(message,'danger');return {ok:false,message}}
     const shape=data as Partial<ManufacturingState>|null
+    // A backup of a newer app version would be migrated "back" and saved in the older schema (audit #8).
+    const newer=newerSchema(shape)
+    if(newer!==undefined){const message=`Backup ilovaning yangiroq versiyasida (v${newer}) yaratilgan — bu versiya (v${SCHEMA_VERSION}) uni tiklay olmaydi. Ilovani yangilang.`;pushToast(message,'danger');return {ok:false,message}}
     const arrays:(keyof ManufacturingState)[]=['productionOrders','stockBalances','products','rawMaterials','warehouses','employees','roles']
     if(!shape||typeof shape!=='object'||arrays.some(k=>!Array.isArray(shape[k]))||!(shape.employees||[]).length||!(shape.roles||[]).length){
       const message='Fayl ZENIX backup formatiga mos emas';pushToast(message,'danger');return {ok:false,message}
@@ -410,6 +481,8 @@ export function AppProvider({children}:{children:ReactNode}){
   const startClean=(withoutCopy=false):ActionResult=>{
     const current=recoveryRef.current
     if(!current)return {ok:false,message:'Tiklash talab qilinmaydi'}
+    // Data of a newer version is not replaced from an older build: export it and open the newer app instead.
+    if(current.reason==='newer'){const message='Ma’lumot ilovaning yangiroq versiyasiga tegishli — uni bu versiyada almashtirib bo‘lmaydi. Nusxani yuklab oling va sahifani yangilang.';pushToast(message,'danger');return {ok:false,message}}
     const kept=storage.setRaw(CORRUPT_KEY,JSON.stringify({savedAt:stamp(new Date()),reason:current.reason,raw:current.raw}))
     if(!kept&&!withoutCopy){const message='Nusxa brauzerda saqlanmadi — avval faylni yuklab oling';pushToast(message,'danger');return {ok:false,message}}
     recoveryRef.current=null;setRecovery(null)
@@ -423,11 +496,15 @@ export function AppProvider({children}:{children:ReactNode}){
   }
   const recoveryCopies=():RecoveryCopy[]=>{
     const read=(key:string)=>{try{const raw=storage.getRaw(key);return raw?JSON.parse(raw) as {savedAt?:string;raw?:string;state?:unknown}:null}catch{return null}}
-    const list:RecoveryCopy[]=[]
-    const unreadable=read(CORRUPT_KEY),repair=read(REPAIR_KEY),migration=read(MIGRATION_BACKUP_KEY)
+    const list:RecoveryCopy[]=boot.unsaved?[boot.unsaved]:[]
+    const unreadable=read(CORRUPT_KEY),repair=read(REPAIR_KEY)
     if(unreadable?.raw)list.push({key:'unreadable',label:'O‘qilmagan ma’lumot',savedAt:unreadable.savedAt,text:unreadable.raw})
     if(repair?.raw)list.push({key:'repair',label:'Tiklashdan oldingi ma’lumot',savedAt:repair.savedAt,text:repair.raw})
-    if(migration?.state)list.push({key:'migration',label:'Versiya yangilanishidan oldingi ma’lumot',savedAt:migration.savedAt,text:JSON.stringify(migration.state)})
+    // Every upgrade keeps its own copy (before v4, before v5 …), newest first.
+    for(let v=SCHEMA_VERSION;v>=4;v--){
+      const migration=read(migrationBackupKey(v))
+      if(migration?.state)list.push({key:v===SCHEMA_VERSION?'migration':`migration-v${v}`,label:`v${v} yangilanishidan oldingi ma’lumot`,savedAt:migration.savedAt,text:JSON.stringify(migration.state)})
+    }
     return list
   }
 

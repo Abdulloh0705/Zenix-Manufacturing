@@ -4,6 +4,7 @@ import {useApp} from '../../../app/providers/AppProvider/AppContext'
 import {Card,Confirm,Empty,Field,FilterSelect,Icon,InfoGrid,Input,KPI,Modal,MoneyInput,PageHeader,ResourceTable,Select,StatusBadge,positive,required,useForm,useSearchParamState} from '../../../shared/ui'
 import type {Expense} from '../../../types'
 import {orderCosting} from '../../../domain/manufacturingEngine'
+import {customerBalance} from '../../../domain/receivables'
 import {addDays,formatMinutes,periodStart,todayISO} from '../../../utils/dates'
 import {cls,compactMoney,money,num} from '../../../utils/format'
 import {productName} from '../../common/lookups'
@@ -23,10 +24,11 @@ const TYPES:Expense['type'][]=['Electricity','Labor','Machine','Maintenance','Tr
 const TYPE_LABEL:Record<Expense['type'],string>={Electricity:'Elektr energiya',Labor:'Mehnat',Machine:'Uskuna',Maintenance:'Maintenance',Transport:'Transport',Overhead:'Overhead'}
 
 function Overview(){
-  const s=useApp().state,navigate=useNavigate()
+  const app=useApp(),s=app.state,navigate=useNavigate()
   const since=periodStart(30)
   const expenses=s.expenses.filter(e=>e.date>=since)
   const total=expenses.reduce((a,e)=>a+e.amount,0)
+  const receivable=s.customers.reduce((a,c)=>a+Math.max(0,customerBalance(s,c.id)),0)
   const done=s.productionOrders.filter(o=>o.status==='Yakunlangan'&&(o.completedAt||'').slice(0,10)>=since).map(o=>({o,c:orderCosting(s,o)}))
   const actual=done.reduce((a,x)=>a+x.c.actual.total,0),planned=done.reduce((a,x)=>a+x.c.planned.total,0)
   const sum=(side:'planned'|'actual',k:'material'|'labor'|'machine'|'overhead')=>done.reduce((a,x)=>a+x.c[side][k],0)
@@ -40,16 +42,18 @@ function Overview(){
       <KPI label="Amalda vs standart" value={`${actual-planned>0?'+':''}${planned?pct(actual,planned):0}%`} sub={`${actual-planned>0?'+':''}${compactMoney(actual-planned)}`} deltaTone={actual>planned?'down':'up'} tone={actual>planned?'pink':'mint'} icon={<Icon name="chart"/>} onClick={()=>navigate('/reports?view=costs&days=30')}/>
       <KPI label="Scrap yo‘qotishi" value={compactMoney(waste)} sub={actual?`${(waste/actual*100).toFixed(1)}% tannarxdan`:undefined} tone="orange" icon={<Icon name="trash"/>} onClick={()=>navigate('/quality?view=scrap')}/>
       <KPI label="Davr xarajatlari" value={compactMoney(total)} sub={`${expenses.length} yozuv`} tone="purple" icon={<Icon name="wallet"/>} onClick={()=>navigate('/costs?view=expenses')}/>
+      {/* Receivables: the same ledger balance as the customer card and Sales (audit #19). */}
+      <KPI label="Debitorlik qarzi" value={compactMoney(receivable)} sub="mijozlar · ledger" tone="orange" icon={<Icon name="users"/>} onClick={app.can('sales','view')?()=>navigate('/sales?view=receivables'):undefined}/>
     </div>
     <div className="split-even">
       <Card title="Tannarx tarkibi" subtitle="standart vs amalda · yakunlangan MO">
         {done.length?<>
           <StackedBar title="Amaldagi tannarx tarkibi" segments={elements.map(([label,,a],i)=>({label,value:Math.round(a),slot:i+1}))} format={v=>compactMoney(v)}/>
-          <table className="fit cost-compare"><thead><tr><th>Element</th><th className="align-right">Standart</th><th className="align-right">Amalda</th><th className="align-right">Farq</th></tr></thead><tbody>
+          <div className="table-scroll cost-compare"><table className="fit"><thead><tr><th>Element</th><th className="align-right">Standart</th><th className="align-right">Amalda</th><th className="align-right">Farq</th></tr></thead><tbody>
             {elements.map(([label,p,a])=><tr key={label}><td>{label}</td><td className="align-right">{compactMoney(p||0)}</td><td className="align-right">{compactMoney(a)}</td><td className="align-right"><VarianceCell pct={pct(a,p||0)}/></td></tr>)}
             <tr><td>Waste (scrap)</td><td className="align-right muted">—</td><td className="align-right">{compactMoney(waste)}</td><td className="align-right muted">ichida</td></tr>
             <tr className="total"><td>Jami</td><td className="align-right">{compactMoney(planned)}</td><td className="align-right">{compactMoney(actual)}</td><td className="align-right"><VarianceCell pct={pct(actual,planned)}/></td></tr>
-          </tbody></table>
+          </tbody></table></div>
         </>:<Empty compact title="Yakunlangan MO yo‘q" text="30 kun ichida yakunlangan buyurtma tannarxi shu yerda"/>}
       </Card>
       <Card title="Variance · MO" subtitle="amalda − standart" actions={<button type="button" className="ghost-btn" onClick={()=>navigate('/costs?view=costing&status=closed&range=30')}>Costing <Icon name="chevron" size={13}/></button>}>{done.length?<div className="stack-list">{done.sort((a,b)=>Math.abs(b.c.variance)-Math.abs(a.c.variance)).map(({o,c})=><button type="button" className="list-row is-clickable" key={o.id} onClick={()=>navigate(`/production?view=orders&id=${o.id}`)}><span className="list-row-copy"><b>{o.code} · {productName(s,o.productId)}</b><small>{money(c.actual.total)} · birlik {money(c.unitCost)}</small></span><VarianceCell pct={c.variancePct}/></button>)}</div>:<Empty compact title="Yakunlangan MO yo‘q"/>}</Card>
