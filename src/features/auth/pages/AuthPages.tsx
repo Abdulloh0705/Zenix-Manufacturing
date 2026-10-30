@@ -1,14 +1,29 @@
 import {useState} from 'react'
 import type {FormEvent,ReactNode} from 'react'
-import {Navigate,useNavigate,useSearchParams} from 'react-router-dom'
+import {Link,Navigate,useLocation,useNavigate,useSearchParams} from 'react-router-dom'
 import {useApp} from '../../../app/providers/AppProvider/AppContext'
-import {Checkbox,Confirm,Field,Icon,Input,Select} from '../../../shared/ui'
+import {normalizeLogin,registrationProblem,validatePassword} from '../../../domain/auth'
+import type {RegistrationField,SecurityPolicy} from '../../../domain/auth'
+import {randomSalt} from '../../../shared/lib/crypto'
+import {Checkbox,Confirm,Field,Icon,Input,Segmented} from '../../../shared/ui'
 import {downloadText} from '../../../utils/exportData'
 import {todayISO} from '../../../utils/dates'
 
 /** Where to go after signing in: only paths inside this app (never an external URL). */
 export function safeNext(raw:string|null){
-  return raw&&raw.startsWith('/')&&!raw.startsWith('//')&&!raw.startsWith('/login')&&!raw.startsWith('/setup')?raw:'/'
+  return raw&&raw.startsWith('/')&&!raw.startsWith('//')&&!/^\/(login|setup|register|forgot-password)/.test(raw)?raw:'/'
+}
+
+const focusField=(id:string)=>document.getElementById(id)?.focus()
+const passwordHint=(p:SecurityPolicy)=>`Kamida ${p.minPasswordLength} belgi${p.requireLetterAndDigit?', harf va raqam':''}`
+
+/** Switches between the two public pages; the page to return to after signing in stays in the address. */
+function AuthTabs({active}:{active:'login'|'register'}){
+  const [sp]=useSearchParams(),next=sp.get('next'),query=next?`?next=${encodeURIComponent(next)}`:''
+  return <nav className="auth-tabs" aria-label="Kirish yoki ro‘yxatdan o‘tish">
+    <Link to={`/login${query}`} aria-current={active==='login'?'page':undefined}>Kirish</Link>
+    <Link to={`/register${query}`} aria-current={active==='register'?'page':undefined}>Ro‘yxatdan o‘tish</Link>
+  </nav>
 }
 
 const MODULES:Array<{icon:string;title:string;text:string}>=[
@@ -26,7 +41,7 @@ function ThemeSwitch(){
 }
 
 /** Split screen: product panel on the left, the form on the right; below 900px only a compact brand row stays. */
-function AuthShell({title,subtitle,children,footer}:{title:string;subtitle?:ReactNode;children:ReactNode;footer?:ReactNode}){
+function AuthShell({title,subtitle,children,footer,top}:{title:string;subtitle?:ReactNode;children:ReactNode;footer?:ReactNode;top?:ReactNode}){
   return <main className="auth-page">
     <aside className="auth-aside" aria-label="ZENIX Manufacturing">
       <div className="auth-brand"><span className="brand-mark" aria-hidden="true"><b>ZX</b></span><div className="brand-copy"><b>ZENIX</b><span>Manufacturing</span></div></div>
@@ -39,20 +54,30 @@ function AuthShell({title,subtitle,children,footer}:{title:string;subtitle?:Reac
     <section className="auth-main" aria-labelledby="auth-title">
       <div className="auth-toolbar"><div className="auth-brand auth-brand-compact"><span className="brand-mark" aria-hidden="true"><b>ZX</b></span><div className="brand-copy"><b>ZENIX</b><span>Manufacturing</span></div></div><ThemeSwitch/></div>
       <div className="auth-card">
+        {top}
         <header className="auth-head"><h1 id="auth-title">{title}</h1>{subtitle&&<p>{subtitle}</p>}</header>
         {children}
         {footer}
       </div>
-      <p className="auth-demo-note"><Icon name="lock" size={13}/><span>Lokal autentifikatsiya: akkauntlar shu brauzerda saqlanadi. Ochiq foydalanish uchun server tomoni kerak.</span></p>
+      <p className="auth-demo-note"><Icon name="lock" size={13}/><span>Lokal autentifikatsiya: akkaunt faqat shu brauzer va manzilda saqlanadi, boshqa qurilmada ishlamaydi. Ochiq foydalanish uchun server tomoni kerak.</span></p>
     </section>
   </main>
 }
 
-export function PasswordInput({id,value,onChange,autoComplete,autoFocus,invalid}:{id:string;value:string;onChange:(v:string)=>void;autoComplete:string;autoFocus?:boolean;invalid?:boolean}){
+export function PasswordInput({id,value,onChange,autoComplete,autoFocus,invalid,describedBy}:{id:string;value:string;onChange:(v:string)=>void;autoComplete:string;autoFocus?:boolean;invalid?:boolean;describedBy?:string}){
   const [shown,setShown]=useState(false)
   return <div className="input-affix password-field">
-    <input id={id} className="ui-input" type={shown?'text':'password'} value={value} onChange={e=>onChange(e.target.value)} autoComplete={autoComplete} autoFocus={autoFocus} aria-invalid={invalid||undefined} spellCheck={false}/>
+    <input id={id} className="ui-input" type={shown?'text':'password'} value={value} onChange={e=>onChange(e.target.value)} autoComplete={autoComplete} autoFocus={autoFocus} aria-invalid={invalid||undefined} aria-describedby={describedBy} spellCheck={false}/>
     <button type="button" className="password-toggle" onClick={()=>setShown(v=>!v)} aria-label={shown?'Parolni yashirish':'Parolni ko‘rsatish'} aria-pressed={shown}><Icon name={shown?'eye-off':'eye'} size={16}/></button>
+  </div>
+}
+
+function PasswordField({id,label,error,hint,...input}:{id:string;label:string;value:string;onChange:(v:string)=>void;autoComplete:string;autoFocus?:boolean;error?:string;hint?:string}){
+  const noteId=`${id}-note`
+  return <div className={`field ${error?'has-error':''}`}>
+    <label htmlFor={id}>{label}<span className="required-mark" aria-hidden="true">*</span></label>
+    <PasswordInput id={id} {...input} invalid={Boolean(error)} describedBy={error||hint?noteId:undefined}/>
+    {error?<small id={noteId} className="field-error" role="alert">{error}</small>:hint?<small id={noteId} className="field-hint">{hint}</small>:null}
   </div>
 }
 
@@ -85,65 +110,169 @@ export function RecoveryScreen(){
 }
 
 export function LoginPage(){
-  const app=useApp(),navigate=useNavigate(),[sp]=useSearchParams()
+  const app=useApp(),navigate=useNavigate(),[sp]=useSearchParams(),location=useLocation()
   const [login,setLogin]=useState(''),[password,setPassword]=useState(''),[remember,setRemember]=useState(false)
-  const [error,setError]=useState(''),[busy,setBusy]=useState(false)
+  const [errors,setErrors]=useState<{login?:string;password?:string;form?:string}>({}),[busy,setBusy]=useState(false)
   const next=safeNext(sp.get('next'))
-  if(app.auth.needsSetup)return <Navigate to="/setup" replace/>
   if(app.auth.signedIn)return <Navigate to={next} replace/>
+  const notice=(location.state as {notice?:string}|null)?.notice||app.auth.notice
   const submit=async(e:FormEvent)=>{
     e.preventDefault()
     if(busy)return
-    if(!login.trim()||!password){setError('Login va parolni kiriting');return}
-    setBusy(true);setError('')
+    const missing={login:login.trim()?undefined:'Telefon, login yoki e-pochtani kiriting',password:password?undefined:'Parolni kiriting'}
+    if(missing.login||missing.password){setErrors(missing);focusField(missing.login?'login-name':'login-password');return}
+    setBusy(true);setErrors({})
     try{
       const r=await app.login(login,password,remember)
       if(r.ok)navigate(next,{replace:true})
-      else{setError(r.message);setPassword('')}
+      else{setErrors({form:r.message});setPassword('')}
     }finally{setBusy(false)}
   }
-  return <AuthShell title="Tizimga kirish" subtitle="Telefon raqami, login yoki e-pochta bilan kiring">
-    {app.auth.notice&&<div className="inline-note warning" role="status"><Icon name="info"/><span>{app.auth.notice}</span></div>}
+  return <AuthShell title="Tizimga kirish" subtitle="Telefon raqami, login yoki e-pochta bilan kiring" top={<AuthTabs active="login"/>}>
+    {app.auth.setupBlocked&&<div className="inline-note danger" role="alert"><Icon name="warning"/><span>{app.auth.setupBlocked}</span></div>}
+    {app.auth.needsSetup&&!app.auth.setupBlocked&&<div className="inline-note" role="status"><Icon name="info"/><span>Bu brauzerda hali kompaniya ro‘yxatdan o‘tmagan. Akkauntingiz boshqa brauzerda yoki manzilda bo‘lsa, o‘sha yerda kiring: ma’lumotlar brauzerlar o‘rtasida almashmaydi.</span></div>}
+    {notice&&<div className="inline-note warning" role="status"><Icon name="info"/><span>{notice}</span></div>}
     <form className="form-stack" onSubmit={submit} noValidate aria-busy={busy}>
-      <Field label="Telefon yoki login" required><Input id="login-name" placeholder="+998 90 123 45 67" inputMode="text" value={login} onChange={e=>{setLogin(e.target.value);setError('')}} autoComplete="username" autoFocus spellCheck={false} aria-invalid={Boolean(error)||undefined}/></Field>
-      <div className={`field ${error?'has-error':''}`}><label htmlFor="login-password">Parol <span className="req" aria-hidden="true">*</span></label><PasswordInput id="login-password" value={password} onChange={v=>{setPassword(v);setError('')}} autoComplete="current-password" invalid={Boolean(error)}/></div>
-      <Checkbox checked={remember} onChange={setRemember} label="Meni eslab qol" description={`${app.auth.policy.rememberDays} kun davomida`}/>
-      {error&&<div className="inline-note danger" role="alert"><Icon name="warning"/><span>{error}</span></div>}
+      <Field label="Telefon, login yoki e-pochta" required error={errors.login}><Input id="login-name" placeholder="+998 90 123 45 67" inputMode="text" value={login} onChange={e=>{setLogin(e.target.value);setErrors({})}} autoComplete="username" autoFocus spellCheck={false}/></Field>
+      <PasswordField id="login-password" label="Parol" value={password} onChange={v=>{setPassword(v);setErrors({})}} autoComplete="current-password" error={errors.password}/>
+      <div className="auth-row"><Checkbox checked={remember} onChange={setRemember} label="Meni eslab qol" description={`${app.auth.policy.rememberDays} kun davomida`}/><Link className="link-btn" to="/forgot-password">Parolni unutdingizmi?</Link></div>
+      {errors.form&&<div className="inline-note danger" role="alert"><Icon name="warning"/><span>{errors.form}</span></div>}
       <button type="submit" className="primary-glass-btn auth-submit" disabled={busy}>{busy?<><span className="btn-spinner" aria-hidden="true"/>Tekshirilmoqda…</>:<><Icon name="arrow-right" size={16}/>Kirish</>}</button>
     </form>
-    <p className="soft-meta auth-help"><Icon name="key" size={13}/>Parolni unutdingizmi? Administrator vaqtinchalik parol beradi.</p>
   </AuthShell>
 }
 
-export function SetupPage(){
+/**
+ * The first registration of this browser: the existing first-run bootstrap, which works only while no account
+ * exists. Afterwards the page only explains who opens accounts: there is no way to register into a company.
+ */
+export function RegisterPage(){
   const app=useApp(),navigate=useNavigate(),s=app.state
   const people=s.employees.filter(e=>e.status!=='Arxiv')
-  const [employeeId,setEmployeeId]=useState(people.find(e=>e.department==='Management')?.id||people[0]?.id||'')
-  const [username,setUsername]=useState(''),[email,setEmail]=useState(''),[password,setPassword]=useState(''),[confirm,setConfirm]=useState('')
-  const [error,setError]=useState(''),[busy,setBusy]=useState(false)
-  if(!app.auth.needsSetup)return <Navigate to="/login" replace/>
+  const owner=people.find(e=>e.department==='Management')||people[0]
+  const [form,setForm]=useState({name:owner?.name||'',company:s.settings.company.name,username:'',email:'',password:'',confirm:''})
+  const [errors,setErrors]=useState<Partial<Record<RegistrationField|'form',string>>>({}),[busy,setBusy]=useState(false),[issued,setIssued]=useState('')
+  if(issued)return <IssuedKeyScreen value={issued} onDone={()=>navigate('/',{replace:true})}/>
+  // Signing up signs in before the key arrives: while busy this page stays, or the only copy of the key would be lost.
+  if(!busy&&app.auth.signedIn)return <Navigate to="/" replace/>
+  if(!busy&&(!app.auth.needsSetup||app.auth.setupBlocked))return <AuthShell title="Ro‘yxatdan o‘tish" subtitle="Bu brauzerda kompaniya allaqachon ro‘yxatdan o‘tgan." top={<AuthTabs active="register"/>}>
+    {app.auth.setupBlocked
+      ?<div className="inline-note danger" role="alert"><Icon name="warning"/><span>{app.auth.setupBlocked}</span></div>
+      :<div className="inline-note" role="status"><Icon name="info"/><span>Xodim akkauntini faqat administrator ochadi: Admin Panel → Foydalanuvchilar. Login va vaqtinchalik parolni administratoringizdan oling.</span></div>}
+    <Link className="primary-glass-btn auth-submit" to="/login"><Icon name="arrow-right" size={16}/>Kirish sahifasiga o‘tish</Link>
+  </AuthShell>
+  const set=(field:RegistrationField)=>(value:string)=>{setForm(f=>({...f,[field]:value}));setErrors({})}
   const submit=async(e:FormEvent)=>{
     e.preventDefault()
     if(busy)return
-    if(password!==confirm){setError('Parollar mos emas');return}
-    setBusy(true);setError('')
+    const problem=registrationProblem(app.auth.policy,form)
+    if(problem){setErrors({[problem.field]:problem.message});focusField(`register-${problem.field}`);return}
+    if(!owner){setErrors({form:'Faol xodim topilmadi'});return}
+    setBusy(true);setErrors({})
     try{
-      const r=await app.setupSuperAdmin({employeeId,username:username.trim(),email:email.trim()||undefined,password})
-      if(r.ok)navigate('/',{replace:true})
-      else setError(r.message)
+      const r=await app.setupSuperAdmin({employeeId:owner.id,name:form.name,company:form.company,username:form.username.trim(),email:form.email.trim()||undefined,password:form.password})
+      if(r.ok&&r.recoveryKey)setIssued(r.recoveryKey)
+      else setErrors({form:r.message})
     }finally{setBusy(false)}
   }
-  return <AuthShell title="Birinchi sozlash" subtitle="Super Admin akkauntini yarating. Tizimda standart parol yo‘q.">
+  return <AuthShell title="Ro‘yxatdan o‘tish" subtitle="Kompaniyani oching: birinchi akkaunt Super Admin bo‘ladi. Tizimda standart parol yo‘q." top={<AuthTabs active="register"/>}>
     <form className="form-stack" onSubmit={submit} noValidate aria-busy={busy}>
-      <Field label="Xodim" required hint="Super Admin roliga o‘tkaziladi; ma’lumotlar o‘zgarmaydi"><Select value={employeeId} onChange={setEmployeeId} ariaLabel="Xodim">{people.map(e=><option key={e.id} value={e.id}>{e.name} · {e.department}</option>)}</Select></Field>
-      <Field label="Telefon yoki login" required hint="Telefon (+998…) yoki 3–32 lotin belgi"><Input value={username} placeholder="+998 90 123 45 67" onChange={e=>setUsername(e.target.value)} autoComplete="username" spellCheck={false} autoFocus/></Field>
-      <Field label="E-pochta" hint="Ixtiyoriy"><Input type="email" value={email} onChange={e=>setEmail(e.target.value)} autoComplete="email"/></Field>
-      <div className="field"><label htmlFor="setup-password">Parol <span className="req" aria-hidden="true">*</span></label><PasswordInput id="setup-password" value={password} onChange={setPassword} autoComplete="new-password"/><small className="field-hint">Kamida {app.auth.policy.minPasswordLength} belgi{app.auth.policy.requireLetterAndDigit?', harf va raqam':''}</small></div>
-      <div className="field"><label htmlFor="setup-confirm">Parolni takrorlang <span className="req" aria-hidden="true">*</span></label><PasswordInput id="setup-confirm" value={confirm} onChange={setConfirm} autoComplete="new-password"/></div>
-      {error&&<div className="inline-note danger" role="alert"><Icon name="warning"/><span>{error}</span></div>}
-      <button type="submit" className="primary-glass-btn auth-submit" disabled={busy||!employeeId}>{busy?<><span className="btn-spinner" aria-hidden="true"/>Yaratilmoqda…</>:<><Icon name="shield" size={16}/>Super Admin yaratish</>}</button>
+      <Field label="Ism-familiya" required error={errors.name} hint="Mavjud rahbar xodim profili shu nom bilan Super Admin bo‘ladi"><Input id="register-name" value={form.name} onChange={e=>set('name')(e.target.value)} autoComplete="name"/></Field>
+      <Field label="Kompaniya" required error={errors.company}><Input id="register-company" value={form.company} onChange={e=>set('company')(e.target.value)} autoComplete="organization"/></Field>
+      <Field label="Telefon yoki login" required error={errors.username} hint="Telefon (+998…) yoki 3–32 lotin belgi"><Input id="register-username" value={form.username} placeholder="+998 90 123 45 67" onChange={e=>set('username')(e.target.value)} autoComplete="username" spellCheck={false} autoFocus/></Field>
+      <Field label="E-pochta" error={errors.email} hint="Ixtiyoriy"><Input id="register-email" type="email" value={form.email} onChange={e=>set('email')(e.target.value)} autoComplete="email"/></Field>
+      <PasswordField id="register-password" label="Parol" value={form.password} onChange={set('password')} autoComplete="new-password" error={errors.password} hint={passwordHint(app.auth.policy)}/>
+      <PasswordField id="register-confirm" label="Parolni takrorlang" value={form.confirm} onChange={set('confirm')} autoComplete="new-password" error={errors.confirm}/>
+      {errors.form&&<div className="inline-note danger" role="alert"><Icon name="warning"/><span>{errors.form}</span></div>}
+      <button type="submit" className="primary-glass-btn auth-submit" disabled={busy}>{busy?<><span className="btn-spinner" aria-hidden="true"/>Yaratilmoqda…</>:<><Icon name="shield" size={16}/>Kompaniyani ro‘yxatdan o‘tkazish</>}</button>
     </form>
   </AuthShell>
+}
+
+/** A password forgotten without an administrator: the recovery key, or a ticket signed with the owner's private key. */
+export function ForgotPasswordPage(){
+  const app=useApp(),navigate=useNavigate()
+  const [mode,setMode]=useState('key'),[login,setLogin]=useState(''),[key,setKey]=useState(''),[ticket,setTicket]=useState(''),[password,setPassword]=useState(''),[confirm,setConfirm]=useState('')
+  const [errors,setErrors]=useState<{login?:string;key?:string;ticket?:string;password?:string;confirm?:string;form?:string}>({}),[busy,setBusy]=useState(false),[issued,setIssued]=useState('')
+  // A new one per visit: a ticket made for an earlier visit, or for someone else's, is worthless here.
+  const [code]=useState(()=>randomSalt(8))
+  const command=`node scripts/auth-recovery.mjs ticket --login "${normalizeLogin(login)||'LOGIN'}" --code ${code}`
+  if(issued)return <IssuedKeyScreen value={issued} onDone={()=>navigate('/login',{replace:true,state:{notice:'Parol yangilandi — yangi parol bilan kiring.'}})}/>
+  if(app.auth.signedIn)return <Navigate to="/" replace/>
+  if(app.auth.needsSetup)return <Navigate to="/register" replace/>
+  const change=(setter:(v:string)=>void)=>(v:string)=>{setter(v);setErrors({})}
+  const submit=async(e:FormEvent)=>{
+    e.preventDefault()
+    if(busy)return
+    const weak=validatePassword(app.auth.policy,password)
+    const missing=!login.trim()?{login:'Telefon, login yoki e-pochtani kiriting'}:mode==='key'&&!key.trim()?{key:'Tiklash kalitini kiriting'}:mode==='owner'&&!ticket.trim()?{ticket:'Chiptani kiriting'}:weak?{password:weak}:password!==confirm?{confirm:'Parollar mos emas'}:null
+    if(missing){setErrors(missing);focusField(`forgot-${Object.keys(missing)[0]}`);return}
+    setBusy(true);setErrors({})
+    try{
+      const r=mode==='key'?await app.recoverWithKey(login,key,password):await app.recoverWithTicket(login,ticket,code,password)
+      if(r.ok&&r.recoveryKey)setIssued(r.recoveryKey)
+      else setErrors({form:r.message})
+    }finally{setBusy(false)}
+  }
+  return <AuthShell title="Parolni tiklash" subtitle="Parol xesh ko‘rinishida saqlanadi: uni ochib bo‘lmaydi, faqat yangisini o‘rnatish mumkin." footer={<Link className="ghost-btn auth-logout" to="/login"><Icon name="arrow-left" size={15}/>Kirish sahifasiga qaytish</Link>}>
+    <div className="inline-note" role="status"><Icon name="info"/><span>Xodim bo‘lsangiz, administratorga murojaat qiling: u Admin Panel → Foydalanuvchilar’da vaqtinchalik parol beradi.</span></div>
+    <Segmented ariaLabel="Tiklash usuli" value={mode} onChange={v=>{setMode(v);setErrors({})}} items={[{value:'key',label:'Tiklash kaliti'},{value:'owner',label:'Kalitim yo‘q'}]}/>
+    {mode==='owner'&&!app.auth.ownerRecovery?<div className="inline-note warning" role="status"><Icon name="lock"/><span>Bu versiyada egasi tiklashi sozlanmagan, shuning uchun bu yerda parolni almashtirib bo‘lmaydi. Sozlash: docs/AUTH.md → Parolni tiklash.</span></div>
+    :<form className="form-stack" onSubmit={submit} noValidate aria-busy={busy}>
+      <Field label="Telefon, login yoki e-pochta" required error={errors.login}><Input id="forgot-login" value={login} onChange={e=>change(setLogin)(e.target.value)} autoComplete="username" spellCheck={false} autoFocus/></Field>
+      {mode==='owner'&&<>
+        <p className="auth-text">Faqat kompaniya egasi uchun: chiptani brauzerdan tashqarida saqlanadigan maxfiy kalit imzolaydi. Loyiha papkasida shu buyruqni bajaring:</p>
+        <div className="auth-code"><code>{command}</code><CopyButton text={command} label="Buyruqni nusxalash"/></div>
+        <Field label="Imzolangan chipta" required error={errors.ticket} hint="Shu sahifa ochiq turganda, 15 daqiqa ichida"><Input id="forgot-ticket" value={ticket} onChange={e=>change(setTicket)(e.target.value)} autoComplete="off" spellCheck={false}/></Field>
+      </>}
+      {mode==='key'&&<Field label="Tiklash kaliti" required error={errors.key} hint="Ro‘yxatdan o‘tganda berilgan: XXXXX-XXXXX-XXXXX-XXXXX"><Input id="forgot-key" value={key} onChange={e=>change(setKey)(e.target.value)} autoComplete="off" spellCheck={false}/></Field>}
+      <PasswordField id="forgot-password" label="Yangi parol" value={password} onChange={change(setPassword)} autoComplete="new-password" error={errors.password} hint={passwordHint(app.auth.policy)}/>
+      <PasswordField id="forgot-confirm" label="Yangi parolni takrorlang" value={confirm} onChange={change(setConfirm)} autoComplete="new-password" error={errors.confirm}/>
+      {errors.form&&<div className="inline-note danger" role="alert"><Icon name="warning"/><span>{errors.form}</span></div>}
+      <button type="submit" className="primary-glass-btn auth-submit" disabled={busy}>{busy?<><span className="btn-spinner" aria-hidden="true"/>Saqlanmoqda…</>:<><Icon name="key" size={16}/>Parolni tiklash</>}</button>
+    </form>}
+  </AuthShell>
+}
+
+function CopyButton({text,label}:{text:string;label:string}){
+  const [copied,setCopied]=useState(false)
+  const copy=async()=>{try{await navigator.clipboard.writeText(text);setCopied(true)}catch{setCopied(false)}}
+  return <button type="button" className="secondary-glass-btn" onClick={copy}><Icon name={copied?'check':'file'} size={15}/>{copied?'Nusxalandi':label}</button>
+}
+
+/** The key is shown here once: only its hash is stored. The user confirms saving it before moving on. */
+function KeyBlock({value,onDone,doneLabel}:{value:string;onDone:()=>void;doneLabel:string}){
+  const [saved,setSaved]=useState(false)
+  return <div className="form-stack">
+    <div className="auth-code auth-key"><code>{value}</code></div>
+    <div className="auth-actions"><CopyButton text={value} label="Nusxalash"/><button type="button" className="secondary-glass-btn" onClick={()=>downloadText(`zenix-tiklash-kaliti-${todayISO()}.txt`,`ZENIX tiklash kaliti: ${value}\n`,'text/plain')}><Icon name="download" size={15}/>Yuklab olish</button></div>
+    <Checkbox checked={saved} onChange={setSaved} label="Kalitni xavfsiz joyga saqladim"/>
+    <button type="button" className="primary-glass-btn auth-submit" disabled={!saved} onClick={onDone}><Icon name="arrow-right" size={16}/>{doneLabel}</button>
+  </div>
+}
+
+function IssuedKeyScreen({value,onDone}:{value:string;onDone:()=>void}){
+  return <AuthShell title="Tiklash kalitini saqlang" subtitle="Parol unutilsa, shu kalit bilan yangisini o‘rnatasiz. U faqat hozir ko‘rsatiladi va bir marta ishlaydi.">
+    <KeyBlock value={value} onDone={onDone} doneLabel="Davom etish"/>
+  </AuthShell>
+}
+
+/** Profile menu of a Super Admin: makes the key that accounts from before registration do not have yet. */
+export function RecoveryKeyForm({onDone}:{onDone:()=>void}){
+  const app=useApp()
+  const [password,setPassword]=useState(''),[error,setError]=useState(''),[busy,setBusy]=useState(false),[issued,setIssued]=useState('')
+  if(issued)return <KeyBlock value={issued} onDone={onDone} doneLabel="Yopish"/>
+  const submit=async(e:FormEvent)=>{
+    e.preventDefault()
+    if(busy)return
+    setBusy(true);setError('')
+    try{const r=await app.createRecoveryKey(password);if(r.ok&&r.recoveryKey)setIssued(r.recoveryKey);else setError(r.message)}finally{setBusy(false)}
+  }
+  return <form className="form-stack" onSubmit={submit} noValidate aria-busy={busy}>
+    <p className="auth-text">{app.auth.account?.recovery?'Kalit mavjud. Yangisi eskisini bekor qiladi.':'Kalit hali yaratilmagan. U parol unutilganda kirishni tiklaydi.'}</p>
+    <PasswordField id="key-current" label="Joriy parol" value={password} onChange={v=>{setPassword(v);setError('')}} autoComplete="current-password" autoFocus error={error}/>
+    <button type="submit" className="primary-glass-btn auth-submit" disabled={busy}>{busy?<><span className="btn-spinner" aria-hidden="true"/>Yaratilmoqda…</>:<><Icon name="shield" size={16}/>Kalit yaratish</>}</button>
+  </form>
 }
 
 /** Shown instead of the app until a user with a temporary password sets their own. */

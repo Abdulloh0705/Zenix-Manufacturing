@@ -5,7 +5,7 @@ import AppLayout from './layout/AppLayout/AppLayout'
 import {useApp} from './app/providers/AppProvider/AppContext'
 import {Icon} from './shared/ui'
 import {legacyRedirects} from './routes/navigation'
-import {ForcePasswordChange,LoginPage,RecoveryScreen,SetupPage} from './features/auth/pages/AuthPages'
+import {ForcePasswordChange,ForgotPasswordPage,LoginPage,RecoveryScreen,RegisterPage} from './features/auth/pages/AuthPages'
 import {Toasts} from './layout/AppLayout/AppLayout'
 
 const Dashboard=lazy(()=>import('./features/dashboard/pages/Dashboard'))
@@ -34,7 +34,7 @@ function StateCard({icon,title,text,action}:{icon:string;title:string;text:strin
  */
 function RequireAuth({children}:{children:ReactNode}){
   const app=useApp(),location=useLocation()
-  if(app.auth.needsSetup)return <Navigate to="/setup" replace/>
+  if(app.auth.needsSetup)return <Navigate to="/register" replace/>
   if(!app.auth.signedIn)return <Navigate to={`/login?next=${encodeURIComponent(location.pathname+location.search)}`} replace/>
   if(app.auth.account?.mustChangePassword)return <ForcePasswordChange/>
   return children
@@ -78,12 +78,16 @@ export default function App(){
   return <><AppRoutes/><Toasts/></>
 }
 
+const PUBLIC_PATHS=['/login','/register','/forgot-password']
+
 function AppRoutes(){
   return <Routes>
     <Route path="/login" element={<LoginPage/>}/>
-    <Route path="/setup" element={<SetupPage/>}/>
-    {/* Old sign-in addresses lead to the login page without first asking to sign in. */}
-    {Object.entries(legacyRedirects).filter(([,to])=>to==='/login').map(([from,to])=><Route key={from} path={from} element={<Navigate to={to} replace/>}/>)}
+    <Route path="/register" element={<RegisterPage/>}/>
+    <Route path="/forgot-password" element={<ForgotPasswordPage/>}/>
+    <Route path="/setup" element={<Navigate to="/register" replace/>}/>
+    {/* Old sign-in addresses lead to these pages without first asking to sign in. */}
+    {Object.entries(legacyRedirects).filter(([,to])=>PUBLIC_PATHS.includes(to)).map(([from,to])=><Route key={from} path={from} element={<Navigate to={to} replace/>}/>)}
     <Route element={<RequireAuth><AppLayout/></RequireAuth>}>
     <Route path="/" element={<Page><Dashboard/></Page>}/>
     <Route path="/production" element={<Page module="production"><Production/></Page>}/>
@@ -100,7 +104,7 @@ function AppRoutes(){
     <Route path="/settings" element={<Page module="settings"><Settings/></Page>}/>
     <Route path="/ai" element={<Page module="ai"><AI/></Page>}/>
     <Route path="/admin" element={<Page module="users|roles|audit|settings"><Admin/></Page>}/>
-    {Object.entries(legacyRedirects).filter(([from,to])=>from!=='/ai'&&to!=='/login').map(([from,to])=><Route key={from} path={from} element={<Navigate to={to} replace/>}/>)}
+    {Object.entries(legacyRedirects).filter(([from,to])=>from!=='/ai'&&!PUBLIC_PATHS.includes(to)).map(([from,to])=><Route key={from} path={from} element={<Navigate to={to} replace/>}/>)}
     <Route path="/help" element={<Navigate to="/settings?view=system" replace/>}/>
     <Route path="*" element={<NotFound/>}/>
   </Route></Routes>

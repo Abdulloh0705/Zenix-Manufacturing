@@ -118,7 +118,7 @@ test('an operator cannot open Purchases and sees why',async({browser})=>{
   await page.goto('/login')
   await page.evaluate(([sk,s,ak,a,ses])=>{localStorage.setItem(sk,s);localStorage.setItem(ak,a);localStorage.removeItem(ses)},[STATE_KEY,JSON.stringify(adminState()),AUTH_KEY,JSON.stringify(auth),SESSION_KEY])
   await page.goto('/login')
-  await page.getByLabel('Telefon yoki login').fill('e2e.operator')
+  await page.getByLabel('Telefon, login yoki e-pochta').fill('e2e.operator')
   await page.locator('#login-password').fill(password)
   await page.getByRole('button',{name:'Kirish'}).click()
   await expect(page).not.toHaveURL(/\/login/)

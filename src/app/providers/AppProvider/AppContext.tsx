@@ -17,7 +17,7 @@ import {SCHEMA_VERSION} from '../../../domain/migrations'
 import {changedRecords,describeReport,isNewerSchemaText,looksLikeState,newerSchema,prepareStored,strictStringify} from '../../../domain/persistence'
 import * as Auth from '../../../domain/auth'
 import type {Account,AuthOutcome,AuthStore,SecurityPolicy,Session,SessionProblem} from '../../../domain/auth'
-import {PBKDF2_ITERATIONS,hashPassword,makeCredential,randomSalt,verifyPassword} from '../../../shared/lib/crypto'
+import {PBKDF2_ITERATIONS,hashPassword,makeCredential,newRecoveryKey,normalizeRecoveryKey,randomSalt,verifyPassword,verifyRecoveryTicket} from '../../../shared/lib/crypto'
 import type {EntityKeyName,Rules} from '../../../domain/access'
 
 const STORAGE_KEY='zenix-manufacturing-v3-state'
@@ -51,6 +51,8 @@ export type {EntityKey}
  * Stored business data that could not be opened: nothing is written over it until the user chooses what to do.
  * 'newer': saved by a newer version of the app (`version`) — this build only offers export and reload (audit #8).
  */
+/** An action that may hand out a new recovery key: shown to the user once, stored only as a hash. */
+export type KeyResult=ActionResult&{recoveryKey?:string}
 export type Recovery={reason:'unreadable'|'crashed'|'newer';raw:string;version?:number}
 /** A copy kept aside by the app (unreadable data, pre-upgrade or pre-repair data) that the user can download. */
 export type RecoveryCopy={key:string;label:string;savedAt?:string;text:string}
@@ -82,9 +84,11 @@ type AppContextValue=DomainApi&{
   state:ManufacturingState;resolvedTheme:'light'|'dark';toasts:Toast[];dismissToast:(id:string)=>void;
   sidebarMobile:boolean;setSidebarMobile:(v:boolean)=>void;searchOpen:boolean;setSearchOpen:(v:boolean)=>void;notifOpen:boolean;setNotifOpen:(v:boolean)=>void;aiOpen:boolean;setAiOpen:(v:boolean)=>void;
   currentEmployee:Employee;currentRole:Role;can:(module:string,action?:PermissionAction)=>boolean;
-  auth:{needsSetup:boolean;signedIn:boolean;session:Session|null;account:Account|null;accounts:Account[];events:AuthStore['events'];policy:SecurityPolicy;notice:string};
+  auth:{needsSetup:boolean;setupBlocked:string|null;ownerRecovery:boolean;signedIn:boolean;session:Session|null;account:Account|null;accounts:Account[];events:AuthStore['events'];policy:SecurityPolicy;notice:string};
   login:(login:string,password:string,remember:boolean)=>Promise<ActionResult>;logout:(reason?:SessionProblem|'logout')=>void;clearAuthNotice:()=>void;
-  setupSuperAdmin:(p:{employeeId:string;username:string;email?:string;password:string})=>Promise<ActionResult>;
+  setupSuperAdmin:(p:{employeeId:string;name:string;company:string;username:string;email?:string;password:string})=>Promise<KeyResult>;
+  recoverWithKey:(login:string,key:string,password:string)=>Promise<KeyResult>;recoverWithTicket:(login:string,ticket:string,code:string,password:string)=>Promise<KeyResult>;
+  createRecoveryKey:(password:string)=>Promise<KeyResult>;
   changePassword:(current:string,next:string)=>Promise<ActionResult>;
   createUser:(p:{employeeId:string;username:string;email?:string;password:string;mustChangePassword?:boolean})=>Promise<ActionResult>;
   updateUser:(accountId:string,patch:{username?:string;email?:string})=>ActionResult;setUserStatus:(accountId:string,status:Account['status'])=>ActionResult;
@@ -185,7 +189,10 @@ function hydrateFresh(seed:ManufacturingState):ManufacturingState{
   return seed
 }
 
-export function AppProvider({children}:{children:ReactNode}){
+/** The owner's public key from the build; only the matching private key, kept outside the app, can sign a recovery ticket. */
+const RECOVERY_PUBLIC_KEY=(import.meta as ImportMeta&{env?:Record<string,string|undefined>}).env?.VITE_RECOVERY_PUBLIC_KEY||''
+
+export function AppProvider({children,recoveryPublicKey=RECOVERY_PUBLIC_KEY}:{children:ReactNode;recoveryPublicKey?:string}){
   const [boot]=useState(hydrate)
   const [state,setState]=useState<ManufacturingState>(boot.state)
   const stateRef=useRef(state)
@@ -197,6 +204,8 @@ export function AppProvider({children}:{children:ReactNode}){
   const [sidebarMobile,setSidebarMobile]=useState(false),[searchOpen,setSearchOpen]=useState(false),[notifOpen,setNotifOpen]=useState(false),[aiOpen,setAiOpen]=useState(false)
   const [auth,setAuth]=useState<AuthStore>(()=>Auth.normalizeAuthStore(storage.get(AUTH_KEY,null)))
   const authRef=useRef(auth)
+  // Accounts that cannot be read stay in storage as they are: nothing is saved over them.
+  const authDamaged=useRef(Auth.authStorageDamaged(storage.getRaw(AUTH_KEY)))
   const [session,setSession]=useState<Session|null>(()=>Auth.normalizeSession(storage.get<unknown>(SESSION_KEY,null)))
   const sessionRef=useRef(session)
   const [authNotice,setAuthNotice]=useState('')
@@ -511,7 +520,7 @@ export function AppProvider({children}:{children:ReactNode}){
   /* ------------------------------------------------------------ sign-in, sessions and accounts -- */
 
   const authCtx=():Auth.AuthCtx=>({now:new Date(),actor:actor(),id:uid})
-  const commitAuth=(next:AuthStore)=>{authRef.current=next;setAuth(next);if(!storage.set(AUTH_KEY,next))pushToast('Akkaunt ma’lumotlari saqlanmadi (brauzer xotirasi to‘la)','danger')}
+  const commitAuth=(next:AuthStore)=>{authRef.current=next;setAuth(next);if(!authDamaged.current&&!storage.set(AUTH_KEY,next))pushToast('Akkaunt ma’lumotlari saqlanmadi (brauzer xotirasi to‘la)','danger')}
   const commitSession=(next:Session|null)=>{sessionRef.current=next;setSession(next);if(next)storage.set(SESSION_KEY,next);else storage.remove(SESSION_KEY)}
   const authResult=(out:AuthOutcome,silent=false):ActionResult=>{
     if(out.error!==undefined){pushToast(out.error,'warning');return {ok:false,message:out.error}}
@@ -549,18 +558,68 @@ export function AppProvider({children}:{children:ReactNode}){
     return {ok:true,message:`Xush kelibsiz, ${employee?.name||account.username}`}
   }
 
-  const setupSuperAdmin=async(p:{employeeId:string;username:string;email?:string;password:string}):Promise<ActionResult>=>{
-    if(authRef.current.accounts.length)return {ok:false,message:'Tizim allaqachon sozlangan'}
+  const setupSuperAdmin=async(p:{employeeId:string;name:string;company:string;username:string;email?:string;password:string}):Promise<KeyResult>=>{
+    const closed=Auth.bootstrapBlocker(authRef.current,stateRef.current,storage.getRaw(AUTH_KEY))
+    if(closed)return {ok:false,message:closed}
     const weak=Auth.validatePassword(authRef.current.policy,p.password)
     if(weak)return {ok:false,message:weak}
-    const out=Auth.setupFirstAdmin(authRef.current,stateRef.current,{now:new Date(),id:uid},{employeeId:p.employeeId,username:p.username,email:p.email,credential:await makeCredential(p.password)})
+    const recoveryKey=newRecoveryKey()
+    const out=Auth.setupFirstAdmin(authRef.current,stateRef.current,{now:new Date(),id:uid},{employeeId:p.employeeId,name:p.name,company:p.company,username:p.username,email:p.email,credential:await makeCredential(p.password),recovery:await makeCredential(normalizeRecoveryKey(recoveryKey))})
     if(out.error!==undefined)return {ok:false,message:out.error}
-    if(out.state)commit(A.logActivity(out.state,{now:new Date(),user:out.state.employees.find(e=>e.id===p.employeeId)||NOBODY,id:uid},'Super Admin tayinlandi','Foydalanuvchilar',p.username,'warning'))
+    if(out.state){commit(A.logActivity(out.state,{now:new Date(),user:out.state.employees.find(e=>e.id===p.employeeId)||NOBODY,id:uid},'Super Admin tayinlandi','Foydalanuvchilar',p.username,'warning'));persist(stateRef.current)}
     commitAuth(out.store)
     const account=out.store.accounts[0]
     const done=Auth.recordSuccess(out.store,{now:new Date(),id:uid},account,false)
     commitAuth(done.store);commitSession(done.session)
-    return {ok:true,message:out.message}
+    return {ok:true,message:out.message,recoveryKey}
+  }
+
+  /* Recovery changes only the account: business data, roles and other accounts stay as they are. */
+  const finishRecovery=async(account:Account,password:string,method:'key'|'ticket'):Promise<KeyResult>=>{
+    const recoveryKey=newRecoveryKey()
+    const out=Auth.recoverPassword(authRef.current,{now:new Date(),id:uid},account.id,{credential:await makeCredential(password),recovery:await makeCredential(normalizeRecoveryKey(recoveryKey)),method})
+    if(out.error!==undefined)return {ok:false,message:out.error}
+    commitAuth(out.store)
+    return {ok:true,message:out.message,recoveryKey}
+  }
+
+  const recoverWithKey=async(loginName:string,key:string,password:string):Promise<KeyResult>=>{
+    const fail=(message:string):KeyResult=>({ok:false,message})
+    if(!loginName.trim()||!key.trim())return fail('Login va tiklash kalitini kiriting')
+    const weak=Auth.validatePassword(authRef.current.policy,password)
+    if(weak)return fail(weak)
+    const attempt=Auth.recoveryAttemptKey(loginName)
+    const locked=Auth.lockState(authRef.current,attempt,new Date())
+    if(locked)return fail(`Juda ko‘p noto‘g‘ri urinish — ${hhmm(new Date(locked))} dan keyin qayta urinib ko‘ring`)
+    const account=Auth.findAccount(authRef.current,loginName)
+    // Same hashing time with or without an account or a key, as in login.
+    const valid=account?.recovery?await verifyPassword(normalizeRecoveryKey(key),account.recovery):(await hashPassword(key,randomSalt(),PBKDF2_ITERATIONS),false)
+    if(!valid||!account){commitAuth(Auth.recordFailure(authRef.current,{now:new Date(),id:uid},attempt));return fail('Login yoki tiklash kaliti noto‘g‘ri')}
+    const blocked=Auth.signInBlocker(stateRef.current,account)
+    return blocked?fail(blocked):finishRecovery(account,password,'key')
+  }
+
+  const recoverWithTicket=async(loginName:string,ticket:string,code:string,password:string):Promise<KeyResult>=>{
+    const fail=(message:string):KeyResult=>({ok:false,message})
+    if(!recoveryPublicKey)return fail('Bu versiyada egasi tiklashi sozlanmagan')
+    if(!loginName.trim()||!ticket.trim())return fail('Login va chiptani kiriting')
+    const weak=Auth.validatePassword(authRef.current.policy,password)
+    if(weak)return fail(weak)
+    // Checked first: whether a login exists is told only to someone holding a valid ticket.
+    const login=Auth.normalizeLogin(loginName)
+    if(!await verifyRecoveryTicket(recoveryPublicKey,ticket,expiresAt=>Auth.recoveryTicketMessage(login,code,expiresAt),Date.now()))return fail('Chipta noto‘g‘ri yoki muddati o‘tgan')
+    const account=Auth.findAccount(authRef.current,loginName)
+    const blocked=Auth.ownerRecoveryBlocker(authRef.current,stateRef.current,account)
+    return blocked||!account?fail(blocked||'Akkaunt topilmadi'):finishRecovery(account,password,'ticket')
+  }
+
+  const createRecoveryKey=async(password:string):Promise<KeyResult>=>{
+    const account=authRef.current.accounts.find(a=>a.id===sessionRef.current?.accountId)
+    if(!account)return {ok:false,message:'Avval tizimga kiring'}
+    if(!await verifyPassword(password,account))return {ok:false,message:'Joriy parol noto‘g‘ri'}
+    const recoveryKey=newRecoveryKey()
+    const out=authResult(Auth.setRecoveryKey(authRef.current,stateRef.current,authCtx(),account.id,await makeCredential(normalizeRecoveryKey(recoveryKey))),true)
+    return out.ok?{...out,recoveryKey}:out
   }
 
   const changePassword=async(current:string,next:string):Promise<ActionResult>=>{
@@ -630,7 +689,7 @@ export function AppProvider({children}:{children:ReactNode}){
     for(const e of events)window.addEventListener(e,touch,{passive:true})
     // Accounts and the session are shared by all tabs of this browser.
     const synced=(e:StorageEvent)=>{
-      if(e.key===AUTH_KEY){const next=Auth.normalizeAuthStore(parseJson(e.newValue));authRef.current=next;setAuth(next)}
+      if(e.key===AUTH_KEY){const next=Auth.normalizeAuthStore(parseJson(e.newValue));authDamaged.current=Auth.authStorageDamaged(e.newValue);authRef.current=next;setAuth(next)}
       if(e.key===SESSION_KEY){
         const next=Auth.normalizeSession(parseJson(e.newValue))
         if(!next&&sessionRef.current){sessionRef.current=null;setSession(null);setAuthNotice(NOTICE.elsewhere)}
@@ -642,14 +701,15 @@ export function AppProvider({children}:{children:ReactNode}){
   },[])
 
   const account=session?auth.accounts.find(a=>a.id===session.accountId)||null:null
-  const authInfo=useMemo(()=>({needsSetup:!auth.accounts.length,signedIn:Boolean(session&&account),session,account,accounts:auth.accounts,events:auth.events,policy:auth.policy,notice:authNotice}),[auth,session,account,authNotice])
+  const setupBlocked=auth.accounts.length?null:Auth.bootstrapBlocker(auth,state,storage.getRaw(AUTH_KEY))
+  const authInfo=useMemo(()=>({needsSetup:!auth.accounts.length,setupBlocked,ownerRecovery:Boolean(recoveryPublicKey),signedIn:Boolean(session&&account),session,account,accounts:auth.accounts,events:auth.events,policy:auth.policy,notice:authNotice}),[auth,session,account,authNotice,setupBlocked,recoveryPublicKey])
 
   const value=useMemo<AppContextValue>(()=>({
     ...domain,state:view,resolvedTheme,toasts,dismissToast,sidebarMobile,setSidebarMobile,searchOpen,setSearchOpen,notifOpen,setNotifOpen,aiOpen,setAiOpen,
     currentEmployee,currentRole,can,toast,saveSettings,setPreferences,setTheme,setAppearance,setCurrency,resetTransactions,importState,restoreLastBackup,lastBackup,markAllRead,markNotificationRead,activityArchive,
     recovery,startClean,recoveryCopies,storageError,storageUsage:()=>{const u=storage.usage(STORAGE_KEY);return {data:u.key,total:u.total}},
     createEntity,updateEntity,deleteEntity,duplicateEntity,addAttachment,removeAttachment,saveSupplier,
-    auth:authInfo,login,logout,clearAuthNotice:()=>setAuthNotice(''),setupSuperAdmin,changePassword,createUser,updateUser,setUserStatus,resetUserPassword,deleteUser,updateSecurityPolicy,
+    auth:authInfo,login,logout,clearAuthNotice:()=>setAuthNotice(''),setupSuperAdmin,recoverWithKey,recoverWithTicket,createRecoveryKey,changePassword,createUser,updateUser,setUserStatus,resetUserPassword,deleteUser,updateSecurityPolicy,
   // Actions read the latest state through stateRef, so re-creating them only when state changes is sufficient.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }),[view,resolvedTheme,toasts,sidebarMobile,searchOpen,notifOpen,aiOpen,currentEmployee,currentRole,can,toast,dismissToast,authInfo,recovery,storageError])

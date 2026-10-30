@@ -31,7 +31,7 @@ npm run preview      # dist/ ni lokal ko‘rish
 
 `src/styles.css` generatsiya qilinadi (`npm run styles`): CSS manbalarini tahrirlang, generated faylni emas.
 
-E2E birinchi marta: `npx playwright install chromium` yoki o‘rnatilgan Chrome bilan `PW_CHANNEL=chrome npm run test:e2e`. Testlar har safar toza brauzerda Super Admin’ni birinchi sozlash orqali yaratadi; parol har ishga tushishda generatsiya qilinadi va repozitoriyada saqlanmaydi.
+E2E birinchi marta: `npx playwright install chromium` yoki o‘rnatilgan Chrome bilan `PW_CHANNEL=chrome npm run test:e2e`. Testlar har safar toza brauzerda Super Admin’ni ro‘yxatdan o‘tish orqali yaratadi; parol har ishga tushishda generatsiya qilinadi va repozitoriyada saqlanmaydi.
 
 **CI** (`.github/workflows/ci.yml`, push `main` va pull request): `npm ci` → typecheck → lint → test → build → generated CSS commit qilinganini tekshirish; keyin Chromium bilan E2E (desktop + Pixel 7). Deploy va secret yo‘q.
 
@@ -41,7 +41,7 @@ Biznes ma’lumoti bitta localStorage kalitida (`zenix-manufacturing-v3-state`),
 
 ## Birinchi ishga tushirish
 
-Akkaunt bo‘lmagan brauzerda ilova **Birinchi sozlash** oynasini ochadi: xodimni tanlang (standart — Abdulloh Karimov, Management), telefon raqami yoki loginni va parolni kiriting. Bu akkaunt Super Admin bo‘ladi. Standart parol yo‘q, parol repozitoriyada saqlanmaydi. Qolgan foydalanuvchilar Admin Panel → Foydalanuvchilar’da ochiladi. Batafsil: [docs/AUTH.md](docs/AUTH.md).
+Akkaunt bo‘lmagan brauzerda ilova **Ro‘yxatdan o‘tish** oynasini ochadi: ism, kompaniya, telefon raqami yoki login va parolni kiriting. Bu akkaunt Super Admin bo‘ladi va bir martalik tiklash kaliti beriladi. Standart parol yo‘q, parol repozitoriyada saqlanmaydi. Qolgan foydalanuvchilar Admin Panel → Foydalanuvchilar’da ochiladi. Akkaunt faqat shu brauzerda saqlanadi. Batafsil: [docs/AUTH.md](docs/AUTH.md).
 
 ## Arxitektura
 
@@ -61,7 +61,7 @@ src/
 │  ├─ productionControl.ts      Ishlab chiqarish → Umumiy nazorat markazi o‘qish qatlami
 │  ├─ supplierMaterials.ts      supplier ↔ material shartlari, supplier taqqoslash, buyurtma taklifi (MOQ, birlik)
 │  └─ insights.ts               ZENIX AI (qoidaga asoslangan, engine’dan)
-├─ features/*/pages             14 modul sahifalari + auth (login, setup) + Admin Panel
+├─ features/*/pages             14 modul sahifalari + auth (login, register, parol tiklash) + Admin Panel
 ├─ features/common              charts, attachments/audit panellari, barcode label, QC modal
 ├─ layout/AppLayout             Sidebar, Topbar, AiAssistant, shell.css
 ├─ shared/ui                    Overlay stack, Forms (useForm), ResourceTable, Layout, DataDisplay
@@ -83,7 +83,7 @@ Batafsil: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (qatlamlar, saqlash, back
 - **PLM:** ECO → draft BOM (editor) → review → approve → apply; BOM diff, versiyalar, hujjatlar.
 - **Tannarx:** reja vs amalda (material, labor, machine, overhead), earned-value variance, roll-up, profitability (haqiqiy COGS).
 - **Traceability:** lot / serial / MO / SKU → sarflangan lotlar → supplier PO → sifat → tayyor lot → mijoz.
-- **Boshqaruv:** login va birinchi sozlash, 8 ta tizim roli + maxsus rollar, Admin Panel (foydalanuvchilar, rollar va ruxsatlar matritsasi, faoliyat jurnali, xavfsizlik siyosati, tizim/backup), qamrov (ish markazi/filial), PO va ECO uchun vazifalarni ajratish, hujjat biriktirish, JSON backup eksport/import (zaxira bilan).
+- **Boshqaruv:** login, ro‘yxatdan o‘tish va parol tiklash, 8 ta tizim roli + maxsus rollar, Admin Panel (foydalanuvchilar, rollar va ruxsatlar matritsasi, faoliyat jurnali, xavfsizlik siyosati, tizim/backup), qamrov (ish markazi/filial), PO va ECO uchun vazifalarni ajratish, hujjat biriktirish, JSON backup eksport/import (zaxira bilan).
 
 ## Ko‘rinish
 
