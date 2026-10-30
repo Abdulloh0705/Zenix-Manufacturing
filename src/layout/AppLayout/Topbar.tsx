@@ -9,7 +9,8 @@ import type {Density,FontSize} from '../../app/theme/preferences'
 import {useMediaQuery} from '../../shared/lib/useMediaQuery'
 import type {CurrencyCode,ThemeMode} from '../../types'
 import {CURRENCIES,cls,initials,num,relativeTime} from '../../utils/format'
-import {ChangePasswordForm} from '../../features/auth/pages/AuthPages'
+import {isSuperAdminRole} from '../../domain/access'
+import {ChangePasswordForm,RecoveryKeyForm} from '../../features/auth/pages/AuthPages'
 import {buildSearchIndex,searchRecords} from './searchIndex'
 import type {SearchResult} from './searchIndex'
 import {fallbackPath,isReadBy,unreadCount,visibleNotifications} from './notificationsView'
@@ -169,7 +170,7 @@ function Notifications(){
 
 function Profile(){
   const app=useApp(),navigate=useNavigate(),anchor=useRef<HTMLButtonElement>(null)
-  const [open,setOpen]=useState(false),[password,setPassword]=useState(false)
+  const [open,setOpen]=useState(false),[password,setPassword]=useState(false),[recoveryKey,setRecoveryKey]=useState(false)
   const go=(to:string)=>{navigate(to);setOpen(false)}
   const e=app.currentEmployee
   const adminPanel=['users','roles','audit','settings'].some(m=>app.can(m))
@@ -187,10 +188,12 @@ function Profile(){
       </div>
       <div className="menu-section links">
         <button type="button" className="option-row" onClick={()=>{setPassword(true);setOpen(false)}}><Icon name="key" size={16}/><span><b>Parolni o‘zgartirish</b></span></button>
+        {isSuperAdminRole(app.currentRole)&&<button type="button" className="option-row" onClick={()=>{setRecoveryKey(true);setOpen(false)}}><Icon name="shield" size={16}/><span><b>Tiklash kaliti</b></span></button>}
         <button type="button" className="option-row danger" onClick={()=>{setOpen(false);app.logout()}}><Icon name="logout" size={16}/><span><b>Chiqish</b></span></button>
       </div>
     </Popover>
     <Modal open={password} onClose={()=>setPassword(false)} title="Parolni o‘zgartirish" size="sm"><ChangePasswordForm onDone={()=>setPassword(false)}/></Modal>
+    <Modal open={recoveryKey} onClose={()=>setRecoveryKey(false)} title="Tiklash kaliti" size="sm"><RecoveryKeyForm onDone={()=>setRecoveryKey(false)}/></Modal>
   </>
 }
 

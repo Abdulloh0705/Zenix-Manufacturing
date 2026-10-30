@@ -72,7 +72,7 @@ Sahifalar biznes ma’lumotini faqat `useApp()` orqali o‘qiydi va o‘zgartira
 - **z-index shkalasi** (`styles/tokens.css`): sticky 10 · sidebar 30 · topbar 40 · AI dock 50 · mobil nav 60 · modal/drawer 100 · popover 200 · toast 300. Popover modal ichidan ochilishi mumkinligi sababli moddan yuqorida.
 - **ResourceTable** (`shared/ui/ResourceTable.tsx`): ko‘rinadigan matn bo‘yicha qidiruv, raqamli/locale tartiblash (tri-state, `aria-sort`), filtr slotlari va “Tozalash”, sahifa o‘lchami, joriy natijani CSV eksport, bir marta bosib ochish, telefonda kartalar. Filtrlar URL’da (`useSearchParamState`), yozuv drawer’i `?id=` orqali ochiladi (deep link, global qidiruv, bildirishnomalar).
 - **Shell**: `Sidebar` (collapse saqlanadi, hover/klaviatura flyout, mobil drawer + accordion, `inert`), `Topbar` (global qidiruv / Ctrl+K palette, kontekst, Theme·Fon·Valyuta·Fullscreen, bildirishnomalar, profil: parolni o‘zgartirish va chiqish), `AiAssistant` (o‘ng chetdagi ingichka tab, faqat Y bo‘yicha suriladi; o‘ngdan chiquvchi overlay panel — sahifa o‘lchami o‘zgarmaydi). Sidebar ≤1024px’da off-canvas drawer.
-- **Sahifalar lazy yuklanadi** (`App.tsx`), har sahifa ErrorBoundary bilan; ilova ildizida `RootBoundary`. Toast’lar barcha marshrutlarda (login/setup ham) ko‘rinadi.
+- **Sahifalar lazy yuklanadi** (`App.tsx`), har sahifa ErrorBoundary bilan; ilova ildizida `RootBoundary`. Toast’lar barcha marshrutlarda (login/register ham) ko‘rinadi.
 - **iOS safe-area:** `viewport-fit=cover` + `--safe-top/right/bottom/left` tokenlari (topbar, sidebar drawer, kontent pasti, AI tugma, toast, auth sahifasi). Boshqa qurilmalarda inset 0 — joylashuv o‘zgarmaydi.
 
 ## Uslublar

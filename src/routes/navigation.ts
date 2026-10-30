@@ -21,7 +21,7 @@ export const moduleNav:ModuleNav[]=[
 ]
 export const byPath=Object.fromEntries(moduleNav.map(x=>[x.path,x]))
 export const legacyRedirects:Record<string,string>={
- '/signin':'/login','/sign-in':'/login','/auth/login':'/login','/signup':'/login','/sign-up':'/login','/register':'/login',
+ '/signin':'/login','/sign-in':'/login','/auth/login':'/login','/signup':'/register','/sign-up':'/register','/forgot':'/forgot-password',
  '/dashboard':'/','/manufacturing':'/production','/manufacturing/orders':'/production?view=orders','/manufacturing/planning':'/production?view=planning','/manufacturing/mps':'/production?view=mps','/manufacturing/mrp':'/production?view=mrp','/manufacturing/advanced':'/production?view=advanced','/manufacturing/operations':'/production?view=operations','/manufacturing/shop-floor':'/production?view=shop-floor',
  '/products/list':'/products?view=all','/products/categories':'/products?view=categories','/products/bom':'/products?view=bom','/products/bom-tree':'/products?view=bom','/products/routing':'/products?view=routing','/products/variants':'/products?view=variants','/products/versions':'/products?view=versions','/products/plm':'/products?view=plm',
  '/materials/list':'/materials?view=all','/materials/requirements':'/materials?view=requirements','/materials/stock':'/materials?view=stock','/materials/shortages':'/materials?view=shortages',
