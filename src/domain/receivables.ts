@@ -84,6 +84,11 @@ export function orderInvoicing(s:Pick<S,'receivables'|'salesOrders'>,soId:string
   return {delivered,invoiced,legacy,kind:legacy<=0.005?'ledger' as const:invoiced<=0.005?'legacy' as const:'mixed' as const}
 }
 
+/** Customer sales volume is fulfilled value, including historical deliveries on legacy cancelled orders. */
+export function customerSalesVolume(s:Pick<S,'salesOrders'>,customerId:string){
+  return r2(s.salesOrders.filter(o=>o.customerId===customerId).reduce((total,o)=>total+o.items.reduce((sum,i)=>sum+i.delivered*i.price,0),0))
+}
+
 /** Credit already posted for one return (automatic and reconciled). */
 export const returnCredited=(s:Pick<S,'receivables'>,returnId:string)=>r2(-ledger(s).filter(e=>e.kind==='credit'&&e.returnId===returnId).reduce((a,e)=>a+e.amount,0))
 

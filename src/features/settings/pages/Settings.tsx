@@ -167,11 +167,11 @@ function AISettings(){
   </div>
 }
 
-const BACKUP_REASON:Record<string,string>={'manual-reset':'tranzaksiyalarni tozalashdan oldin','demo-history-cleanup':'demo tarixni tozalashdan oldin','before-import':'backup importdan oldin','before-restore':'zaxirani tiklashdan oldin'}
+const BACKUP_REASON:Record<string,string>={'manual-reset':'tranzaksiyalarni tozalashdan oldin','demo-history-cleanup':'demo tarixni tozalashdan oldin','before-import':'backup importdan oldin','before-restore':'zaxirani tiklashdan oldin','before-owner-recovery':'egasi tiklashidan oldin'}
 
 function System(){
   const app=useApp(),s=app.state
-  const [reset,setReset]=useState(false),[importData,setImportData]=useState<unknown>(null),[importName,setImportName]=useState(''),[restore,setRestore]=useState(false)
+  const [reset,setReset]=useState(false),[importData,setImportData]=useState<unknown>(null),[importName,setImportName]=useState(''),[restore,setRestore]=useState(false),[importMode,setImportMode]=useState<'operational'|'privileged'>('operational')
   // Parsed only when the data changes (a restore or reset writes a new copy), not on every render.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const backup=useMemo(()=>app.lastBackup(),[s])
@@ -197,14 +197,15 @@ function System(){
         <InfoGrid columns={3} items={[{label:'MO',value:s.productionOrders.length},{label:'Harakatlar',value:s.stockMovements.length},{label:'Audit yozuvlari',value:s.activity.length}]}/>
       </Card>
       <Card title="Backup va ma’lumotlar">
-        <p className="soft-meta">JSON backup · import joriy ma’lumotni almashtiradi</p>
+        <p className="soft-meta">Oddiy import ish ma’lumotini tiklaydi; rol, xodim huquqi yoki joy doirasi o‘zgarsa rad etiladi. Egasi alohida to‘liq tiklashni tanlashi mumkin.</p>
         <div className="row-actions">
           <button type="button" className="secondary-glass-btn" disabled={!app.can('settings','export')} title={app.can('settings','export')?undefined:'Backup eksport uchun settings.export ruxsati kerak'} onClick={exportBackup}><Icon name="download"/>Backup eksport</button>
-          <button type="button" className="secondary-glass-btn" disabled={!canEdit} onClick={()=>fileRef.current?.click()}><Icon name="upload"/>Backup import</button>
+          <button type="button" className="secondary-glass-btn" disabled={!canEdit} onClick={()=>{setImportMode('operational');fileRef.current?.click()}}><Icon name="upload"/>Backup import</button>
+          {app.can('subscription','edit')&&<button type="button" className="secondary-glass-btn" onClick={()=>{setImportMode('privileged');fileRef.current?.click()}}><Icon name="shield"/>Egasi: to‘liq tiklash</button>}
           <input ref={fileRef} type="file" accept="application/json,.json" hidden onChange={e=>void onFile(e.target.files?.[0])}/>
           <button type="button" className="danger-glass-btn" disabled={!canEdit} onClick={()=>setReset(true)}><Icon name="refresh"/>Tranzaksiyalarni tozalash</button>
         </div>
-        {backup?.savedAt&&<div className="list-row"><span className="list-row-copy"><b>Oxirgi avtomatik zaxira</b><small>{backup.savedAt} · {BACKUP_REASON[backup.reason||'']||backup.reason}</small></span><button type="button" className="secondary-glass-btn compact" disabled={!canEdit} onClick={()=>setRestore(true)}><Icon name="undo" size={14}/>Tiklash</button></div>}
+        {backup?.savedAt&&<div className="list-row"><span className="list-row-copy"><b>Oxirgi avtomatik zaxira</b><small>{backup.savedAt} · {BACKUP_REASON[backup.reason||'']||backup.reason}</small></span><button type="button" className="secondary-glass-btn compact" disabled={!canEdit} onClick={()=>setRestore(true)}><Icon name="undo" size={14}/>Tiklash</button>{app.can('subscription','edit')&&<button type="button" className="secondary-glass-btn compact" onClick={()=>{setImportMode('privileged');setImportName('Oxirgi avtomatik zaxira');setImportData(backup.state)}}>To‘liq tiklash</button>}</div>}
       </Card>
       {copies.length>0&&<Card title="Tiklash nusxalari">
         <p className="soft-meta">Ilova ma’lumotni tiklash yoki yangilashdan oldin saqlagan asl nusxalar. Faylni yuklab olib, kerak bo‘lsa Backup import qiling.</p>
@@ -213,6 +214,6 @@ function System(){
     </div>
     <Confirm open={reset} onClose={()=>setReset(false)} onConfirm={app.resetTransactions} danger title="Tranzaksiyalar tozalansinmi?" text="Buyurtmalar, qoldiq va harakatlar, xaridlar, savdo, sifat, servis, xarajatlar, bildirishnomalar va audit tarixi o‘chiriladi. Mahsulot, BOM, xomashyo, supplier, ombor, uskuna, xodim, rol va sozlamalar saqlanadi. Avval Backup eksport qiling." confirmText="Tozalash"/>
     <Confirm open={restore} onClose={()=>setRestore(false)} onConfirm={app.restoreLastBackup} danger title="Oxirgi zaxira tiklansinmi?" text="Joriy ma’lumot zaxira bilan almashtiriladi; hozirgi holat esa yangi zaxira sifatida saqlanadi (qaytarish mumkin)." confirmText="Tiklash"/>
-    <Confirm open={importData!==null} onClose={()=>setImportData(null)} onConfirm={()=>app.importState(importData)} danger title="Backup import qilinsinmi?" text={`${importName} fayli joriy ma’lumotlarni to‘liq almashtiradi.`} confirmText="Import qilish"/>
+    <Confirm open={importData!==null} onClose={()=>setImportData(null)} onConfirm={()=>importMode==='privileged'?app.importPrivilegedState(importData):app.importState(importData)} danger title={importMode==='privileged'?'Egasi to‘liq tiklasinmi?':'Backup import qilinsinmi?'} text={importMode==='privileged'?`${importName}: ish ma’lumoti, maxsus rollar va xodim tayinlovlari tiklanadi. Akkaunt parollari va kompaniya a’zoligi o‘zgarmaydi.`:`${importName}: ish ma’lumoti tiklanadi; rol, xodim huquqi yoki joy doirasi farq qilsa import rad etiladi.`} confirmText="Tiklash"/>
   </div>
 }

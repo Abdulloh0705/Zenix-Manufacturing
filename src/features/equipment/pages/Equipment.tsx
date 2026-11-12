@@ -1,7 +1,7 @@
-import {useState} from 'react'
+import {useRef,useState} from 'react'
 import {useNavigate,useSearchParams} from 'react-router-dom'
 import {useApp} from '../../../app/providers/AppProvider/AppContext'
-import {Card,Confirm,Drawer,Empty,Field,FilterSelect,Icon,InfoGrid,Input,KPI,Modal,MoneyInput,PageHeader,ResourceTable,SectionTitle,Select,StatusBadge,Tabs,Textarea,required,useForm,useRecordParam,useSearchParamState} from '../../../shared/ui'
+import {Card,Confirm,Drawer,Empty,Field,FilterSelect,Icon,InfoGrid,Input,KPI,Modal,MoneyInput,PageHeader,ResourceTable,SectionTitle,Select,StatusBadge,Tabs,Textarea,required,useDirtyMarker,useForm,useRecordParam,useSearchParamState} from '../../../shared/ui'
 import type {DowntimeReason,Equipment as EquipmentType,MaintenanceOrder,MaintenancePlan,WorkCenter} from '../../../types'
 import {PLAN_UNITS,maintenanceCalendar,maintenanceDue,maintenanceWindow,planLabel,planOf,reliabilityOf,runtimeForecast} from '../../../domain/maintenance'
 import type {RuntimeForecast} from '../../../domain/maintenance'
@@ -275,6 +275,8 @@ function WorkCenterModal({wc,onClose}:{wc:WorkCenter;onClose:()=>void}){
 function MaintenanceDrawer({order,onClose}:{order:MaintenanceOrder;onClose:()=>void}){
   const app=useApp(),s=app.state,now=useNow(30000)
   const [cost,setCost]=useState(String(order.cost||'')),[note,setNote]=useState(''),[cancel,setCancel]=useState(false),[reason,setReason]=useState(''),[edit,setEdit]=useState(false),[start,setStart]=useState(false)
+  const firstMaintenance=useRef(JSON.stringify({cost,note,reason}))
+  useDirtyMarker(JSON.stringify({cost,note,reason})!==firstMaintenance.current)
   const canEdit=app.can('equipment','edit')
   const w=maintenanceWindow(s,order)
   const stop=s.downtimeEvents.find(d=>d.sourceId===order.id)

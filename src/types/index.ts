@@ -84,7 +84,9 @@ export interface Bom{id:string;code:string;productId:string;version:string;revis
 export interface StockBalance{id:string;warehouseId:string;itemId:string;itemType:'raw'|'finished';onHand:number;reserved:number;incoming:number;quarantine?:number;unit:string;lot?:string;expiry?:string;
   variantId?:string;bins?:Record<string,number>}
 /** `key`: the submit key of a command that must never post twice (adjustments). */
-export interface StockMovement{id:string;date:string;type:string;itemId:string;itemType:'raw'|'finished';warehouseId:string;qty:number;source:string;note:string;user:string;lot?:string;variantId?:string;location?:string;key?:string}
+export interface StockMovement{id:string;date:string;type:string;itemId:string;itemType:'raw'|'finished';warehouseId:string;qty:number;source:string;note:string;user:string;lot?:string;variantId?:string;location?:string;key?:string;
+  /** Frozen delivery valuation; absent on older movements whose LOT provenance must be checked. */
+  unitCost?:number;costBasis?:'actual'|'estimated'|'provisional'}
 
 export type WorkOrderStatus='Kutilmoqda'|'Tayyor'|'Jarayonda'|'Pauzada'|'Yakunlangan'|'Bekor qilingan'
 export type WorkOrderEvent={at:string;action:'start'|'resume'|'pause'|'setup'|'complete'|'output'|'assign'|'cancel'|'split';by:string;minutes?:number;good?:number;scrap?:number;note?:string}
@@ -105,7 +107,9 @@ export interface WorkOrder{id:string;operationId:string;name:string;workCenterId
   /** Keys of operation reports already posted (a repeated submit is a no-op). */
   reportKeys?:string[]}
 /** `unitCost` = UZS per stock unit at the moment of issue (lot purchase price or standard cost then); absent on older rows. */
-export interface MaterialConsumption{materialId:string;itemType:'raw'|'finished';qty:number;lot?:string;date:string;unitCost?:number}
+export interface MaterialConsumption{materialId:string;itemType:'raw'|'finished';qty:number;lot?:string;date:string;unitCost?:number;
+  id?:string;warehouseId?:string;location?:string;issueKind?:'manual'|'backflush';outputAtIssue?:number;workMinutesAtIssue?:number}
+export interface MaterialReturn{id:string;key:string;issueId:string;materialId:string;qty:number;lot?:string;warehouseId:string;location?:string;unitCost:number;at:string;by:string;reason:string}
 /** Stock one production order still holds in reserve for one component in one warehouse. */
 /** A lot quantity held by one reservation row (audit #10): FEFO-chosen at reservation time and consumed exactly at issue / delivery. */
 export interface LotPin{lot:string;qty:number}
@@ -130,12 +134,17 @@ export interface ProductionOrder{
   variantId?:string;
   /** Location (bin) of the output warehouse finished units are received into; absent = unassigned. */
   outputLocation?:string;
+  materialReturns?:MaterialReturn[];
+  /** Audited custody assignments for legacy rework output; no stock is released by this record. */
+  reworkReconciliations?:{at:string;by:string;reason:string;allocations:{lotId:string;lotCode:string;qty:number}[]}[];
 }
 export type ExtraIssue={materialId:string;qty:number;reason:string;by:string;at:string}
 export type CostSnapshot={material:number;labor:number;machine:number;overhead:number;total:number;
   /** Energy of machine running time; absent on snapshots frozen before it was costed. */
   energy?:number}
 export interface Supplier{id:string;name:string;phone:string;leadTime:number;rating:number;status:string;debt:number;email?:string}
+/** Signed UZS payable: receipt raises the obligation; payment/credit lowers it. Entries are append-only. */
+export interface PayableEntry{id:string;key:string;supplierId:string;kind:'opening'|'receipt'|'payment'|'credit'|'adjustment';amount:number;date:string;by:string;reason?:string;purchaseOrderId?:string;receiptId?:string;materialId?:string;currency:'UZS';method?:string}
 /**
  * Supplier ↔ material sourcing terms (many-to-many, one row per pair). Prices are quoted per purchase
  * unit in the supplier's currency; `unitFactor` = material stock units in one purchase unit. Last purchase
@@ -211,12 +220,16 @@ export interface MaintenanceOrder{id:string;code:string;equipmentId:string;type:
   history?:MaintenanceEvent[]}
 export interface Employee{id:string;name:string;roleId:string;department:string;workCenterId:string;shift:string;status:string;attendance:number;efficiency:number;hourlyCost:number;
   /** Home warehouse for a "warehouse"-scoped role; without it the scope falls back to the employee's branch. */
-  warehouseId?:string}
-export type SystemRoleKey='super_admin'|'admin'|'production_manager'|'operator'|'quality'|'maintenance'|'warehouse'|'supply_sales'
+  warehouseId?:string;
+  /** Explicit primary branch and optional additional branches. Older records derive their branch from a site. */
+  branchId?:string;branchIds?:string[]}
+export type SystemRoleKey='super_admin'|'business_owner'|'admin'|'production_manager'|'operator'|'quality'|'maintenance'|'warehouse'|'supply_sales'
 export interface Role{id:string;name:string;scope:'all'|'branch'|'warehouse'|'workcenter';permissions:PermissionMap;
   /** Set on the eight built-in roles; they cannot be deleted. */
-  key?:SystemRoleKey;system?:boolean;description?:string;createdAt?:string}
-export interface Expense{id:string;date:string;type:'Electricity'|'Labor'|'Machine'|'Maintenance'|'Transport'|'Overhead';sourceId:string;amount:number;note:string}
+  key?:SystemRoleKey;system?:boolean;description?:string;createdAt?:string;rank?:number}
+export interface Expense{id:string;date:string;type:'Electricity'|'Labor'|'Machine'|'Maintenance'|'Transport'|'Overhead';sourceId:string;amount:number;note:string;
+  /** Explicit site for a manual expense; unassigned legacy expense is company-wide and hidden from scoped roles. */
+  branchId?:string}
 
 /** One field of a BOM / routing an engineering change modifies, with its old and proposed value. */
 export type EcoChange={kind:'add'|'remove'|'change';area:'component'|'operation'|'byproduct'|'header';target:string;field?:string;old?:string;proposed?:string;text:string}
@@ -230,9 +243,16 @@ export interface QualityControlPoint{id:string;title:string;scope:'Incoming'|'In
   /** Mandatory: an open or failed in-process check of this point blocks the next operation. */
   blocking?:boolean}
 export interface MaintenanceRequest{id:string;code:string;equipmentId:string;type:'Preventive'|'Corrective'|'Emergency';priority:'Normal'|'Yuqori'|'Kritik';status:'Yangi'|'Tasdiqlangan'|'Jarayonda'|'Yakunlangan';requestedBy:string;scheduled:string;reason:string;downtimeHours:number;startedAt?:string}
-export interface SubcontractOrder{id:string;code:string;supplierId:string;productId:string;qty:number;status:'Draft'|'Material yuborildi'|'Ishlab chiqarishda'|'Qabul qilindi';materialIds:string[];expectedDate:string;cost:number;
+export interface SubcontractOrder{id:string;code:string;supplierId:string;productId:string;qty:number;status:'Draft'|'Material yuborildi'|'Ishlab chiqarishda'|'Qisman qabul'|'Qabul qilindi'|'Bekor';materialIds:string[];expectedDate:string;cost:number;
   /** Where the receipt went and how much of it still waits for incoming QC (N-07). */
-  warehouseId?:string;qcHeld?:number}
+  warehouseId?:string;qcHeld?:number;
+  /** Service price currency and frozen conversion into company UZS at material dispatch. */
+  currency?:'UZS'|'USD'|'EUR';exchangeRate?:number;serviceCostUZS?:number;
+  /** Material valuation frozen when components leave stock; old orders without it remain estimated. */
+  materialCost?:number;materialCostBasis?:'actual'|'estimated';sentMaterials?:{materialId:string;warehouseId:string;qty:number;lot?:string;location?:string;unitCost:number}[];
+  /** Each receipt has its own QC and frozen allocation. `key` makes retrying a receipt safe. */
+  receipts?:{id:string;key:string;qty:number;lot?:string;warehouseId:string;materialCost:number;serviceCost:number;unitCost:number;costBasis:'actual'|'estimated';status:'pending'|'accepted'|'scrap';at:string}[];
+  serviceCorrections?:{at:string;by:string;reason:string;oldCost:number;newCost:number;oldUZS:number;newUZS:number}[]}
 export interface RepairOrder{id:string;code:string;equipmentId:string;status:'Yangi'|'Diagnostika'|'Ta’mirda'|'Sinov'|'Yakunlangan';issue:string;technicianId:string;partsCost:number;laborHours:number;createdAt:string}
 
 export interface TimeLog{id:string;orderId:string;workOrderId:string;employeeId:string;workCenterId:string;start:string;end?:string;minutes:number;
@@ -243,6 +263,12 @@ export interface DowntimeEvent{id:string;equipmentId:string;workCenterId:string;
 export interface LotRecord{id:string;code:string;kind:'lot'|'serial';itemId:string;itemType:'raw'|'finished';qty:number;originalQty?:number;warehouseId:string;
   /** Variant of a variant-tracked product and the warehouse location the record sits in (absent = unassigned). */
   variantId?:string;location?:string;status?:'available'|'quarantine'|'hold'|'rework';sourceType:'purchase'|'production'|'return'|'adjustment';sourceId:string;sourceCode:string;createdAt:string;expiry?:string;serialFrom?:string;serialTo?:string;consumedBy:string[];
+  /** Rework custody of this physical lot portion; sourceId remains its original production/return genealogy. */
+  reworkOrderId?:string;
+  /** Actual unit cost frozen when Final QC releases this physical finished LOT. */
+  unitCost?:number;costBasis?:'actual'|'estimated'|'provisional';
+  /** Original LOT code before rework assigned a distinct sellable LOT to its good units. */
+  sourceLotCode?:string;
   /**
    * Serial unit (audit #25): a `kind: 'serial'` record with `serialFrom === serialTo === code` and quantity 0/1 is one
    * physical unit; `batch` is the receipt lot / production output range it arrived in (its LOT genealogy). A serial
@@ -287,6 +313,7 @@ export interface ManufacturingState{
   timeLogs:TimeLog[];downtimeEvents:DowntimeEvent[];lots:LotRecord[];forecasts:Forecast[];returns:CustomerReturn[];attachments:Attachment[];
   /** Customer receivables ledger (audit #19); absent on data saved before it — migration opens it from Customer.debt. */
   receivables?:ReceivableEntry[];
+  payables?:PayableEntry[];
   /** Supplier replacement requests (audit #27) and legacy-return credit decisions (Phase 5); absent on older data. */
   supplierReplacements?:SupplierReplacement[];receivableReconciliations?:ReceivableReconciliation[];
   /** Data model version written by `migrateState` (src/domain/migrations.ts); absent on data saved before versioning. */

@@ -9,7 +9,7 @@ import type {Density,FontSize} from '../../app/theme/preferences'
 import {useMediaQuery} from '../../shared/lib/useMediaQuery'
 import type {CurrencyCode,ThemeMode} from '../../types'
 import {CURRENCIES,cls,initials,num,relativeTime} from '../../utils/format'
-import {isSuperAdminRole} from '../../domain/access'
+import {isOwnerRole} from '../../domain/access'
 import {ChangePasswordForm,RecoveryKeyForm} from '../../features/auth/pages/AuthPages'
 import {buildSearchIndex,searchRecords} from './searchIndex'
 import type {SearchResult} from './searchIndex'
@@ -188,7 +188,7 @@ function Profile(){
       </div>
       <div className="menu-section links">
         <button type="button" className="option-row" onClick={()=>{setPassword(true);setOpen(false)}}><Icon name="key" size={16}/><span><b>Parolni o‘zgartirish</b></span></button>
-        {isSuperAdminRole(app.currentRole)&&<button type="button" className="option-row" onClick={()=>{setRecoveryKey(true);setOpen(false)}}><Icon name="shield" size={16}/><span><b>Tiklash kaliti</b></span></button>}
+        {isOwnerRole(app.currentRole)&&<button type="button" className="option-row" onClick={()=>{setRecoveryKey(true);setOpen(false)}}><Icon name="shield" size={16}/><span><b>Tiklash kaliti</b></span></button>}
         <button type="button" className="option-row danger" onClick={()=>{setOpen(false);app.logout()}}><Icon name="logout" size={16}/><span><b>Chiqish</b></span></button>
       </div>
     </Popover>
@@ -199,16 +199,27 @@ function Profile(){
 
 export function Topbar(){
   const app=useApp()
+  const navigate=useNavigate()
   const contextRef=useRef<HTMLButtonElement>(null)
   const [contextOpen,setContextOpen]=useState(false),[paletteOpen,setPaletteOpen]=useState(false)
   const compactSearch=useMediaQuery('(max-width: 760px)')
   const s=app.state
   const branch=s.branches.find(x=>x.id===s.settings.defaultBranchId),warehouse=s.warehouses.find(x=>x.id===s.settings.defaultWarehouseId),line=s.productionLines.find(x=>x.id===s.settings.defaultLineId)
   const {searchOpen,setSearchOpen}=app
+  const [targetTenant,setTargetTenant]=useState('')
+  const chooseTenant=()=>{
+    if(!targetTenant||targetTenant===app.saas.tenant?.id)return
+    const company=app.saas.availableTenants.find(t=>t.id===targetTenant)
+    if(!company||!window.confirm(`${company.name} kompaniyasiga o‘tasizmi? Ochiq shakllardagi saqlanmagan ma’lumotlar yopiladi.`))return
+    const result=app.switchTenant(targetTenant)
+    if(result.ok){setTargetTenant('');navigate('/')}
+    else app.toast(result.message,'danger')
+  }
   useEffect(()=>{if(searchOpen){setPaletteOpen(true);setSearchOpen(false)}},[searchOpen,setSearchOpen])
   return <header className="topbar">
     <button type="button" className="icon-ghost mobile-menu" onClick={()=>app.setSidebarMobile(true)} aria-label="Menyuni ochish" aria-controls="app-sidebar" aria-expanded={app.sidebarMobile}><Icon name="menu"/></button>
     {compactSearch?<button type="button" className="utility-btn icon-only" onClick={()=>setPaletteOpen(true)} aria-label="Qidirish"><Icon name="search" size={16}/></button>:<GlobalSearch variant="inline"/>}
+    {app.saas.availableTenants.length>1?<div className="tenant-switch"><Select ariaLabel="Kompaniya tanlash" value={targetTenant||app.saas.tenant?.id||''} onChange={setTargetTenant}>{app.saas.availableTenants.map(t=><option key={t.id} value={t.id}>{t.name}</option>)}</Select><button type="button" className="utility-btn" disabled={!targetTenant||targetTenant===app.saas.tenant?.id} onClick={chooseTenant}>O‘tish</button></div>:<span className="context-copy" aria-label="Faol kompaniya">{app.saas.tenant?.name}</span>}
     <button ref={contextRef} type="button" className={cls('context-chip',contextOpen&&'open')} onClick={()=>setContextOpen(v=>!v)} aria-haspopup="dialog" aria-expanded={contextOpen} aria-label={`Ish konteksti: ${branch?.name}, ${warehouse?.name}, ${line?.name}`}>
       <Icon name="factory" size={16}/><span className="context-copy"><small>Ish konteksti</small><b>{branch?.name}<em> · {warehouse?.name} · {line?.code}</em></b></span><Icon name="chevron-down" size={13}/>
     </button>

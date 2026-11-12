@@ -3,22 +3,24 @@
 // and every workflow can be unit-tested and replayed to build consistent seed data.
 import type {
   ActionResult,Attachment,Bom,BomOperation,CostSnapshot,CustomerReturn,DowntimeReason,EcoChange,EngineeringChange,Employee,LotPin,LotRecord,ManufacturingState,MaterialConsumption,MaterialReservation,PackUnit,PermissionAction,
-  PermissionMap,ProductVariant,ProductionOrder,ProductionStatus,PurchaseLine,PurchaseOrder,QualityCheck,QualityControlPoint,ReceivableEntry,Role,SalesOrder,StockMovement,Supplier,SupplierMaterial,SupplierReplacement,WorkCenter,WorkOrder,WorkOrderEvent,
+  PayableEntry,PermissionMap,ProductVariant,ProductionOrder,ProductionStatus,PurchaseLine,PurchaseOrder,QualityCheck,QualityControlPoint,ReceivableEntry,Role,SalesOrder,StockMovement,Supplier,SupplierMaterial,SupplierReplacement,WorkCenter,WorkOrder,WorkOrderEvent,
 } from '../types'
 import {
-  activeBomFor,actualOrderCost,componentSourceWarehouses,energyRateOf,estimateOrderCost,finalWorkOrder,isOpenOrder,isOpenWorkOrder,isReturnRework,issueUnitCost,issuedQty,lotOrigin,machineRateOf,operationInput,orderQcHold,returnSources,unbuildSource,orderReservations,plannedIssue,rawWarehouseFor,rollUpStandardCosts,isProductItem,itemName,itemUnit,orderMaterialPlan,orderRequirements,perUnit,remainingQty,stockOf,
+  activeBomFor,actualOrderCost,componentSourceWarehouses,energyRateOf,estimateOrderCost,finalWorkOrder,isOpenOrder,isOpenWorkOrder,issueUnitCost,issuedQty,lotOrigin,machineRateOf,operationInput,orderQcHold,returnSources,unbuildSource,orderReservations,plannedIssue,rawWarehouseFor,rollUpStandardCosts,isProductItem,itemName,itemUnit,orderMaterialPlan,orderRequirements,perUnit,remainingQty,stockOf,
 } from './manufacturingEngine'
 import {findBomCycle,orderSpan,runMrp,scheduleConflicts,scheduleOperations} from './planning'
 import {maintenanceClashes,maintenanceDue,nextDueDate,planOf,runtimeForecast,runtimeReadings} from './maintenance'
 import {cleanLink,findLink,linkBlock,linkUnitCost,openPurchasesFor,orderProposal,receiptQuantities,rejectedOpen,replaceableQty,replacementOutstanding,replacementView,returnedLots,validateLink} from './supplierMaterials'
 import type {LinkInput} from './supplierMaterials'
 import {CURRENCIES} from '../utils/format'
-import {employeeRemovalBlocker,employeeWriteBlocker,hasPermission,operatorScopeBlocker,roleManageBlocker,roleOf,rolePermissionBlocker,stockScope} from './access'
+import {employeeRemovalBlocker,employeeWriteBlocker,hasPermission,operatorScopeBlocker,roleManageBlocker,roleOf,rolePermissionBlocker,roleRank,scopeBlocker,scopeMayDelegate,stockScope} from './access'
 import {addDays,addMinutes,compactCode,isoDate,minutesBetween,stamp} from '../utils/dates'
 import {COUNT_UNITS,checkMoney,checkQuantity,dateProblem,isArchived,isIsoDate,isIsoStamp,itemDecimals,readNumber} from './validation'
 import {binQty,itemKeyFor,keyOf,legacyGap,lotsAt,splitKey} from './inventory'
 import {convertQty,packsProblem,unitFactor} from './uom'
 import {PAYMENT_METHODS,customerBalance,hasEntry,ledger,orderReceivable,returnCreditGap,withDebts} from './receivables'
+import {deliveredLotCost} from './profitability'
+import {payableLedger,purchaseBalance,purchasePaymentStatus,supplierBalance,withSupplierDebts} from './payables'
 import {inLot,isSerialUnit,parseSerials,serialConflict,serialTracked} from './serials'
 
 export type Ctx={now:Date;user:Employee;id:(prefix:string)=>string}
@@ -512,7 +514,7 @@ function planDraws(s:S,ctx:Ctx,order:ProductionOrder,materialId:string,qty:numbe
  * Posts planned draws: balances (own reservation first), lots (with `owned`, the order's pinned lots first, else FEFO
  * around every reservation's pins), ledger rows, and consumption rows valued at issue.
  */
-function applyDraws(s:S,ctx:Ctx,order:ProductionOrder,materialId:string,draws:Draw[],note:string,lotOnly?:string,owned=true):{state:S;consumed:MaterialConsumption[];remaining:number;taken:{warehouseId:string;allocations:Allocation[]}[]}{
+function applyDraws(s:S,ctx:Ctx,order:ProductionOrder,materialId:string,draws:Draw[],note:string,lotOnly?:string,owned=true,issueKind:'manual'|'backflush'='backflush'):{state:S;consumed:MaterialConsumption[];remaining:number;taken:{warehouseId:string;allocations:Allocation[]}[]}{
   let next=s,remaining=0
   const consumed:MaterialConsumption[]=[]
   const taken:{warehouseId:string;allocations:Allocation[]}[]=[]
@@ -526,7 +528,7 @@ function applyDraws(s:S,ctx:Ctx,order:ProductionOrder,materialId:string,draws:Dr
     remaining+=lots.remaining
     taken.push({warehouseId:d.warehouseId,allocations:lots.allocations})
     for(const a of lots.allocations.length?lots.allocations:[{qty:d.qty}]){
-      consumed.push({materialId,itemType,qty:q3(a.qty),lot:a.lot,date:stamp(ctx.now),unitCost:Math.round(issueUnitCost(s,materialId,a.lot)*100)/100})
+      consumed.push({id:ctx.id('iss'),materialId,itemType,qty:q3(a.qty),lot:a.lot,date:stamp(ctx.now),unitCost:Math.round(issueUnitCost(s,materialId,a.lot)*100)/100,warehouseId:d.warehouseId,location:a.location,issueKind,outputAtIssue:order.completed+order.scrap,workMinutesAtIssue:order.workOrders.reduce((n,w)=>n+w.actualMin,0)})
       next=addMove(next,ctx,{type:'Material Issue -',itemId:materialId,itemType,warehouseId:d.warehouseId,qty:-a.qty,source:order.code,note,lot:a.lot})
     }
   }
@@ -562,7 +564,7 @@ function issueToOrder(s:S,ctx:Ctx,order:ProductionOrder,materialId:string,qty:nu
   if(issued+qty>plan+1e-3)return {error:`${itemName(s,materialId)}: BOM rejasidan ortiq chiqim bloklangan (reja ${plan}, berilgan ${issued} ${unit})`}
   const planned=planDraws(s,ctx,order,materialId,qty,{own:true,only:lot?.warehouseId})
   if('error' in planned)return planned
-  const applied=applyDraws(s,ctx,order,materialId,planned.draws,note,lot?.code)
+  const applied=applyDraws(s,ctx,order,materialId,planned.draws,note,lot?.code,true,note==='Barcode/lot issue'?'manual':'backflush')
   return {...applied,reservations:reservationsAfter(s,order,materialId,planned.draws,applied.taken)}
 }
 
@@ -584,7 +586,7 @@ function consumeFor(s:S,ctx:Ctx,order:ProductionOrder,units:number,note:string):
   let working=order
   const targetUnits=order.completed+order.scrap+Math.max(0,units)
   for(const {component,required:targetRequired} of orderRequirements(order,targetUnits)){
-    const already=order.consumed.filter(c=>c.materialId===component.materialId).reduce((a,c)=>a+c.qty,0)
+    const already=issuedQty(working,component.materialId)
     const required=q3(Math.max(0,targetRequired-already))
     if(required<=0)continue
     const drawn=issueToOrder(next,ctx,working,component.materialId,required,note)
@@ -821,6 +823,8 @@ export function controlPointDue(qcp:Pick<QualityControlPoint,'frequency'|'sample
 }
 
 function ensureFinalCheck(s:S,ctx:Ctx,order:ProductionOrder):S{
+  // An all-scrap order has no finished unit to inspect or release.
+  if(order.completed<=0)return s
   if(s.qualityChecks.some(q=>q.sourceId===order.id&&q.type==='Final'&&q.status==='Pending'))return s
   const qcp=s.qualityControlPoints.find(c=>c.active&&c.scope==='Final'&&(!c.productId||c.productId===order.productId))
   // With Final QC required every order is inspected; otherwise the control point's frequency decides.
@@ -849,13 +853,8 @@ function receiveOutput(s:S,ctx:Ctx,order:ProductionOrder,good:number):{state:S;o
   let next=s
   const updated={...order}
   if(order.reworkOf){
-    // In-place rework: units are already in stock, nothing new is received. A production rework takes the reworked
-    // units over from its source order's Final QC hold, so its own pass releases them and the source's pass does not.
-    const source=isReturnRework(next,order)?undefined:next.productionOrders.find(o=>o.id===order.reworkOf)
-    if(!source)return {state:next,order:{...updated,completed:updated.completed+good}}
-    const sourceHold=orderQcHold(next,source),take=Math.min(good,sourceHold)
-    next=setOrder(next,{...source,qcHeld:sourceHold-take})
-    return {state:next,order:{...updated,completed:updated.completed+good,qcHeld:orderQcHold(s,order)+take}}
+    // Rework custody and any scrap were posted before material consumption in reportOutput.
+    return {state:next,order:{...updated,completed:updated.completed+good}}
   }
   const tracking=product?.tracking||'none'
   const qcHold=Boolean(next.settings.policies.requireFinalQc)
@@ -901,6 +900,84 @@ function receiveOutput(s:S,ctx:Ctx,order:ProductionOrder,good:number):{state:S;o
   return {state:next,order:{...updated,completed:updated.completed+good,qcHeld:orderQcHold(s,order)+(qcHold?good:0)}}
 }
 
+/** Move physical units into a rework order's custody, removing its scrap exactly once. */
+function reworkOutput(s:S,ctx:Ctx,order:ProductionOrder,good:number,scrap:number):{state:S;order:ProductionOrder}|{error:string}{
+  const key=outKey(s,order),amount=q3(good+scrap)
+  const balance=s.stockBalances.find(b=>b.warehouseId===order.warehouseId&&keyOf(b)===key)
+  const ret=s.returns.find(r=>r.reworkOrderId===order.id)
+  const source=ret?undefined:s.productionOrders.find(o=>o.id===order.reworkOf)
+  if(!ret&&!source)return {error:'Rework manbasi topilmadi'}
+  const sourceHold=source?orderQcHold(s,source):0
+  const own=(l:LotRecord)=>l.warehouseId===order.warehouseId&&keyOf(l)===key&&l.qty>0&&(
+    ret?l.sourceType==='return'&&l.sourceId===ret.id&&l.status==='rework':
+    l.sourceType==='production'&&l.sourceId===source?.id&&!l.reworkOrderId&&['quarantine','available'].includes(l.status||'available'))
+  const pins=lotPins(s)
+  const candidates=s.lots.filter(own).sort((a,b)=>Number(b.status==='quarantine')-Number(a.status==='quarantine')||a.createdAt.localeCompare(b.createdAt)).map(l=>{
+    if(l.status!=='available')return {lot:l,cap:l.qty}
+    const id=pinKey(l.warehouseId,key,l.code),blocked=pins.get(id)||0
+    pins.set(id,Math.max(0,blocked-l.qty))
+    return {lot:l,cap:q3(Math.max(0,l.qty-blocked))}
+  }).filter(x=>x.cap>1e-9)
+  const tracked=s.products.find(p=>p.id===order.productId)?.tracking!=='none'
+  if(tracked&&candidates.reduce((n,x)=>n+x.cap,0)<amount-1e-6)return {error:'Rework manba LOT/serial qoldig‘i yetarli emas'}
+  if((balance?.onHand||0)<scrap-1e-6)return {error:'Rework scrap uchun omborda qoldiq yetarli emas'}
+  if(ret&&(balance?.quarantine||0)<scrap-1e-6)return {error:'Rework scrap uchun karantin qoldig‘i yetarli emas'}
+  if(source){
+    const released=Math.max(0,amount-sourceHold)
+    if((balance?.onHand||0)-(balance?.reserved||0)-(balance?.quarantine||0)<released-1e-6)return {error:'Rework uchun bo‘sh qoldiq yetarli emas'}
+    if((balance?.quarantine||0)<Math.min(amount,sourceHold)-1e-6)return {error:'Rework manba karantini yetarli emas'}
+  }
+  let remainingGood=good,remainingScrap=scrap,heldTaken=0,goodFromFree=0,scrapFromHeld=0
+  const binDelta:Record<string,number>={}
+  const scrapMoves:Omit<StockMovement,'id'|'date'|'user'>[]=[]
+  const nextLots=[...s.lots]
+  for(const candidate of candidates){
+    if(remainingGood+remainingScrap<=1e-9)break
+    const index=nextLots.findIndex(l=>l.id===candidate.lot.id)
+    const l=nextLots[index]
+    const takeGood=q3(Math.min(remainingGood,candidate.cap))
+    const takeScrap=q3(Math.min(remainingScrap,candidate.cap-takeGood))
+    const held=ret||l.status==='quarantine'
+    if(takeGood>0){
+      if(l.kind==='serial'&&takeGood>=l.qty-1e-9&&takeScrap===0)nextLots[index]={...l,reworkOrderId:order.id,status:'quarantine'}
+      else nextLots.push({...l,id:ctx.id('lot'),code:`RW-${order.code}-${l.code}`,sourceLotCode:l.code,qty:takeGood,originalQty:takeGood,reworkOrderId:order.id,status:'quarantine'})
+      if(!held)goodFromFree=q3(goodFromFree+takeGood)
+      else if(source)heldTaken=q3(heldTaken+takeGood)
+      remainingGood=q3(remainingGood-takeGood)
+    }
+    if(takeScrap>0){
+      if(l.kind==='serial'&&takeGood>0)return {error:'Serial birlikni bo‘lib bo‘lmaydi'}
+      if(l.location)binDelta[l.location]=q3((binDelta[l.location]||0)-takeScrap)
+      scrapMoves.push({type:'QC Scrap -',itemId:key,itemType:'finished',warehouseId:order.warehouseId,qty:-takeScrap,source:order.code,note:'Rework scrap',lot:l.code,...(l.location?{location:l.location}:{})})
+      if(held){scrapFromHeld=q3(scrapFromHeld+takeScrap);if(source)heldTaken=q3(heldTaken+takeScrap)}
+      remainingScrap=q3(remainingScrap-takeScrap)
+    }
+    if(!(l.kind==='serial'&&takeGood>=l.qty-1e-9&&takeScrap===0))nextLots[index]={...nextLots[index],qty:q3(l.qty-takeGood-takeScrap),status:l.qty-takeGood-takeScrap>1e-9?nextLots[index].status:'hold'}
+  }
+  if(tracked&&remainingGood+remainingScrap>1e-6)return {error:'Rework LOT taqsimoti yetarli emas'}
+  if(!tracked&&remainingGood+remainingScrap>1e-9){
+    if(ret)scrapFromHeld=q3(scrapFromHeld+remainingScrap)
+    else{
+      const stillHeld=Math.max(0,sourceHold-heldTaken)
+      const heldGood=Math.min(remainingGood,stillHeld),heldScrap=Math.min(remainingScrap,stillHeld-heldGood)
+      heldTaken=q3(heldTaken+heldGood+heldScrap)
+      goodFromFree=q3(goodFromFree+remainingGood-heldGood)
+      scrapFromHeld=q3(scrapFromHeld+heldScrap)
+    }
+    remainingGood=0
+  }
+  let next:S={...s,lots:nextLots}
+  if(source)next=setOrder(next,{...source,qcHeld:q3(sourceHold-heldTaken)})
+  const quarantineDelta=ret?-scrap:q3(goodFromFree-scrapFromHeld)
+  if(scrap>0||quarantineDelta!==0)next=changeBalance(next,ctx,order.warehouseId,key,{onHand:-scrap,quarantine:quarantineDelta},undefined,binDelta)
+  if(scrap>0){
+    if(remainingScrap>1e-9)scrapMoves.push({type:'QC Scrap -',itemId:key,itemType:'finished',warehouseId:order.warehouseId,qty:-remainingScrap,source:order.code,note:'Rework scrap (legacy untracked)'})
+    next=addMoves(next,ctx,scrapMoves)
+  }
+  const hold=orderQcHold(s,order)
+  return {state:next,order:{...order,qcHeld:q3(hold+(ret?-scrap:good))}}
+}
+
 export function reportOutput(s:S,ctx:Ctx,id:string,good:number,scrap=0,reason='Shop Floor scrap',key?:string):Outcome{
   const o=s.productionOrders.find(x=>x.id===id)
   if(!o)return fail(s,'Buyurtma topilmadi')
@@ -916,10 +993,12 @@ export function reportOutput(s:S,ctx:Ctx,id:string,good:number,scrap=0,reason='S
   // The output store is checked before any material is consumed, so a refusal changes nothing (audit #4).
   const badOutput=g>0&&!o.reworkOf?outputWarehouseProblem(s,o.lineId,o.warehouseId):null
   if(badOutput)return fail(s,`${o.code}: ${badOutput}`)
-  const consumed=consumeFor(s,ctx,o,g+sc,sc?`Production consumption (+${sc} scrap)`:'Production consumption')
+  const prepared=o.reworkOf?reworkOutput(s,ctx,o,g,sc):{state:s,order:o}
+  if('error' in prepared)return fail(s,prepared.error)
+  const consumed=consumeFor(prepared.state,ctx,prepared.order,g+sc,sc?`Production consumption (+${sc} scrap)`:'Production consumption')
   if('error' in consumed)return fail(s,consumed.error)
   let next=consumed.state
-  const received=receiveOutput(next,ctx,{...o,consumed:[...o.consumed,...consumed.consumed],reservations:consumed.reservations},g)
+  const received=receiveOutput(next,ctx,{...prepared.order,consumed:[...o.consumed,...consumed.consumed],reservations:consumed.reservations},g)
   next=received.state
   let updated={...received.order,scrap:o.scrap+sc,...(key?{outputKeys:[...(o.outputKeys||[]),key].slice(-50)}:{})}
   updated={...updated,progress:progressOf(updated)}
@@ -942,10 +1021,12 @@ export function recordScrap(s:S,ctx:Ctx,id:string,qty:number,reason:string):Outc
   const amount=q.value
   if(amount>remainingQty(o))return fail(s,`Scrap miqdori 1–${remainingQty(o)} oralig‘ida bo‘lishi kerak`)
   if(!['Jarayonda','Pauzada','Sifat nazoratida'].includes(o.status))return fail(s,'Scrap faqat ishlab chiqarish jarayonida yoziladi')
-  const consumed=consumeFor(s,ctx,o,amount,'Scrap consumption')
+  const prepared=o.reworkOf?reworkOutput(s,ctx,o,0,amount):{state:s,order:o}
+  if('error' in prepared)return fail(s,prepared.error)
+  const consumed=consumeFor(prepared.state,ctx,prepared.order,amount,'Scrap consumption')
   if('error' in consumed)return fail(s,consumed.error)
   let next=consumed.state
-  const updated={...o,scrap:o.scrap+amount,consumed:[...o.consumed,...consumed.consumed],reservations:consumed.reservations}
+  const updated={...prepared.order,scrap:o.scrap+amount,consumed:[...o.consumed,...consumed.consumed],reservations:consumed.reservations}
   next=setOrder(next,{...updated,progress:progressOf(updated)})
   next=scrapAlert(next,ctx,o,amount,reason)
   next=logActivity(next,ctx,'Scrap qayd etdi','Ishlab chiqarish',o.code,'warning',reason)
@@ -956,6 +1037,7 @@ export function transitionProduction(s:S,ctx:Ctx,id:string,status:ProductionStat
   const o=s.productionOrders.find(x=>x.id===id)
   if(!o)return fail(s,'Buyurtma topilmadi')
   if(!isOpenOrder(o))return fail(s,`${o.code} allaqachon yopilgan`)
+  if(!['Tasdiqlangan','Jarayonda','Pauzada','Sifat nazoratida','Yakunlangan','Bekor qilingan'].includes(status))return fail(s,'Bu ishlab chiqarish statusiga o‘tib bo‘lmaydi')
   let next=s,updated:ProductionOrder={...o}
 
   // Confirming or starting an order needs a valid output store of its own branch (audit #4); rework stays in place.
@@ -997,6 +1079,7 @@ export function transitionProduction(s:S,ctx:Ctx,id:string,status:ProductionStat
     if(unfinished.length)return fail(s,`Avval barcha operatsiyalarni yakunlang: ${unfinished.map(w=>w.name).join(', ')}`)
     // Without reported output QC has nothing to inspect and the order would be stuck there (BUG-06).
     if(o.completed+o.scrap<=0)return fail(s,'Sifat nazoratiga yuborishdan oldin tayyor yoki scrap natijasini qayd eting')
+    if(o.reworkOf&&remainingQty(o)>0)return fail(s,'Rework Final QC uchun avval barcha birliklarning natijasini qayd eting')
     // Units added after an earlier pass are still held: they need their own Final check (N-01 / B3-08).
     const stillHeld=orderQcHold(next,o)>0
     updated={...updated,qualityStatus:updated.qualityStatus==='Passed'&&!stillHeld?'Passed':'Pending'}
@@ -1006,7 +1089,7 @@ export function transitionProduction(s:S,ctx:Ctx,id:string,status:ProductionStat
     if(o.status!=='Sifat nazoratida')return fail(s,'Yakunlashdan oldin buyurtmani sifat nazoratiga yuboring')
     const held=orderQcHold(s,o)
     // A Final scrap decision that removed every held unit leaves nothing to inspect: the order may close (N-02).
-    const scrappedOut=o.qualityStatus==='Scrap'&&held<=0
+    const scrappedOut=(o.qualityStatus==='Scrap'||o.completed===0&&o.scrap>0)&&held<=0
     if(['Failed','Scrap','Rework','Hold'].includes(o.qualityStatus)&&!scrappedOut)return fail(s,'Final QC o‘tmadi. Rework yoki scrap qaror qabul qiling, keyin qayta tekshiruv o‘tkazing.')
     if(next.settings.policies.requireFinalQc&&o.qualityStatus!=='Passed'&&!scrappedOut)return fail(s,'Final quality check hali Passed emas. Sifat → Tekshiruvlar bo‘limida natijani kiriting.')
     // In-process inspections still open would be skipped silently (N-13).
@@ -1020,10 +1103,16 @@ export function transitionProduction(s:S,ctx:Ctx,id:string,status:ProductionStat
     if(o.materialReserved)next=releaseFor(next,ctx,o)
     // Final QC switched off after this output was quarantined: nothing will ever inspect it, so it is released here (N-08).
     if(!next.settings.policies.requireFinalQc&&held>0){
+      const unresolvedChild=next.productionOrders.some(r=>r.reworkOf===o.id&&orderQcHold(next,r)>next.lots.filter(l=>l.reworkOrderId===r.id&&l.status==='quarantine').reduce((n,l)=>n+l.qty,0)+1e-6)
+      if(unresolvedChild)return fail(s,'Manba MO rework LOT egaligi aniqlanmaguncha release qilinmaydi')
+      if(o.reworkOf&&!s.returns.some(r=>r.reworkOrderId===o.id)&&s.products.find(p=>p.id===o.productId)?.tracking!=='none'){
+        const owned=next.lots.filter(l=>l.reworkOrderId===o.id&&l.warehouseId===o.warehouseId&&keyOf(l)===outKey(s,o)&&l.status==='quarantine').reduce((n,l)=>n+l.qty,0)
+        if(Math.abs(owned-held)>1e-6)return fail(s,'Rework LOT egaligi aniqlanmagan — QC siyosati o‘chirilsa ham release bloklangan')
+      }
       const balance=next.stockBalances.find(b=>b.warehouseId===o.warehouseId&&keyOf(b)===outKey(s,o))
       const release=q3(Math.min(held,balance?.quarantine||0))
       if(release>0)next=changeBalance(next,ctx,o.warehouseId,outKey(s,o),{quarantine:-release})
-      next={...next,lots:next.lots.map(l=>l.sourceType==='production'&&l.sourceId===o.id&&l.status==='quarantine'?{...l,status:'available' as const}:l)}
+      next={...next,lots:next.lots.map(l=>(l.reworkOrderId===o.id||!o.reworkOf&&l.sourceType==='production'&&l.sourceId===o.id)&&l.status==='quarantine'?{...l,status:'available' as const}:l)}
     }
     updated={...updated,materialReserved:false,reservations:undefined,progress:100,completedAt:stamp(ctx.now),qcHeld:0}
     if(updated.salesOrderId){
@@ -1310,13 +1399,47 @@ export function issueExtraMaterial(s:S,ctx:Ctx,orderId:string,materialId:string,
   // Free stock only (never this or another order's reservation), from any source store of the branch.
   const planned=planDraws(s,ctx,o,materialId,amount,{own:false})
   if('error' in planned)return fail(s,planned.error)
-  const applied=applyDraws(s,ctx,o,materialId,planned.draws,`Qo‘shimcha chiqim: ${why}`,undefined,false)
+  const applied=applyDraws(s,ctx,o,materialId,planned.draws,`Qo‘shimcha chiqim: ${why}`,undefined,false,'manual')
   const extra={materialId,qty:amount,reason:why,by:ctx.user?.id||'',at:stamp(ctx.now)}
   let next=setOrder(applied.state,{...o,consumed:[...o.consumed,...applied.consumed],extraIssues:[...(o.extraIssues||[]),extra]})
   next=lowStockSignals(next,ctx)
   const message=`${itemName(s,materialId)}: ${amount} ${unit} qo‘shimcha berildi`
   next=logActivity(next,ctx,'Qo‘shimcha material chiqimi','Ishlab chiqarish',o.code,'warning',`${message} · ${why}`)
   return ok(next,message)
+}
+
+/** Return only a named manual issue whose units have not seen further output or work. Gross issue history is retained. */
+export function returnUnusedMaterial(s:S,ctx:Ctx,orderId:string,issueId:string,qty:number,reason:string,key:string):Outcome{
+  const o=s.productionOrders.find(x=>x.id===orderId)
+  if(!o)return fail(s,'MO topilmadi')
+  if((o.materialReturns||[]).some(r=>r.key===key))return ok(s,'Bu material qaytarishi allaqachon qayd etilgan',orderId)
+  if(!key.trim()||!reason.trim())return fail(s,'Qaytarish kaliti va sababi kerak')
+  if(!['Jarayonda','Pauzada','Tasdiqlangan','Bekor qilingan'].includes(o.status))return fail(s,'Bu MO holatida material qaytarilmaydi')
+  const issue=o.consumed.find(c=>c.id===issueId)
+  if(!issue||issue.issueKind!=='manual'||!issue.warehouseId||issue.unitCost===undefined)return fail(s,'Ishlatilmagan chiqimning LOT, ombor va tannarx manbasi aniqlanmagan')
+  if(stockScope(s,ctx.user)&&!stockScope(s,ctx.user)!.has(issue.warehouseId))return fail(s,'Material ombori vakolat doirasidan tashqarida')
+  if(o.completed+o.scrap!==(issue.outputAtIssue??-1)||o.workOrders.some(w=>w.status==='Jarayonda')||o.workOrders.reduce((n,w)=>n+w.actualMin,0)>(issue.workMinutesAtIssue??-1)+1e-6)return fail(s,'Bu chiqimdan keyin ish yoki natija qayd etilgan — ishlatilmagan miqdor isbotlanmagan')
+  const q=stockQty(s,issue.materialId,qty,'Qaytarish miqdori')
+  if('error' in q)return fail(s,q.error)
+  const amount=q.value,prior=q3((o.materialReturns||[]).filter(r=>r.issueId===issueId).reduce((n,r)=>n+r.qty,0))
+  if(amount>issue.qty-prior+1e-6)return fail(s,'Qaytarish chiqimning ishlatilmagan qoldig‘idan oshadi')
+  const wh=s.warehouses.find(w=>w.id===issue.warehouseId)
+  if(!wh||wh.status!=='Faol'||issue.location&&!wh.locations.includes(issue.location))return fail(s,'Asl ombor yoki joy faol emas')
+  let lot:LotRecord|undefined
+  if(issue.lot){
+    const matches=s.lots.filter(l=>l.code===issue.lot&&l.itemId===issue.materialId&&l.warehouseId===issue.warehouseId&&(l.location||'')===(issue.location||''))
+    if(matches.length!==1)return fail(s,'Asl LOT yagona emas yoki topilmadi')
+    lot=matches[0]
+    if(lot.status&&lot.status!=='available'||isExpired(lot,isoDate(ctx.now)))return fail(s,'LOT QC/hold holatida yoki muddati o‘tgan — qaytarish bloklangan')
+    if(lot.kind==='serial'&&amount!==1)return fail(s,'Serial birligi bo‘linmaydi')
+  }else if(s.rawMaterials.find(m=>m.id===issue.materialId)?.lotTracking||s.products.find(p=>p.id===issue.materialId)?.tracking!=='none'&&s.products.some(p=>p.id===issue.materialId))return fail(s,'LOT kuzatiladigan materialning chiqim LOTi noma’lum')
+  const entry={id:ctx.id('mret'),key,issueId,materialId:issue.materialId,qty:amount,lot:issue.lot,warehouseId:issue.warehouseId,location:issue.location,unitCost:issue.unitCost,at:stamp(ctx.now),by:ctx.user.id,reason:reason.trim()}
+  let next:S={...s,lots:lot?s.lots.map(l=>l.id===lot!.id?{...l,qty:q3(l.qty+amount)}:l):s.lots}
+  next=changeBalance(next,ctx,issue.warehouseId,issue.materialId,{onHand:amount},issue.lot,issue.location?{[issue.location]:amount}:undefined)
+  next=addMove(next,ctx,{type:'Material Return +',itemId:issue.materialId,itemType:issue.itemType,warehouseId:issue.warehouseId,qty:amount,source:o.code,note:reason.trim(),lot:issue.lot,location:issue.location,key})
+  next=setOrder(next,{...o,materialReturns:[...(o.materialReturns||[]),entry]})
+  next=logActivity(next,ctx,'Ishlatilmagan material qaytarildi','Ishlab chiqarish',o.code,'info',`${itemName(s,issue.materialId)} ${amount} ${itemUnit(s,issue.materialId)} · ${reason.trim()}`)
+  return ok(next,'Ishlatilmagan material asl omborga qaytarildi',entry.id)
 }
 
 export function recordMaterialScan(s:S,ctx:Ctx,orderId:string,code:string):Outcome{
@@ -1524,11 +1647,63 @@ export function createReworkOrder(s:S,ctx:Ctx,sourceOrderId:string,qty:number,re
   const alreadyReworked=s.productionOrders.filter(r=>r.reworkOf===o.id&&r.status!=='Bekor qilingan').reduce((a,r)=>a+r.quantity,0)
   const reworkable=Math.max(0,o.completed-alreadyReworked)
   if(amount>reworkable)return fail(s,`Rework miqdori ${reworkable} ${itemUnit(s,o.productId)} dan oshmasligi kerak (tayyor ${o.completed}, rework’da ${alreadyReworked})`)
-  const created=createProductionOrder(s,ctx,{productId:o.productId,quantity:amount,lineId:o.lineId,warehouseId:o.warehouseId,priority:'Yuqori',source:`Rework: ${o.code} · ${reason}`,reworkOf:o.id,responsibleId:o.responsibleId})
+  const created=createProductionOrder(s,ctx,{productId:o.productId,variantId:o.variantId,quantity:amount,lineId:o.lineId,warehouseId:o.warehouseId,outputLocation:o.outputLocation,priority:'Yuqori',source:`Rework: ${o.code} · ${reason}`,reworkOf:o.id,responsibleId:o.responsibleId})
   if(!created.result.ok)return created
   let next={...created.state,productionOrders:created.state.productionOrders.map(x=>x.id===o.id&&x.qualityStatus==='Failed'?{...x,qualityStatus:'Rework'}:x)}
   next=logActivity(next,ctx,'Rework buyurtmasi yaratildi','Sifat',o.code,'warning',reason)
   return ok(next,`Rework MO yaratildi (${amount} ${itemUnit(s,o.productId)})`,created.result.id)
+}
+
+/** Legacy custody can be assigned only to held units with the original MO's genealogy. No balance changes here. */
+export function reworkOwnershipCandidates(s:S,orderId:string){
+  const o=s.productionOrders.find(x=>x.id===orderId),source=s.productionOrders.find(x=>x.id===o?.reworkOf)
+  if(!o||!source||s.returns.some(r=>r.reworkOrderId===orderId))return []
+  return s.lots.filter(l=>l.qty>0&&l.status==='quarantine'&&!l.reworkOrderId&&l.sourceType==='production'&&l.sourceId===source.id&&l.warehouseId===o.warehouseId&&keyOf(l)===outKey(s,o))
+}
+
+function assignReworkOwnership(s:S,ctx:Ctx,orderId:string,allocations:{lotId:string;qty:number}[],reason:string):Outcome{
+  const o=s.productionOrders.find(x=>x.id===orderId),source=s.productionOrders.find(x=>x.id===o?.reworkOf)
+  if(!o||!source||!isOpenOrder(o))return fail(s,'Ochiq production rework buyurtmasi topilmadi')
+  const hold=orderQcHold(s,o),tagged=s.lots.filter(l=>l.reworkOrderId===o.id&&l.status==='quarantine').reduce((n,l)=>n+l.qty,0)
+  const remaining=q3(hold-tagged)
+  if(remaining<=1e-9)return ok(s,'Rework LOT egaligi allaqachon muvofiqlashtirilgan',o.id)
+  if(!reason.trim())return fail(s,'LOT tanlovi sababini yozing')
+  if(!allocations.length||new Set(allocations.map(a=>a.lotId)).size!==allocations.length)return fail(s,'LOT taqsimoti noto‘g‘ri')
+  const candidates=reworkOwnershipCandidates(s,orderId),picked:typeof candidates=[]
+  let total=0
+  for(const a of allocations){
+    const l=candidates.find(x=>x.id===a.lotId)
+    if(!l||!Number.isFinite(a.qty)||a.qty<=0||a.qty>l.qty+1e-9||l.kind==='serial'&&a.qty!==1)return fail(s,'Tanlangan LOT/serial manba, ombor, variant yoki qoldiqka mos emas')
+    const q=stockQty(s,o.productId,a.qty,'LOT miqdori')
+    if('error' in q)return fail(s,q.error)
+    picked.push(l);total=q3(total+a.qty)
+  }
+  if(Math.abs(total-remaining)>1e-6)return fail(s,`Rework karantini ${remaining}; tanlangan LOT jami ${total}`)
+  const sourceRemaining=q3(candidates.reduce((n,l)=>n+l.qty,0)-total)
+  if(sourceRemaining<orderQcHold(s,source)-1e-6)return fail(s,'Manba MOning qolgan karantin LOTi yetarli bo‘lmaydi')
+  const balance=s.stockBalances.find(b=>b.warehouseId===o.warehouseId&&keyOf(b)===outKey(s,o))
+  if((balance?.quarantine||0)<hold-1e-6||(balance?.onHand||0)<hold-1e-6)return fail(s,'LOT va ombor karantini mos emas')
+  const audit=allocations.map((a,i)=>({lotId:a.lotId,lotCode:picked[i].code,qty:a.qty}))
+  const nextLots=[...s.lots]
+  for(let i=0;i<allocations.length;i++){
+    const a=allocations[i],l=picked[i],index=nextLots.findIndex(x=>x.id===l.id)
+    if(l.kind==='serial')nextLots[index]={...l,reworkOrderId:o.id}
+    else{
+      nextLots[index]={...l,qty:q3(l.qty-a.qty),status:l.qty-a.qty>1e-9?l.status:'hold'}
+      const baseCode=`RW-${o.code}-${l.code}`
+      let code=baseCode,seq=2
+      while(nextLots.some(x=>x.code===code&&keyOf(x)===keyOf(l))){code=`${baseCode}-${seq}`;seq++}
+      nextLots.push({...l,id:ctx.id('lot'),code,sourceLotCode:l.code,qty:a.qty,originalQty:a.qty,reworkOrderId:o.id,status:'quarantine'})
+    }
+  }
+  let next:S={...s,lots:nextLots}
+  next=setOrder(next,{...o,reworkReconciliations:[...(o.reworkReconciliations||[]),{at:stamp(ctx.now),by:ctx.user.id,reason:reason.trim(),allocations:audit}]})
+  next=logActivity(next,ctx,'Rework LOT egaligi muvofiqlashtirildi','Sifat',o.code,'warning',`${audit.map(a=>`${a.lotCode} ${a.qty}`).join(', ')} · ${reason.trim()}`)
+  return ok(next,'Rework LOT egaligi qayd etildi; Final QC hali alohida tasdiqlanishi kerak',o.id)
+}
+
+export function reconcileReworkOwnership(s:S,ctx:Ctx,orderId:string,allocations:{lotId:string;qty:number}[],reason:string):Outcome{
+  return assignReworkOwnership(s,ctx,orderId,allocations,reason)
 }
 
 /* ------------------------------------------------------------ quality -- */
@@ -1549,8 +1724,13 @@ export function createQualityCheck(s:S,ctx:Ctx,payload:Partial<QualityCheck>):Ou
     // An incoming check decides about one receipt; without it the result would land on whichever receipt matches first (B3-03).
     const po=s.purchaseOrders.find(p=>p.id===payload.sourceId)
     const receipt=po?.receipts.find(r=>r.id===payload.receiptId)
-    if(!receipt||receipt.materialId!==payload.itemId)return fail(s,'Kirish tekshiruvi uchun aniq qabul (receipt) tanlang')
-    if(s.qualityChecks.some(q=>q.receiptId===receipt.id&&q.sourceType==='purchase'))return fail(s,'Bu qabul uchun tekshiruv allaqachon mavjud')
+    if(!po||!receipt||receipt.materialId!==payload.itemId)return fail(s,'Kirish tekshiruvi uchun aniq qabul (receipt) tanlang')
+    const earlier=s.qualityChecks.filter(q=>q.receiptId===receipt.id&&q.sourceType==='purchase')
+    if(earlier.length){
+      // A full held receipt may be inspected again. A partial disposition cannot be passed as a whole later.
+      const split=receiptQuantities(s,po,receipt)
+      if(earlier.some(q=>!['Hold','Rework'].includes(q.status))||split.accepted>0||split.returned>0||split.scrapped>0)return fail(s,'Bu qabul uchun tekshiruv allaqachon mavjud yoki qisman hal qilingan')
+    }
   }
   // A re-inspection of one operation names its work order, so the newest result of that operation decides its gate.
   if(payload.workOrderId&&!s.productionOrders.find(o=>o.id===payload.sourceId)?.workOrders.some(w=>w.id===payload.workOrderId))return fail(s,'Operatsiya bu buyurtmaga tegishli emas')
@@ -1576,28 +1756,49 @@ export function resolveQuality(s:S,ctx:Ctx,id:string,status:QualityCheck['status
     const mo=s.productionOrders.find(o=>o.id===q.sourceId)
     // Nothing produced yet: a pass would clear units that do not exist and skip inspecting the real output (N-01).
     if(mo&&mo.completed<=0)return fail(s,`${mo.code}: tekshiriladigan tayyor natija yo‘q`)
+    if(mo&&['Passed','Scrap'].includes(status)&&s.productionOrders.some(r=>r.reworkOf===mo.id&&orderQcHold(s,r)>s.lots.filter(l=>l.reworkOrderId===r.id&&l.status==='quarantine').reduce((n,l)=>n+l.qty,0)+1e-6))return fail(s,'Manba MO rework LOT egaligi aniqlanmaguncha Final QC release yoki Scrap qilinmaydi')
   }
-  let next:S={...s,qualityChecks:s.qualityChecks.map(x=>x.id===id?{...x,status,reason:reason||x.reason,measured:measured||x.measured,inspectorId:ctx.user.id,date:stamp(ctx.now)}:x)}
+  let ownership=s
+  if(q.sourceType==='production'&&q.type==='Final'&&status==='Passed'){
+    const mo=s.productionOrders.find(o=>o.id===q.sourceId)
+    if(mo?.reworkOf&&!s.returns.some(r=>r.reworkOrderId===mo.id)&&s.products.find(p=>p.id===mo.productId)?.tracking!=='none'){
+      const held=orderQcHold(s,mo),tagged=s.lots.filter(l=>l.reworkOrderId===mo.id&&l.status==='quarantine'&&l.warehouseId===mo.warehouseId&&keyOf(l)===outKey(s,mo)).reduce((n,l)=>n+l.qty,0)
+      const candidates=reworkOwnershipCandidates(s,mo.id)
+      const competing=s.productionOrders.filter(o=>o.id!==mo.id&&o.reworkOf===mo.reworkOf&&isOpenOrder(o)&&orderQcHold(s,o)>0)
+      const source=s.productionOrders.find(o=>o.id===mo.reworkOf)
+      if(held>tagged+1e-6&&candidates.length===1&&Math.abs(candidates[0].qty-(held-tagged+orderQcHold(s,source||mo)))<1e-6&&!competing.length){
+        const fixed=assignReworkOwnership(s,ctx,mo.id,[{lotId:candidates[0].id,qty:held-tagged}],'Yagona manba LOT va karantin miqdori bilan avtomatik tasdiq')
+        if(fixed.result.ok)ownership=fixed.state
+      }
+    }
+  }
+  let next:S={...ownership,qualityChecks:ownership.qualityChecks.map(x=>x.id===id?{...x,status,reason:reason||x.reason,measured:measured||x.measured,inspectorId:ctx.user.id,date:stamp(ctx.now)}:x)}
   if(q.sourceType==='production'&&q.type==='Final'&&status==='Scrap'){
     // A Final scrap decision removes the order's held units from stock as scrap, so they can never be released later (N-02).
     const mo=next.productionOrders.find(o=>o.id===q.sourceId)
     if(mo){
       const hold=orderQcHold(s,s.productionOrders.find(o=>o.id===mo.id)!)
+      if(hold<=1e-9)return fail(s,'Final Scrap uchun ushbu buyurtmada karantindagi birlik yo‘q')
       const key=outKey(s,mo)
       const balance=next.stockBalances.find(b=>b.warehouseId===mo.warehouseId&&keyOf(b)===key)
-      const amount=q3(Math.min(hold,balance?.quarantine||0,balance?.onHand||0))
+      if((balance?.quarantine||0)<hold-1e-6||(balance?.onHand||0)<hold-1e-6)return fail(s,'Final Scrap uchun order karantini yoki ombor qoldig‘i yetarli emas')
+      const amount=q3(hold)
       if(amount>0){
         const before=next
         let left=amount
+        const scrapMoves:Omit<StockMovement,'id'|'date'|'user'>[]=[]
         const ret=s.returns.find(x=>x.reworkOrderId===mo.id)
         next={...next,lots:next.lots.map(l=>{
-          const held=(l.sourceType==='production'&&l.sourceId===mo.id&&l.status==='quarantine')||(Boolean(ret)&&l.sourceType==='return'&&l.sourceId===ret?.id&&l.status==='rework')
+          const held=(l.reworkOrderId===mo.id&&l.status==='quarantine')||(!mo.reworkOf&&l.sourceType==='production'&&l.sourceId===mo.id&&!l.reworkOrderId&&l.status==='quarantine')||(Boolean(ret)&&l.sourceType==='return'&&l.sourceId===ret?.id&&l.status==='rework')
           if(left<=1e-9||!held)return l
           const take=Math.min(left,l.qty);left=q3(left-take)
+          if(take>0)scrapMoves.push({type:'QC Scrap -',itemId:key,itemType:'finished',warehouseId:mo.warehouseId,qty:-take,source:mo.code,note:reason||'Final QC scrap',lot:l.code,...(l.location?{location:l.location}:{})})
           return {...l,qty:q3(l.qty-take),status:l.qty-take>1e-9?l.status:'hold' as const}
         })}
+        if(left>1e-6&&s.products.find(p=>p.id===mo.productId)?.tracking!=='none')return fail(s,'Final Scrap LOT/serial qoldig‘i order karantiniga mos emas')
+        if(left>1e-6)scrapMoves.push({type:'QC Scrap -',itemId:key,itemType:'finished',warehouseId:mo.warehouseId,qty:-left,source:mo.code,note:'Final QC scrap (legacy untracked)'})
         next=changeBalance(next,ctx,mo.warehouseId,key,{onHand:-amount,quarantine:-amount},undefined,lotBinDraw(before,next,mo.warehouseId,key))
-        next=addUnitMoves(before,next,ctx,{type:'QC Scrap -',itemId:key,itemType:'finished',warehouseId:mo.warehouseId,qty:-amount,source:mo.code,note:reason||'Final QC scrap',lot:mo.lot})
+        next=addMoves(next,ctx,scrapMoves)
       }
       const moved=Math.min(amount,mo.completed)
       next=setOrder(next,{...mo,completed:mo.completed-moved,scrap:mo.scrap+moved,qcHeld:Math.max(0,hold-amount)})
@@ -1627,36 +1828,50 @@ export function resolveQuality(s:S,ctx:Ctx,id:string,status:QualityCheck['status
         // Read from the state before this result, so an order saved before holds were stored still derives its hold.
         const hold=orderQcHold(s,s.productionOrders.find(o=>o.id===mo.id)!)
         const balance=next.stockBalances.find(b=>b.warehouseId===mo.warehouseId&&keyOf(b)===outKey(s,mo))
+        if((balance?.quarantine||0)<hold-1e-6)return fail(s,'Final QC uchun order karantini yetarli emas')
+        const ret=s.returns.find(x=>x.reworkOrderId===mo.id)
+        if(mo.reworkOf&&!ret&&s.products.find(p=>p.id===mo.productId)?.tracking!=='none'){
+          const tagged=next.lots.filter(l=>l.reworkOrderId===mo.id&&l.warehouseId===mo.warehouseId&&keyOf(l)===outKey(s,mo)&&l.status==='quarantine').reduce((n,l)=>n+l.qty,0)
+          if(Math.abs(tagged-hold)>1e-6)return fail(s,'Eski rework LOT/serial egaligi aniqlanmagan — QC release to‘xtatildi; LOT muvofiqlashtirish kerak')
+        }
         const release=Math.min(hold,balance?.quarantine||0)
         if(release>0)next=changeBalance(next,ctx,mo.warehouseId,outKey(s,mo),{quarantine:-release})
         next=setOrder(next,{...mo,qcHeld:0})
-        next={...next,lots:next.lots.map(l=>l.sourceType==='production'&&l.sourceId===mo.id?{...l,status:'available' as const}:l)}
+        next={...next,lots:next.lots.map(l=>{
+          if(!((l.reworkOrderId===mo.id||!mo.reworkOf&&l.sourceType==='production'&&l.sourceId===mo.id&&!l.reworkOrderId)&&l.status==='quarantine'))return l
+          const cost=deliveredLotCost(next,mo.productId,l.code,true)
+          return {...l,status:'available' as const,...(cost?{unitCost:cost.unitCost,costBasis:cost.basis}:{})}
+        })}
         // A customer-return rework that passed puts the returned lot back into service (BUG-18).
-        const ret=s.returns.find(x=>x.reworkOrderId===mo.id)
         if(ret)next={...next,lots:next.lots.map(l=>keyOf(l)===outKey(s,mo)&&l.status==='rework'&&(l.sourceType==='return'?l.sourceId===ret.id:Boolean(ret.lot)&&l.code===ret.lot)?{...l,status:'available' as const}:l)}
       }
     }
   }
   if(q.sourceType==='subcontract'){
-    // A subcontract receipt is accepted into stock or written off as a whole (N-07).
+    // Each receipt has its own QC and frozen valuation; legacy single-receipt records retain their old path.
     const sc=s.subcontractOrders.find(o=>o.id===q.sourceId)
     if(!sc)return fail(s,'Subcontract order topilmadi')
     if(status!=='Passed'&&status!=='Scrap')return fail(s,'Subcontract qabuli: Passed (omborga) yoki Scrap (hisobdan chiqarish) — nuqsonli partiyani Scrap qiling')
-    const wh=sc.warehouseId||finishedWarehouseFor(s,s.settings.defaultLineId)
+    const receipt=q.receiptId?sc.receipts?.find(r=>r.id===q.receiptId):sc.receipts?.length===1?sc.receipts[0]:undefined
+    if(sc.receipts?.length&&!receipt)return fail(s,'Subcontract qabuli aniqlanmadi')
+    if(receipt&&receipt.status!=='pending')return fail(s,'Subcontract qabuli QC qarori allaqachon berilgan')
+    const wh=receipt?.warehouseId||sc.warehouseId||finishedWarehouseFor(s,s.settings.defaultLineId)
     const balance=next.stockBalances.find(b=>b.warehouseId===wh&&b.itemId===sc.productId)
-    const amount=q3(Math.min(sc.qcHeld??sc.qty,balance?.quarantine||0))
+    const amount=q3(Math.min(receipt?.qty??sc.qcHeld??sc.qty,balance?.quarantine||0))
+    if(receipt&&amount<receipt.qty-1e-9)return fail(s,'Subcontract qabuli karantini to‘liq topilmadi')
     if(status==='Passed'){
       if(amount>0)next=changeBalance(next,ctx,wh,sc.productId,{quarantine:-amount})
-      next={...next,lots:next.lots.map(l=>l.sourceId===sc.id&&l.itemId===sc.productId&&l.status==='quarantine'?{...l,status:'available' as const}:l)}
+      next={...next,lots:next.lots.map(l=>l.sourceId===sc.id&&l.itemId===sc.productId&&l.status==='quarantine'&&(!receipt||l.code===receipt.lot)?{...l,status:'available' as const,...(receipt?{unitCost:receipt.unitCost,costBasis:receipt.costBasis}:{})}:l)}
       next=retryWaitingOrders(next,ctx)
     }else{
       if(amount>0){
         next=changeBalance(next,ctx,wh,sc.productId,{onHand:-amount,quarantine:-amount})
-        next=addMove(next,ctx,{type:'QC Scrap -',itemId:sc.productId,itemType:'finished',warehouseId:wh,qty:-amount,source:sc.code,note:reason||'Subcontract QC scrap'})
+        next=addMove(next,ctx,{type:'QC Scrap -',itemId:sc.productId,itemType:'finished',warehouseId:wh,qty:-amount,source:sc.code,note:reason||'Subcontract QC scrap',lot:receipt?.lot,...(receipt?{unitCost:receipt.unitCost,costBasis:receipt.costBasis}:{})})
       }
-      next={...next,lots:next.lots.map(l=>l.sourceId===sc.id&&l.itemId===sc.productId?{...l,qty:0,status:'hold' as const}:l)}
+      next={...next,lots:next.lots.map(l=>l.sourceId===sc.id&&l.itemId===sc.productId&&(!receipt||l.code===receipt.lot)?{...l,qty:0,status:'hold' as const}:l)}
+      if(receipt)next={...next,expenses:[{id:ctx.id('ex'),date:isoDate(ctx.now),type:'Overhead',sourceId:sc.id,branchId:s.warehouses.find(w=>w.id===wh)?.branchId,amount:Math.round((receipt.materialCost+receipt.serviceCost)*100)/100,note:`${sc.code} subcontract QC scrap · ${receipt.id}`},...next.expenses]}
     }
-    next={...next,subcontractOrders:next.subcontractOrders.map(o=>o.id===sc.id?{...o,qcHeld:0}:o)}
+    next={...next,subcontractOrders:next.subcontractOrders.map(o=>o.id===sc.id?{...o,qcHeld:q3(Math.max(0,(o.qcHeld||0)-amount)),receipts:o.receipts?.map(r=>r.id===receipt?.id?{...r,status:status==='Passed'?'accepted' as const:'scrap' as const}:r)}:o)}
   }
   if(q.sourceType==='purchase'){
     const po=next.purchaseOrders.find(p=>p.id===q.sourceId)
@@ -1714,6 +1929,44 @@ export function createQualityAlert(s:S,ctx:Ctx,payload:{title:string;sourceId:st
 
 /** `qty` in material stock units; `price` in UZS per stock unit (defaults to the supplier link's price). */
 export type PurchaseLineInput={materialId:string;qty:number;price?:number}
+/** One signed supplier obligation, keyed by its source document or explicit payment request. */
+function postPayable(s:S,ctx:Ctx,e:Omit<PayableEntry,'id'|'date'|'by'|'currency'>):S{
+  if(payableLedger(s).some(x=>x.key===e.key))return s
+  const row:PayableEntry={...e,id:ctx.id('ap'),date:stamp(ctx.now),by:ctx.user.id,currency:'UZS',amount:r2(e.amount)}
+  let next=withSupplierDebts({...s,payables:[row,...payableLedger(s)]},[e.supplierId])
+  if(e.purchaseOrderId)next={...next,purchaseOrders:next.purchaseOrders.map(po=>po.id===e.purchaseOrderId?{...po,paymentStatus:purchasePaymentStatus(next,po)}:po)}
+  return next
+}
+
+export function recordSupplierPayment(s:S,ctx:Ctx,p:{supplierId:string;amount:number;key:string;purchaseOrderId?:string;method?:string;reason:string}):Outcome{
+  const supplier=s.suppliers.find(x=>x.id===p.supplierId)
+  if(!supplier)return fail(s,'Supplier topilmadi')
+  const key=String(p.key||'').trim()
+  if(!key||!p.reason?.trim())return fail(s,'To‘lov kaliti va sababi kerak')
+  if(payableLedger(s).some(e=>e.key===`payment:${key}`))return ok(s,'Bu to‘lov allaqachon qayd etilgan')
+  const amount=checkMoney(p.amount,'To‘lov miqdori',false)
+  if('error' in amount)return fail(s,amount.error)
+  const po=p.purchaseOrderId?s.purchaseOrders.find(x=>x.id===p.purchaseOrderId):undefined
+  if(p.purchaseOrderId&&(!po||po.supplierId!==supplier.id))return fail(s,'PO ushbu supplierga tegishli emas')
+  if(stockScope(s,ctx.user)&&(!po||!stockScope(s,ctx.user)!.has(po.warehouseId)))return fail(s,'To‘lov POsi vakolat doirasidan tashqarida')
+  const open=po?purchaseBalance(s,po.id):supplierBalance(s,supplier.id)
+  if(open<=0.005||amount.value>open+0.005)return fail(s,`To‘lov ochiq qarzdan oshadi (${open} UZS)`)
+  let next=postPayable(s,ctx,{key:`payment:${key}`,supplierId:supplier.id,kind:'payment',amount:-amount.value,purchaseOrderId:po?.id,reason:p.reason.trim(),method:p.method||'Boshqa'})
+  next=logActivity(next,ctx,'Supplier to‘lovi','Xaridlar',po?.code||supplier.name,'info',`${amount.value} UZS · ${p.reason.trim()}`)
+  return ok(next,'Supplier to‘lovi ledgerga yozildi')
+}
+
+export function adjustSupplierBalance(s:S,ctx:Ctx,p:{supplierId:string;amount:number;key:string;reason:string}):Outcome{
+  const supplier=s.suppliers.find(x=>x.id===p.supplierId),key=String(p.key||'').trim()
+  if(!supplier||!key||!p.reason?.trim())return fail(s,'Supplier, kalit va sabab kerak')
+  if(stockScope(s,ctx.user))return fail(s,'Supplier umumiy qarzini faqat butun kompaniya vakolati bilan tuzatish mumkin')
+  if(payableLedger(s).some(e=>e.key===`adjustment:${key}`))return ok(s,'Bu tuzatish allaqachon qayd etilgan')
+  if(!Number.isFinite(p.amount)||Math.abs(p.amount)<0.005)return fail(s,'Tuzatish miqdori noto‘g‘ri')
+  if(p.amount<0&&supplierBalance(s,supplier.id)+p.amount<-0.005)return fail(s,'Kredit ochiq qarzdan oshadi')
+  let next=postPayable(s,ctx,{key:`adjustment:${key}`,supplierId:supplier.id,kind:'adjustment',amount:p.amount,reason:p.reason.trim()})
+  next=logActivity(next,ctx,'Supplier qarzi tuzatildi','Xaridlar',supplier.name,'warning',`${r2(p.amount)} UZS · ${p.reason.trim()}`)
+  return ok(next,'Supplier qarzi ledgerda tuzatildi')
+}
 export type PurchasePayload={supplierId:string;lines?:PurchaseLineInput[];materialId?:string;qty?:number;price?:number;warehouseId?:string;expectedDate?:string;status?:'Qoralama'|'Tasdiqlangan';source?:string;productionOrderIds?:string[];allowBelowMoq?:boolean}
 
 /** Lines of a PO checked against the supplier ↔ material links: linked, orderable, whole purchase units, MOQ. */
@@ -1860,6 +2113,7 @@ export function updatePurchaseMeta(s:S,ctx:Ctx,id:string,patch:{invoiceStatus?:s
   const po=s.purchaseOrders.find(x=>x.id===id)
   if(!po)return fail(s,'PO topilmadi')
   if(po.status==='Bekor')return fail(s,'Bekor qilingan PO tahrirlanmaydi')
+  if(patch.paymentStatus!==undefined)return fail(s,'To‘lov holati payable ledgerdan hisoblanadi; eski qiymat o‘zgartirilmaydi')
   const badDate=dateProblem(patch.expectedDate,'Kutilgan sana')
   if(badDate)return fail(s,badDate)
   const clean=Object.fromEntries(Object.entries(patch).filter(([,v])=>v!==undefined&&v!==''))
@@ -2013,6 +2267,8 @@ function receiveGoods(s:S,ctx:Ctx,purchaseId:string,materialId:string,qty:number
     receipts:[...po.receipts,{id:receiptId,date:stamp(ctx.now),materialId,qty:actual,lot:lot||'',warehouseId,key:opts.key,supplierLot,location,...(entered.unit?{entered:{qty:Number(qty),unit:entered.unit}}:{}),receivedBy:ctx.user?.id||undefined,
       inspection:needsQc?'pending':'none',qualityCheckId:checkId,accepted:needsQc?0:actual,rejected:0,...(rep?{replacementId:rep.id}:{}),...(serialItem?{serials}:{})}]}
   next={...next,purchaseOrders:next.purchaseOrders.map(x=>x.id===purchaseId?updated:x)}
+  // Liability starts on physical receipt, including QC quarantine. A replacement reverses the earlier return credit.
+  next=postPayable(next,ctx,{key:`receipt:${receiptId}`,supplierId:po.supplierId,kind:'receipt',amount:actual*item.price,purchaseOrderId:po.id,receiptId,materialId,reason:rep?`Almashtirish ${rep.code}`:`Qabul ${po.code}`})
   if(needsQc){
     next={...next,qualityChecks:[{id:checkId!,type:'Kirish',sourceType:'purchase',sourceId:po.id,itemId:materialId,status:'Pending',inspectorId:next.employees.find(e=>e.department==='Quality')?.id||ctx.user.id,date:stamp(ctx.now),...(qcp?{controlPointId:qcp.id}:{}),lot,receiptId},...next.qualityChecks]}
   }else next=suggestReservations(retryWaitingOrders(next,ctx),ctx,updated)
@@ -2118,6 +2374,11 @@ function disposeRejected(s:S,ctx:Ctx,qualityCheckId:string,mode:'return'|'scrap'
     :{type:'QC Scrap -',itemId:q.itemId,itemType:'raw',warehouseId:wh,qty:-amount,source:po.code,note:`Rad etilgan kirim scrap · ${note.trim()}`,lot:q.lot})
   const base=receipt.inspection?{}:{inspection:split.inspection,accepted:split.accepted,rejected:split.rejected,scrapped:split.scrapped}
   next=setReceipt(next,po.id,receipt.id,mode==='return'?{...base,returned:q3(split.returned+amount)}:{...base,returned:split.returned,scrapped:q3(split.scrapped+amount)})
+  // Historical receipts without a payable entry cannot be credited automatically: their settlement is unknown.
+  if(mode==='return'&&payableLedger(next).some(e=>e.key===`receipt:${receipt.id}`)){
+    const line=po.items.find(i=>i.materialId===q.itemId)
+    if(line)next=postPayable(next,ctx,{key:`return:${receipt.id}:${q3(split.returned)}-${q3(split.returned+amount)}`,supplierId:po.supplierId,kind:'credit',amount:-amount*line.price,purchaseOrderId:po.id,receiptId:receipt.id,materialId:q.itemId,reason:note.trim()||'Supplierga qaytarish'})
+  }
   next={...next,qualityChecks:next.qualityChecks.map(x=>x.id===q.id?(mode==='return'
     ?{...x,returnedQty:q3(split.returned+amount),reason:`${x.reason||q.status} · Supplierga qaytarildi (${amount} ${unit})`}
     :{...x,reason:`${x.reason||q.status} · Scrap (${amount} ${unit})`}):x)}
@@ -2475,7 +2736,10 @@ export function deliverSalesOrder(s:S,ctx:Ctx,id:string,quantities?:Record<strin
       const before=next
       const taken=takeLots(next,key,qty,so.code,warehouseId,undefined,today,own)
       next=changeBalance(taken.state,ctx,warehouseId,key,{onHand:-qty,reserved:-reserved},undefined,lotBinDraw(before,taken.state,warehouseId,key))
-      for(const a of taken.allocations)next=addMove(next,ctx,{type:'Sale -',itemId:key,itemType:'finished',warehouseId,qty:-a.qty,source:so.code,note:'Sales delivery',lot:a.lot,...(a.location?{location:a.location}:{})})
+      for(const a of taken.allocations){
+        const cost=deliveredLotCost(before,item.productId,a.lot,true)
+        next=addMove(next,ctx,{type:'Sale -',itemId:key,itemType:'finished',warehouseId,qty:-a.qty,source:so.code,note:'Sales delivery',lot:a.lot,...(cost?{unitCost:cost.unitCost,costBasis:cost.basis}:{}),...(a.location?{location:a.location}:{})})
+      }
       return taken.allocations
     }
     // Reserved stock first, as its pinned lots; only then free stock of the eligible stores.
@@ -2652,6 +2916,7 @@ export function cancelSalesOrder(s:S,ctx:Ctx,id:string):Outcome{
   const so=s.salesOrders.find(x=>x.id===id)
   if(!so)return fail(s,'Buyurtma topilmadi')
   if(['Yetkazildi','Bekor'].includes(so.status))return fail(s,'Yopilgan buyurtma bekor qilinmaydi')
+  if(so.items.some(item=>item.delivered>0))return fail(s,'Qisman yetkazilgan buyurtmani bekor qilib bo‘lmaydi — yetkazilgan qism va hisob-faktura saqlanishi kerak')
   let next=s
   for(const item of so.items)for(const r of soRows(item))next=changeBalance(next,ctx,r.warehouseId,lineKey(s,item),{reserved:-releasable(next,r.warehouseId,lineKey(s,item),'reserved',r.qty)})
   let message=`${so.code} bekor qilindi`
@@ -2781,7 +3046,7 @@ export function dispositionReturn(s:S,ctx:Ctx,id:string,decision:'Omborga qaytar
     if(!created.result.ok)return fail(s,created.result.message)
     reworkOrderId=created.result.id
     // The returned units stay in quarantine for this rework order's Final pass, not for its source order's.
-    next={...created.state,productionOrders:created.state.productionOrders.map(o=>o.id===reworkOrderId?{...o,qcHeld:r.qty}:o),lots:created.state.lots.map(l=>own(l)?{...l,status:'rework' as const}:l)}
+    next={...created.state,productionOrders:created.state.productionOrders.map(o=>o.id===reworkOrderId?{...o,qcHeld:r.qty}:o),lots:created.state.lots.map(l=>own(l)?{...l,status:'rework' as const,reworkOrderId}:l)}
   }
   const checkStatus:QualityCheck['status']=decision==='Omborga qaytarildi'?'Passed':decision==='Rework'?'Rework':'Scrap'
   next={...next,returns:next.returns.map(x=>x.id===id?{...r,status:decision,reworkOrderId}:x),qualityChecks:next.qualityChecks.map(q=>q.id===r.qualityCheckId&&q.status==='Pending'?{...q,status:checkStatus,date:stamp(ctx.now),inspectorId:ctx.user.id}:q)}
@@ -3836,13 +4101,42 @@ export function applyEngineeringChange(s:S,ctx:Ctx,id:string):Outcome{
 
 /* -------------------------------------------------------- subcontract -- */
 
-export function advanceSubcontract(s:S,ctx:Ctx,id:string):Outcome{
+/** Correct a quoted service before any goods are received; posted LOT values are immutable. */
+export function correctSubcontractServiceCost(s:S,ctx:Ctx,id:string,cost:number,exchangeRate:number,reason:string):Outcome{
   const o=s.subcontractOrders.find(x=>x.id===id)
   if(!o)return fail(s,'Subcontract order topilmadi')
+  if(!['Material yuborildi','Ishlab chiqarishda'].includes(o.status)||o.receipts?.length)return fail(s,'Qabul boshlangan subcontract xizmat qiymati bu yerda o‘zgartirilmaydi')
+  const rate=(o.currency||'UZS')==='UZS'?1:exchangeRate
+  if(!Number.isFinite(cost)||cost<0||!Number.isFinite(rate)||rate<=0)return fail(s,'Xizmat qiymati yoki kursi noto‘g‘ri')
+  if(reason.trim().length<5)return fail(s,'Tuzatish sababini kamida 5 belgi bilan kiriting')
+  const nextUZS=Math.round(cost*rate*100)/100,oldUZS=o.serviceCostUZS??o.cost
+  if(cost===o.cost&&nextUZS===oldUZS)return ok(s,'Xizmat qiymati o‘zgarmadi')
+  const at=stamp(ctx.now),by=ctx.user?.name||'Tizim'
+  const next={...s,subcontractOrders:s.subcontractOrders.map(x=>x.id===id?{...x,cost,exchangeRate:rate,serviceCostUZS:nextUZS,serviceCorrections:[...(x.serviceCorrections||[]),{at,by,reason:reason.trim(),oldCost:o.cost,newCost:cost,oldUZS,newUZS:nextUZS}]}:x)}
+  return ok(logActivity(next,ctx,'Subcontract xizmat qiymati tuzatildi','Xaridlar',o.code,'warning',reason.trim()),`${o.code}: xizmat qiymati yangilandi`)
+}
+
+/** Only a draft can be cancelled without a documented supplier material return. */
+export function cancelSubcontract(s:S,ctx:Ctx,id:string,reason:string):Outcome{
+  const o=s.subcontractOrders.find(x=>x.id===id)
+  if(!o)return fail(s,'Subcontract order topilmadi')
+  if(o.status!=='Draft')return fail(s,'Material yuborilgan subcontract faqat qaytarish hisobi bilan bekor qilinadi')
+  if(reason.trim().length<5)return fail(s,'Bekor qilish sababini kamida 5 belgi bilan kiriting')
+  const next={...s,subcontractOrders:s.subcontractOrders.map(x=>x.id===id?{...x,status:'Bekor' as const}:x)}
+  return ok(logActivity(next,ctx,'Subcontract bekor qilindi','Xaridlar',o.code,'warning',reason.trim()),`${o.code}: bekor qilindi`)
+}
+
+export function advanceSubcontract(s:S,ctx:Ctx,id:string,receivedQty?:number,receiptKey?:string):Outcome{
+  const o=s.subcontractOrders.find(x=>x.id===id)
+  if(!o)return fail(s,'Subcontract order topilmadi')
+  if(receiptKey&&o.receipts?.some(r=>r.key===receiptKey))return ok(s,'Subcontract qabuli allaqachon saqlangan')
   const bom=activeBomFor(s,o.productId)
   let next=s
   if(o.status==='Draft'){
-    const fgWh=finishedWarehouseFor(s,s.settings.defaultLineId),rawWh=rawWarehouseFor(s,fgWh)
+    const currency=o.currency||'UZS',rate=currency==='UZS'?1:o.exchangeRate
+    if(!Number.isFinite(rate)||!rate||rate<=0)return fail(s,'Xorijiy valyutadagi xizmat uchun musbat konversiya kursini kiriting')
+    const fgWh=o.warehouseId||finishedWarehouseFor(s,s.settings.defaultLineId),rawWh=rawWarehouseFor(s,fgWh)
+    if(!s.warehouses.some(w=>w.id===fgWh&&w.status==='Faol'&&(w.type==='Finished'||w.type==='Mixed')))return fail(s,'Subcontract uchun faol tayyor mahsulot ombori topilmadi')
     const whFor=(itemId:string)=>isProductItem(s,itemId)?fgWh:rawWh
     for(const c of bom?.components||[]){
       const need=q3(perUnit(c)*o.qty)
@@ -3850,35 +4144,59 @@ export function advanceSubcontract(s:S,ctx:Ctx,id:string):Outcome{
       // Material still in incoming QC quarantine is not released for use and cannot leave for the subcontractor (N-07).
       if(!b||b.onHand-b.reserved-(b.quarantine||0)<need)return fail(s,`${itemName(s,c.materialId)}: supplierga yuborish uchun available yetarli emas (kerak ${Math.ceil(need)}, karantin hisobga olinmaydi)`)
     }
+    const sent:NonNullable<typeof o.sentMaterials>=[]
+    let materialCost=0,estimated=false
     for(const c of bom?.components||[]){
       const need=q3(perUnit(c)*o.qty),wh=whFor(c.materialId)
       const before=next
-      next=takeLots(next,c.materialId,need,o.code,wh).state
+      const taken=takeLots(next,c.materialId,need,o.code,wh)
+      next=taken.state
+      for(const allocation of taken.allocations){
+        const unitCost=issueUnitCost(before,c.materialId,allocation.lot)
+        if(!Number.isFinite(unitCost)||unitCost<0)return fail(s,'Subcontract material tannarxi aniqlanmadi')
+        if(!allocation.lot)estimated=true
+        sent.push({materialId:c.materialId,warehouseId:wh,qty:allocation.qty,lot:allocation.lot,location:allocation.location,unitCost})
+        materialCost+=allocation.qty*unitCost
+      }
       next=changeBalance(next,ctx,wh,c.materialId,{onHand:-need},undefined,lotBinDraw(before,next,wh,c.materialId))
       next=addMove(next,ctx,{type:'Subcontract -',itemId:c.materialId,itemType:isProductItem(s,c.materialId)?'finished':'raw',warehouseId:wh,qty:-need,source:o.code,note:`Supplierga yuborildi: ${s.suppliers.find(x=>x.id===o.supplierId)?.name}`})
     }
-    next={...next,subcontractOrders:next.subcontractOrders.map(x=>x.id===id?{...x,status:'Material yuborildi' as const}:x)}
+    next={...next,subcontractOrders:next.subcontractOrders.map(x=>x.id===id?{...x,status:'Material yuborildi' as const,sentMaterials:sent,materialCost:Math.round(materialCost*100)/100,serviceCostUZS:Math.round(o.cost*rate*100)/100,...(estimated?{materialCostBasis:'estimated' as const}:{})}:x)}
     return ok(logActivity(lowStockSignals(next,ctx),ctx,'Subcontract material yuborildi','Xaridlar',o.code),`${o.code}: material supplierga yuborildi`)
   }
   if(o.status==='Material yuborildi'){
     next={...next,subcontractOrders:next.subcontractOrders.map(x=>x.id===id?{...x,status:'Ishlab chiqarishda' as const}:x)}
     return ok(logActivity(next,ctx,'Subcontract ishlab chiqarishda','Xaridlar',o.code),`${o.code}: supplierda ishlab chiqarilmoqda`)
   }
-  if(o.status==='Ishlab chiqarishda'){
-    const wh=finishedWarehouseFor(s,s.settings.defaultLineId)
+  if(o.status==='Ishlab chiqarishda'||o.status==='Qisman qabul'){
+    if(receiptKey&&o.receipts?.some(r=>r.key===receiptKey))return ok(s,'Subcontract qabuli allaqachon saqlangan')
+    const received=q3((o.receipts||[]).reduce((sum,r)=>sum+r.qty,0)),remaining=q3(o.qty-received)
+    const amount=receivedQty===undefined?remaining:receivedQty
+    if(!Number.isFinite(amount)||amount<=0||Math.abs(q3(amount)-amount)>1e-9||amount>remaining+1e-9)return fail(s,'Subcontract qabuli 0 dan katta va qolgan miqdordan oshmasin')
+    const wh=o.warehouseId||finishedWarehouseFor(s,s.settings.defaultLineId)
+    if(!s.warehouses.some(w=>w.id===wh&&w.status==='Faol'&&(w.type==='Finished'||w.type==='Mixed')))return fail(s,'Subcontract qabul ombori topilmadi')
     const product=s.products.find(p=>p.id===o.productId)
     const lot=product?.tracking==='lot'?lotCode(next,product.sku,ctx.now):undefined
+    const materialTotal=o.materialCost??0,serviceTotal=o.serviceCostUZS??(o.currency&&o.currency!=='UZS'?NaN:o.cost)
+    if(!Number.isFinite(serviceTotal)||serviceTotal<0)return fail(s,'Subcontract xizmat kursi yoki qiymati aniqlanmadi')
+    const allocated=(total:number)=>Math.round(total*(received+amount)/o.qty*100)/100-Math.round(total*received/o.qty*100)/100
+    const materialCost=allocated(materialTotal),serviceCost=allocated(serviceTotal)
+    const unitCost=Math.round((materialCost+serviceCost)/amount*100)/100
+    const costBasis=o.materialCost===undefined||o.materialCostBasis==='estimated'?'estimated' as const:'actual' as const
+    const receiptId=ctx.id('subreceipt'),key=receiptKey?.trim()||receiptId
+    if(o.receipts?.some(r=>r.key===key))return ok(s,'Subcontract qabuli allaqachon saqlangan')
     // Work done outside is inspected like any incoming goods: with Final QC required it waits in quarantine (N-07).
     const inspect=s.settings.policies.requireFinalQc
-    if(lot)next={...next,lots:[{id:ctx.id('lot'),code:lot,kind:'lot',itemId:o.productId,itemType:'finished',qty:o.qty,warehouseId:wh,status:inspect?'quarantine':undefined,sourceType:'purchase',sourceId:o.id,sourceCode:o.code,createdAt:stamp(ctx.now),consumedBy:[]},...next.lots]}
-    next=changeBalance(next,ctx,wh,o.productId,{onHand:o.qty,...(inspect?{quarantine:o.qty}:{})},lot)
-    next=addMove(next,ctx,{type:'Subcontract +',itemId:o.productId,itemType:'finished',warehouseId:wh,qty:o.qty,source:o.code,note:inspect?'Subcontract receipt · QC karantin':'Subcontract receipt',lot})
+    if(lot)next={...next,lots:[{id:ctx.id('lot'),code:lot,kind:'lot',itemId:o.productId,itemType:'finished',qty:amount,warehouseId:wh,status:inspect?'quarantine':'available',sourceType:'purchase',sourceId:o.id,sourceCode:o.code,createdAt:stamp(ctx.now),consumedBy:[],...(!inspect?{unitCost,costBasis}:{})},...next.lots]}
+    next=changeBalance(next,ctx,wh,o.productId,{onHand:amount,...(inspect?{quarantine:amount}:{})},lot)
+    next=addMove(next,ctx,{type:'Subcontract +',itemId:o.productId,itemType:'finished',warehouseId:wh,qty:amount,source:o.code,note:inspect?'Subcontract receipt · QC karantin':'Subcontract receipt',lot,unitCost,costBasis,key})
     if(inspect){
-      next={...next,qualityChecks:[{id:ctx.id('qc'),type:'Kirish',sourceType:'subcontract',sourceId:o.id,itemId:o.productId,status:'Pending',inspectorId:'',date:stamp(ctx.now),lot},...next.qualityChecks]}
-      next=notify(next,ctx,'quality','Subcontract qabul QC',`${o.code}: ${o.qty} ${product?.unit||''} karantinda — kirish tekshiruvi kutilmoqda`,'warning','/quality?view=checks&status=Pending')
+      next={...next,qualityChecks:[{id:ctx.id('qc'),type:'Kirish',sourceType:'subcontract',sourceId:o.id,receiptId,itemId:o.productId,status:'Pending',inspectorId:'',date:stamp(ctx.now),lot},...next.qualityChecks]}
+      next=notify(next,ctx,'quality','Subcontract qabul QC',`${o.code}: ${amount} ${product?.unit||''} karantinda — kirish tekshiruvi kutilmoqda`,'warning','/quality?view=checks&status=Pending')
     }
-    next={...next,subcontractOrders:next.subcontractOrders.map(x=>x.id===id?{...x,status:'Qabul qilindi' as const,warehouseId:wh,qcHeld:inspect?o.qty:0}:x),expenses:[{id:ctx.id('ex'),date:isoDate(ctx.now),type:'Overhead',sourceId:o.id,amount:o.cost,note:`${o.code} subcontract service`},...next.expenses]}
-    return ok(logActivity(next,ctx,'Subcontract qabul qilindi','Xaridlar',o.code,'success'),`${o.code}: ${o.qty} ${product?.unit||''} qabul qilindi`)
+    const receipt:NonNullable<typeof o.receipts>[number]={id:receiptId,key,qty:amount,lot,warehouseId:wh,materialCost,serviceCost,unitCost,costBasis,status:inspect?'pending':'accepted',at:stamp(ctx.now)}
+    next={...next,subcontractOrders:next.subcontractOrders.map(x=>x.id===id?{...x,status:received+amount>=o.qty-1e-9?'Qabul qilindi' as const:'Qisman qabul' as const,warehouseId:wh,qcHeld:q3((x.qcHeld||0)+(inspect?amount:0)),receipts:[...(x.receipts||[]),receipt]}:x)}
+    return ok(logActivity(next,ctx,'Subcontract qabul qilindi','Xaridlar',o.code,'success'),`${o.code}: ${amount} ${product?.unit||''} qabul qilindi`)
   }
   return fail(s,'Subcontract order yopilgan')
 }
@@ -3886,11 +4204,15 @@ export function advanceSubcontract(s:S,ctx:Ctx,id:string):Outcome{
 /* ---------------------------------------------------------- admin/misc -- */
 
 const REFERENCE_CHECKS:Partial<Record<EntityKey,(s:S,id:string)=>string|null>>={
+  subcontractOrders:(s,id)=>s.subcontractOrders.find(o=>o.id===id)?.status!=='Draft'?'yuborilgan yoki qabul qilingan subcontract tarixida':null,
   products:(s,id)=>s.productionOrders.some(o=>o.productId===id||o.bomSnapshot.components.some(c=>c.materialId===id))?'ishlab chiqarish buyurtmalarida':s.salesOrders.some(o=>o.items.some(i=>i.productId===id))?'sotuv buyurtmalarida':s.boms.some(b=>b.productId===id&&b.status!=='Arxiv')?'mahsulotning faol yoki qoralama BOMi bor':s.boms.some(b=>b.components.some(c=>c.materialId===id))?'boshqa BOM komponentida':s.subcontractOrders.some(o=>o.productId===id)?'subcontract buyurtmalarida':s.returns.some(r=>r.productId===id)?'mijoz qaytarishlarida':stockOf(s,id).onHand>0?'omborda qoldiq bor':null,
   rawMaterials:(s,id)=>s.boms.some(b=>b.status!=='Arxiv'&&b.components.some(c=>c.materialId===id))?'faol BOM komponentida':s.productionOrders.some(o=>isOpenOrder(o)&&o.bomSnapshot.components.some(c=>c.materialId===id))?'ochiq ishlab chiqarish buyurtmasi BOMida':s.purchaseOrders.some(p=>p.items.some(i=>i.materialId===id))?'purchase orderlarda':s.subcontractOrders.some(o=>o.materialIds.includes(id))?'subcontract buyurtmalarida':stockOf(s,id).onHand>0?'omborda qoldiq bor':null,
-  suppliers:(s,id)=>s.purchaseOrders.some(p=>p.supplierId===id)?'purchase orderlarda':s.subcontractOrders.some(o=>o.supplierId===id)?'subcontract buyurtmalarida':s.rawMaterials.some(m=>m.supplierId===id)?'material default supplieri':null,
+  suppliers:(s,id)=>s.purchaseOrders.some(p=>p.supplierId===id)?'purchase orderlarda':payableLedger(s).some(e=>e.supplierId===id)?'payable ledgerda':s.subcontractOrders.some(o=>o.supplierId===id)?'subcontract buyurtmalarida':s.rawMaterials.some(m=>m.supplierId===id)?'material default supplieri':null,
   customers:(s,id)=>s.salesOrders.some(o=>o.customerId===id)?'sotuv buyurtmalarida':s.returns.some(r=>r.customerId===id)?'mijoz qaytarishlarida':ledger(s).some(e=>e.customerId===id)?'qarz hisobida (ledger)':null,
-  employees:(s,id)=>s.productionOrders.some(o=>o.responsibleId===id&&isOpenOrder(o))?'ochiq MOlarga mas’ul':null,
+  employees:(s,id)=>s.productionOrders.some(o=>o.responsibleId===id||o.workOrders.some(w=>w.operatorIds?.includes(id)))?'ishlab chiqarish tarixida'
+    :s.qualityChecks.some(q=>q.inspectorId===id||q.operatorId===id)?'sifat nazorati tarixida'
+    :s.timeLogs.some(t=>t.employeeId===id)?'ish vaqti tarixida'
+    :s.maintenanceOrders.some(m=>m.technicianId===id)?'texnik xizmat tarixida':null,
   warehouses:(s,id)=>s.stockBalances.some(b=>b.warehouseId===id&&(b.onHand>0||b.reserved>0||b.incoming>0||(b.quarantine||0)>0))?'omborda qoldiq, rezerv yoki kutilayotgan kirim bor'
     :s.purchaseOrders.some(p=>p.warehouseId===id&&['Qoralama','Tasdiqlangan','Yo‘lda','Qisman qabul'].includes(p.status))?'ochiq purchase orderlarda'
     :s.productionOrders.some(o=>o.warehouseId===id&&isOpenOrder(o))?'ochiq ishlab chiqarish buyurtmalarida'
@@ -3920,6 +4242,16 @@ const itemInUse=(s:S,id:string)=>s.stockBalances.some(b=>b.itemId===id)||s.lots.
  * form must not create duplicates or change the meaning of recorded quantities.
  */
 const ENTITY_RULES:Partial<Record<EntityKey,(s:S,row:Row,before?:Row)=>string|null>>={
+  subcontractOrders:(s,row,before)=>{
+    if(before&&before.status!=='Draft')return 'Yuborilgan subcontract buyurtmasi generic tahrir bilan o‘zgartirilmaydi'
+    if(row.status!=='Draft')return 'Subcontract faqat Draft holatda yaratiladi; keyingi qadamni maxsus amal bilan bajaring'
+    if(!norm(row.code)||s.subcontractOrders.some(o=>o.id!==row.id&&norm(o.code)===norm(row.code)))return 'Subcontract kodi bo‘sh yoki takror'
+    if(typeof row.qty!=='number'||!Number.isFinite(row.qty)||row.qty<=0||typeof row.cost!=='number'||!Number.isFinite(row.cost)||row.cost<0)return 'Subcontract miqdori yoki xizmat narxi noto‘g‘ri'
+    if(row.currency!==undefined&&!['UZS','USD','EUR'].includes(String(row.currency)))return 'Subcontract valyutasi noto‘g‘ri'
+    if(row.currency&&row.currency!=='UZS'&&(!(typeof row.exchangeRate==='number')||!Number.isFinite(row.exchangeRate)||row.exchangeRate<=0))return 'Xorijiy valyuta uchun kurs majburiy'
+    if(!before&&(row.receipts!==undefined||row.sentMaterials!==undefined||row.materialCost!==undefined||row.serviceCostUZS!==undefined))return 'Qabul va tannarx maydonlari faqat tizim tomonidan yoziladi'
+    return null
+  },
   // Sub-day calendar (audit #23): real clock times, breaks of 1–240 min, 1–20 parallel operations.
   workCenters:(_s,row)=>{
     const cal=row.calendar as WorkCenter['calendar']
@@ -4049,11 +4381,17 @@ export function createEntity(s:S,ctx:Ctx,key:EntityKey,payload:Record<string,unk
     if(n===null||n<0)return fail(s,'Boshlang‘ich qarz 0 yoki musbat son bo‘lsin')
     opening=n;payload={...payload,debt:0}
   }
+  if(key==='suppliers'){
+    const n=payload.debt===undefined||payload.debt===''?0:readNumber(payload.debt)
+    if(n===null||n<0)return fail(s,'Supplier boshlang‘ich qarzi noto‘g‘ri')
+    opening=n;payload={...payload,debt:0}
+  }
   const invalid=entityProblem(s,key,payload)||ENTITY_RULES[key]?.(s,{...payload,id:undefined})||(key==='employees'?employeeWriteBlocker(s,ctx.user,payload):null)
   if(invalid)return fail(s,invalid)
   const id=ctx.id(key.slice(0,2))
   let next=logActivity({...s,[key]:[{id,...payload},...(s[key] as unknown as Record<string,unknown>[])]} as S,ctx,`${label} yaratildi`,label,String(payload.code||payload.name||payload.title||id))
-  if(opening>0)next=postReceivable(next,ctx,{key:`opening:${id}`,customerId:id,kind:'opening',amount:opening,note:'Mijoz yaratilganda kiritilgan boshlang‘ich qarz'})
+  if(opening>0&&key==='customers')next=postReceivable(next,ctx,{key:`opening:${id}`,customerId:id,kind:'opening',amount:opening,note:'Mijoz yaratilganda kiritilgan boshlang‘ich qarz'})
+  if(opening>0&&key==='suppliers')next=postPayable(next,ctx,{key:`opening:${id}`,supplierId:id,kind:'opening',amount:opening,reason:'Supplier boshlang‘ich qarzi'})
   return ok(next,'Saqlandi',id)
 }
 
@@ -4062,7 +4400,7 @@ export function updateEntity(s:S,ctx:Ctx,key:EntityKey,id:string,patch:Record<st
   const row=rows.find(x=>x.id===id)
   if(!row)return fail(s,'Yozuv topilmadi')
   // A customer's debt comes from its ledger (audit #19): an edit may resend it unchanged, never overwrite it.
-  if(key==='customers'&&'debt' in patch){
+  if((key==='customers'||key==='suppliers')&&'debt' in patch){
     if(readNumber(patch.debt)!==row.debt)return fail(s,'Qarz qo‘lda o‘zgartirilmaydi — to‘lov, qaytarish yoki tasdiqlangan tuzatish orqali')
     const {debt:_d,...rest}=patch;patch=rest
   }
@@ -4079,7 +4417,11 @@ export function deleteEntity(s:S,ctx:Ctx,key:EntityKey,id:string,label:string=ke
   const rows=s[key] as unknown as Record<string,unknown>[]
   const row=rows.find(x=>x.id===id)
   if(!row)return fail(s,'Yozuv topilmadi')
-  if(key==='employees'){const blocked=employeeRemovalBlocker(s,ctx.user,id);if(blocked)return fail(s,blocked)}
+  if(key==='employees'){
+    if(!hasPermission(roleOf(s,ctx.user?.id),'users','delete'))return fail(s,'Xodimni o‘chirish huquqi yo‘q')
+    const blocked=scopeBlocker(s,ctx.user,'deleteEntity',['employees',id])||employeeRemovalBlocker(s,ctx.user,id)
+    if(blocked)return fail(s,blocked)
+  }
   const reference=REFERENCE_CHECKS[key]?.(s,id)
   if(reference)return fail(s,`O‘chirib bo‘lmaydi: ${reference}. Arxivlashdan foydalaning.`)
   // Sourcing links belong to both ends: they go with a deleted supplier or material.
@@ -4096,6 +4438,10 @@ export function duplicateEntity(s:S,ctx:Ctx,key:EntityKey,id:string,label:string
   const rows=s[key] as unknown as Record<string,unknown>[]
   const row=rows.find(x=>x.id===id)
   if(!row)return fail(s,'Yozuv topilmadi')
+  if(key==='employees'){
+    const sourceScope=scopeBlocker(s,ctx.user,'duplicateEntity',['employees',id])
+    if(sourceScope)return fail(s,sourceScope)
+  }
   const copyId=ctx.id(key.slice(0,2))
   // Codes and SKUs of copies stay unique: -COPY, -COPY2, … (N-16).
   const taken=new Set([...rows.map(x=>norm(x.code)),...s.products.map(x=>norm(x.sku)),...s.rawMaterials.map(x=>norm(x.sku)),...s.products.flatMap(p=>p.variants.map(v=>norm(v.code)))])
@@ -4103,7 +4449,7 @@ export function duplicateEntity(s:S,ctx:Ctx,key:EntityKey,id:string,label:string
   // A copied product's variants get their own codes and ids; barcodes are not copied (they identify one item).
   const variants=key==='products'?(row.variants as ProductVariant[]||[]).map(v=>{const code=free(v.code);taken.add(norm(code));const {barcode:_b,...rest}=v;return {...rest,id:ctx.id('var'),code}}):undefined
   const copy={...clone(row),id:copyId,...(row.name?{name:`${String(row.name)} — nusxa`}:{}),...(row.code?{code:free(String(row.code))}:{}),...(row.sku?{sku:free(String(row.sku))}:{}),...(key==='products'?{defaultBomId:'',status:'Faol',variants}:{}),...(key==='rawMaterials'?{supplierId:''}:{})}
-  const invalid=ENTITY_RULES[key]?.(s,copy)
+  const invalid=ENTITY_RULES[key]?.(s,copy)||(key==='employees'?employeeWriteBlocker(s,ctx.user,copy):null)
   if(invalid)return fail(s,invalid)
   const next=logActivity({...s,[key]:[copy,...rows]} as S,ctx,'Nusxa yaratdi',label,String(copy.name||copy.code||copyId))
   return ok(next,'Nusxa yaratildi',copyId)
@@ -4115,6 +4461,7 @@ export function duplicateEntity(s:S,ctx:Ctx,key:EntityKey,id:string,label:string
  * the module; turning anything else on also turns "view" on.
  */
 export function updateRolePermission(s:S,ctx:Ctx,roleId:string,module:string,action:PermissionAction,value:boolean):Outcome{
+  if(!hasPermission(roleOf(s,ctx.user?.id),'roles','edit'))return fail(s,'Rolni tahrirlash huquqi yo‘q')
   const role=s.roles.find(r=>r.id===roleId)
   if(!role)return fail(s,'Rol topilmadi')
   const blocked=rolePermissionBlocker(s,ctx.user,roleId,module,action)
@@ -4128,46 +4475,61 @@ export function updateRolePermission(s:S,ctx:Ctx,roleId:string,module:string,act
   return ok(next,`${role.name}: ${module} · ${action} ${value?'yoqildi':'o‘chirildi'}`)
 }
 
-export type RoleInput={name:string;description?:string;scope?:Role['scope']}
+export type RoleInput={name:string;description?:string;scope?:Role['scope'];rank?:number}
 
 /** A new custom role starts without permissions; it is filled in the matrix (by someone ranked above it). */
 export function createRole(s:S,ctx:Ctx,p:RoleInput):Outcome{
+  if(!hasPermission(roleOf(s,ctx.user?.id),'roles','create'))return fail(s,'Rol yaratish huquqi yo‘q')
   const name=p.name.trim()
   if(!name)return fail(s,'Rol nomi majburiy')
   if(s.roles.some(r=>r.name.trim().toLowerCase()===name.toLowerCase()))return fail(s,'Bu nomli rol bor')
+  const mine=roleOf(s,ctx.user?.id)
+  const scope=p.scope||mine?.scope
+  if(!scope||!['all','branch','warehouse','workcenter'].includes(scope)||!scopeMayDelegate(mine?.scope,scope))return fail(s,'Rol doirasi vakolatingizdan keng')
+  const rank=p.rank??1
+  if(!Number.isInteger(rank)||rank<1||rank>=roleRank(mine))return fail(s,'Rol darajasi vakolatingizdan yuqori')
   const id=ctx.id('role')
-  const role:Role={id,name,scope:p.scope||'all',permissions:{},description:p.description?.trim()||'',createdAt:stamp(ctx.now)}
+  const role:Role={id,name,scope,rank,permissions:{},description:p.description?.trim()||'',createdAt:stamp(ctx.now)}
   return ok(logActivity({...s,roles:[...s.roles,role]},ctx,'Rol yaratildi','Rollar',name,'info'),`${name} roli yaratildi`,id)
 }
 
 /** Copies a role's permissions — only those the actor holds, so a copy cannot be used to escalate (A-C1). */
 export function duplicateRole(s:S,ctx:Ctx,roleId:string,name?:string):Outcome{
+  if(!hasPermission(roleOf(s,ctx.user?.id),'roles','create'))return fail(s,'Rol yaratish huquqi yo‘q')
   const source=s.roles.find(r=>r.id===roleId)
   if(!source)return fail(s,'Rol topilmadi')
+  if(source.key==='super_admin')return fail(s,'Platform Super Admin roli kompaniya ichida nusxalanmaydi')
   const mine=roleOf(s,ctx.user?.id)
+  if(roleRank(mine)<2)return fail(s,'Rol berish darajasi yetarli emas')
   const permissions:PermissionMap=Object.fromEntries(Object.entries(source.permissions).map(([m,p])=>[m,Object.fromEntries(Object.entries(p).filter(([a,v])=>v&&hasPermission(mine,m,a as PermissionAction)))]))
   const base=(name||`${source.name} — nusxa`).trim()
   let label=base,n=1
   while(s.roles.some(r=>r.name.trim().toLowerCase()===label.toLowerCase())){n+=1;label=`${base} ${n}`}
   const id=ctx.id('role')
-  const role:Role={id,name:label,scope:source.scope,permissions,description:source.description||'',createdAt:stamp(ctx.now)}
+  if(!scopeMayDelegate(mine?.scope,source.scope))return fail(s,'Rol doirasi vakolatingizdan keng')
+  const role:Role={id,name:label,scope:source.scope,rank:Math.min(roleRank(source),roleRank(mine)-1),permissions,description:source.description||'',createdAt:stamp(ctx.now)}
   return ok(logActivity({...s,roles:[...s.roles,role]},ctx,'Rol nusxalandi','Rollar',label,'info',source.name),`${label} yaratildi`,id)
 }
 
 export function updateRole(s:S,ctx:Ctx,roleId:string,patch:RoleInput):Outcome{
+  if(!hasPermission(roleOf(s,ctx.user?.id),'roles','edit'))return fail(s,'Rolni tahrirlash huquqi yo‘q')
   const role=s.roles.find(r=>r.id===roleId)
   if(!role)return fail(s,'Rol topilmadi')
   const blocked=roleManageBlocker(s,ctx.user,roleId)
   if(blocked)return fail(s,blocked)
+  const mine=roleOf(s,ctx.user?.id),scope=patch.scope||role.scope,rank=patch.rank??roleRank(role)
+  if(!['all','branch','warehouse','workcenter'].includes(scope)||!scopeMayDelegate(mine?.scope,scope)||!scopeMayDelegate(mine?.scope,role.scope))return fail(s,'Rol doirasi vakolatingizdan keng')
+  if(!Number.isInteger(rank)||rank<1||rank>=roleRank(mine))return fail(s,'Rol darajasi vakolatingizdan yuqori')
   const name=patch.name.trim()
   if(!name)return fail(s,'Rol nomi majburiy')
   if(s.roles.some(r=>r.id!==roleId&&r.name.trim().toLowerCase()===name.toLowerCase()))return fail(s,'Bu nomli rol bor')
-  const next={...s,roles:s.roles.map(r=>r.id===roleId?{...r,name,description:patch.description?.trim()??r.description,scope:patch.scope||r.scope}:r)}
+  const next={...s,roles:s.roles.map(r=>r.id===roleId?{...r,name,description:patch.description?.trim()??r.description,scope,rank:r.system?r.rank:rank}:r)}
   return ok(logActivity(next,ctx,'Rol tahrirlandi','Rollar',name,'info',role.name!==name?`${role.name} → ${name}`:''),'Rol saqlandi',roleId)
 }
 
 /** System roles and roles still assigned to someone are never deleted. */
 export function deleteRole(s:S,ctx:Ctx,roleId:string):Outcome{
+  if(!hasPermission(roleOf(s,ctx.user?.id),'roles','delete'))return fail(s,'Rolni o‘chirish huquqi yo‘q')
   const role=s.roles.find(r=>r.id===roleId)
   if(!role)return fail(s,'Rol topilmadi')
   if(role.system||role.key)return fail(s,`${role.name} — tizim roli, o‘chirib bo‘lmaydi`)

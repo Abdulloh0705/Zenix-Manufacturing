@@ -229,7 +229,7 @@ test('P5-03: critical mutations are refused for roles without the right, and all
   for(const [name,args] of critical){
     assert.ok(X.actionRules(name,args),`${name} has a permission rule`)
     assert.equal(can('operator',name,args),false,`an operator cannot ${name}`)
-    assert.equal(can('super_admin',name,args),true,`the super admin can ${name}`)
+    assert.equal(can('business_owner',name,args),true,`the business owner can ${name}`)
   }
   assert.equal(can('quality','resolveQuality',['q','Passed']),true,'the quality role decides inspections')
   assert.equal(can('operator','resolveQuality',['q','Passed']),false,'an operator cannot pass an inspection')
@@ -350,16 +350,13 @@ test('P5-09: the generated demo history satisfies the same cross-module invarian
   assertInvariants(createSeedState(T0),'demo history')
 })
 
-test('P5-10: after a clean start the first-run administrator keeps Super Admin; nothing else is reassigned',()=>{
+test('P5-10: recovery never infers an owner from account order',()=>{
   const s=createInitialState(T0)
   const at=d=>new Date(T0.getTime()+d*1000).toISOString()
   const acc=(id,employeeId,createdAt,status='active')=>({id,employeeId,username:id,hash:'x',salt:'x',iterations:1,status,failedCount:0,mustChangePassword:false,createdAt})
   const store=Auth.normalizeAuthStore({accounts:[acc('a2','em2',at(5)),acc('a0','em9',at(0)),acc('a1','em1',at(1)),acc('ab','em3',at(-5),'blocked')]})
   assert.equal(Auth.superAdminInvariant(store,s),false,'clean data holds no Super Admin')
   const fixed=Auth.restoreSuperAdmin(store,s)
-  const superId=s.roles.find(r=>r.key==='super_admin').id
-  assert.equal(fixed.employees.find(e=>e.id==='em1').roleId,superId,'the oldest active account with an existing employee')
-  assert.deepEqual(fixed.employees.filter(e=>e.roleId===superId).map(e=>e.id),['em1'])
-  assert.ok(Auth.superAdminInvariant(store,fixed))
-  assert.equal(Auth.restoreSuperAdmin(store,fixed),fixed,'unchanged once the invariant holds')
+  assert.equal(fixed,s,'no account gains ownership from creation order')
+  assert.equal(Auth.superAdminInvariant(store,fixed),false)
 })

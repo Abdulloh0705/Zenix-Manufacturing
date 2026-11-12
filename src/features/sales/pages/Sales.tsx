@@ -1,7 +1,7 @@
-import {useState} from 'react'
+import {useRef,useState} from 'react'
 import {useNavigate,useSearchParams} from 'react-router-dom'
 import {useApp} from '../../../app/providers/AppProvider/AppContext'
-import {Card,Checkbox,Confirm,Drawer,RecordUnavailable,Empty,Field,FilterSelect,Icon,InfoGrid,Input,KPI,Modal,MoneyInput,PageHeader,Progress,ResourceTable,Segmented,Select,StatusBadge,Tabs,Textarea,required,useForm,useRecordParam,useSearchParamState} from '../../../shared/ui'
+import {Card,Checkbox,Confirm,Drawer,RecordUnavailable,Empty,Field,FilterSelect,Icon,InfoGrid,Input,KPI,Modal,MoneyInput,PageHeader,Progress,ResourceTable,Segmented,Select,StatusBadge,Tabs,Textarea,required,useDirtyMarker,useForm,useRecordParam,useSearchParamState} from '../../../shared/ui'
 import type {Customer,CustomerReturn,SalesOrder} from '../../../types'
 import {productStockOf,returnSources} from '../../../domain/manufacturingEngine'
 import {serialTracked} from '../../../domain/serials'
@@ -12,7 +12,7 @@ import {customerName,productName,warehouseName} from '../../common/lookups'
 import {ActivityPanel,AttachmentsPanel} from '../../common/RecordPanels'
 import {QualityResolveModal} from '../../common/QualityResolveModal'
 import {AdjustModal,LedgerList,OrderReceivableInfo,PaymentModal,ReceivablesView} from '../components/Receivables'
-import {customerBalance,orderReceivable,paymentStatusOf} from '../../../domain/receivables'
+import {customerBalance,customerSalesVolume,orderReceivable,paymentStatusOf} from '../../../domain/receivables'
 
 export default function Sales(){
   const [sp]=useSearchParams(),view=sp.get('view')||'overview'
@@ -60,7 +60,7 @@ function Orders(){
   const [create,setCreate]=useState(false)
   const rows=s.salesOrders.filter(o=>(status==='all'||(status==='open'?OPEN_SO.includes(o.status):o.status===status))&&(!mode||o.mode===mode)&&(late!=='1'||(OPEN_SO.includes(o.status)&&o.deliveryDate<todayISO())))
   return <div className="page-stack">
-    <PageHeader title="Sales Orders" subtitle="Rezerv yoki MO → yetkazish → qaytarish" actions={<button type="button" className="primary-glass-btn" disabled={!app.can('sales','create')} onClick={()=>setCreate(true)}><Icon name="plus"/>Yangi buyurtma</button>}/>
+    <PageHeader title="Sotuv buyurtmalari" subtitle="Rezerv yoki MO → yetkazish → qaytarish" actions={<button type="button" className="primary-glass-btn" disabled={!app.can('sales','create')} onClick={()=>setCreate(true)}><Icon name="plus"/>Yangi buyurtma</button>}/>
     <Segmented ariaLabel="Status" items={[{value:'open',label:'Ochiq'},{value:'Tayyor',label:'Tayyor'},{value:'Ishlab chiqarishda',label:'Ishlab chiqarishda'},{value:'Yetkazildi',label:'Yetkazilgan'},{value:'Bekor',label:'Bekor'},{value:'all',label:'Barchasi'}]} value={status} onChange={setStatus}/>
     <ResourceTable rows={rows} query={q} onQuery={setQ} placeholder="SO, mijoz, mahsulot..." onRow={o=>setId(o.id)} exportName="sales-orders" resetKey={`${status}|${mode}|${late}`}
       filtersActive={Boolean(mode||late)} onResetFilters={()=>{setMode('');setLate('')}}
@@ -192,7 +192,7 @@ function Customers(){
         {key:'type',label:'Tur',value:c=>c.type},
         {key:'status',label:'Status',value:c=>c.status,render:c=><StatusBadge>{c.status}</StatusBadge>},
         {key:'orders',label:'Buyurtmalar',align:'right',value:c=>s.salesOrders.filter(o=>o.customerId===c.id).length},
-        {key:'revenue',label:'Savdo hajmi',align:'right',value:c=>s.salesOrders.filter(o=>o.customerId===c.id&&o.status!=='Bekor').reduce((a,o)=>a+o.total,0),render:c=>compactMoney(s.salesOrders.filter(o=>o.customerId===c.id&&o.status!=='Bekor').reduce((a,o)=>a+o.total,0))},
+        {key:'revenue',label:'Savdo hajmi',align:'right',value:c=>customerSalesVolume(s,c.id),render:c=>compactMoney(customerSalesVolume(s,c.id))},
         {key:'debt',label:'Qarz',align:'right',value:c=>customerBalance(s,c.id),render:c=>money(customerBalance(s,c.id))},
       ]}/>
     {edit&&<CustomerModal customer={edit==='new'?undefined:edit} onClose={()=>setEdit(null)}/>}
@@ -227,7 +227,7 @@ function CustomerDrawer({customer,onClose,onEdit}:{customer:Customer;onClose:()=
   const customerLedgerCount=(s.receivables||[]).filter(e=>e.customerId===customer.id).length
   return <Drawer open onClose={onClose} title={customer.name} eyebrow="Mijoz" icon="users" size="lg" subtitle={`${customer.phone}${customer.email?` · ${customer.email}`:''} · ${customer.type}`} headerExtra={<StatusBadge>{customer.status}</StatusBadge>}
     actions={<>{app.can('sales','delete')&&<button type="button" className="ghost-btn" onClick={()=>setRemove(true)}><Icon name="trash" size={15}/>O‘chirish</button>}<span className="spacer"/>{app.can('sales','create')&&customer.status==='Faol'&&<button type="button" className="secondary-glass-btn" onClick={()=>setOrder(true)}><Icon name="plus" size={15}/>Yangi buyurtma</button>}{app.can('sales','edit')&&<button type="button" className="primary-glass-btn" onClick={onEdit}><Icon name="edit" size={16}/>Tahrirlash</button>}</>}>
-    <InfoGrid items={[{label:'Buyurtmalar',value:orders.length},{label:'Savdo hajmi',value:money(orders.filter(o=>o.status!=='Bekor').reduce((a,o)=>a+o.total,0))},{label:'Ochiq',value:orders.filter(o=>OPEN_SO.includes(o.status)).length},{label:'Qarz (ledger)',value:money(balance),tone:balance>0.005?'warning':undefined},{label:'Qaytarishlar',value:returns.length}]}/>
+    <InfoGrid items={[{label:'Buyurtmalar',value:orders.length},{label:'Savdo hajmi',value:money(customerSalesVolume(s,customer.id))},{label:'Ochiq',value:orders.filter(o=>OPEN_SO.includes(o.status)).length},{label:'Qarz (ledger)',value:money(balance),tone:balance>0.005?'warning':undefined},{label:'Qaytarishlar',value:returns.length}]}/>
     <div className="form-actions">{app.can('sales','edit')&&<button type="button" className="secondary-glass-btn compact" disabled={balance<=0.005} title={balance<=0.005?'Ochiq qarz yo‘q':undefined} onClick={()=>setPay(true)}><Icon name="wallet" size={15}/>To‘lov qabul qilish</button>}{app.can('sales','approve')&&<button type="button" className="ghost-btn compact" onClick={()=>setAdjust(true)}><Icon name="edit" size={15}/>Qarzni tuzatish</button>}</div>
     <Tabs items={[{value:'orders',label:'Buyurtmalar',count:orders.length},{value:'ledger',label:'Qarz tarixi',count:customerLedgerCount}]} active={tab} onChange={setTab}/>
     {tab==='ledger'?<LedgerList customerId={customer.id}/>:orders.length?<div className="stack-list">{orders.map(o=><button type="button" className="list-row is-clickable" key={o.id} onClick={()=>navigate(`/sales?view=orders&id=${o.id}`)}><span className="list-row-copy"><b>{o.code}</b><small>{o.items.map(i=>`${productName(s,i.productId)} ${num(i.qty)}`).join(', ')} · {o.deliveryDate}</small></span><span className="list-row-meta"><b>{compactMoney(o.total)}</b><StatusBadge>{paymentStatusOf(s,o)}</StatusBadge><StatusBadge>{o.status}</StatusBadge></span></button>)}</div>:<Empty compact title="Buyurtma yo‘q"/>}
@@ -264,6 +264,8 @@ function Delivery(){
 function DeliveryModal({order,onClose}:{order:SalesOrder;onClose:()=>void}){
   const app=useApp(),s=app.state
   const [amounts,setAmounts]=useState<Record<string,string>>(()=>Object.fromEntries(order.items.map(i=>[i.productId,String(i.qty-i.delivered)])))
+  const firstAmounts=useRef(JSON.stringify(amounts))
+  useDirtyMarker(JSON.stringify(amounts)!==firstAmounts.current)
   const errors=order.items.map(i=>{const open=i.qty-i.delivered,v=Number(amounts[i.productId]||0);return !Number.isFinite(v)||v<0||v>open?`${productName(s,i.productId)}: 0–${open}`:null}).filter(Boolean)
   const total=order.items.reduce((a,i)=>a+(Number(amounts[i.productId])||0),0)
   const save=()=>{if(errors.length||total<=0)return;const r=app.deliverSalesOrder(order.id,Object.fromEntries(order.items.map(i=>[i.productId,Number(amounts[i.productId])||0])));if(r.ok)onClose()}

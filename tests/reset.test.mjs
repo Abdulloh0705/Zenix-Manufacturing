@@ -17,7 +17,7 @@ test('initial state holds master data and no transactions',()=>{
   const s=createInitialState()
   for(const key of [...TRANSACTION_KEYS,'attachments'])assert.equal(s[key].length,0,key)
   // roles: the eight system roles (Super Admin … Ta’minot va sotuv menejeri) since schema v4
-  assert.deepEqual(MASTERS.map(k=>s[k].length),[2,4,3,4,4,4,3,3,4,3,3,7,8,5])
+  assert.deepEqual(MASTERS.map(k=>s[k].length),[2,4,3,4,4,4,3,3,4,3,3,7,9,5])
   for(const key of MASTERS)for(const r of s[key])assert.ok(!isGeneratedDemoId(r.id),`${key} ${r.id}`)
   assert.ok(s.boms.every(b=>b.status==='Faol'),'each product keeps its active BOM')
   assert.ok(s.products.filter(p=>p.defaultBomId).every(p=>s.boms.some(b=>b.id===p.defaultBomId)))

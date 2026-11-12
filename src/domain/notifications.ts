@@ -1,7 +1,8 @@
 import type {ManufacturingState as S} from '../types'
 import {branchOf,notify} from './actions'
 import type {Ctx} from './actions'
-import {isOpenOrder,itemName,materialShortages} from './manufacturingEngine'
+import {isOpenOrder,itemName} from './manufacturingEngine'
+import {branchPurchaseNeeds} from './planning'
 import {maintenanceDue} from './maintenance'
 import {runMrp} from './planning'
 import {addDays,isoDate} from '../utils/dates'
@@ -32,9 +33,9 @@ export function scanNotifications(s:S,ctx:Ctx):S{
     next=notify(next,ctx,'maintenance',due.state==='overdue'?'Servis kechikdi':'Servis vaqti keldi',`${e.name}: ${due.reason}`,'warning',`/equipment?view=equipment&id=${e.id}`,{key:`maint:${e.id}:${e.nextMaintenance||''}:${e.runtimeAtService??''}`,branchId:branch})
   }
   // Material shortage by MRP netting (need + safety above available + incoming).
-  for(const row of materialShortages(s)){
+  for(const row of branchPurchaseNeeds(s).filter(r=>r.shortage>0)){
     if(!row.critical)continue
-    next=notify(next,ctx,'low-stock','Material yetishmovchiligi',`${row.m.name}: yetishmaydi ${Math.round(row.shortage)} ${row.m.unit} · available ${Math.round(row.available)}`,'danger',`/materials?view=all&id=${row.m.id}`,{key:`shortage:${row.m.id}:${today}`})
+    next=notify(next,ctx,'low-stock','Material yetishmovchiligi',`${row.m.name}: ${row.branchId} filialida yetishmaydi ${Math.round(row.shortage)} ${row.m.unit} · available ${Math.round(row.available)}`,'danger',`/materials?view=shortages`,{key:`shortage:${row.branchId}:${row.m.id}:${today}`,branchId:row.branchId})
   }
   // Receiving exception: a confirmed PO not fully received by its expected date.
   for(const po of s.purchaseOrders){

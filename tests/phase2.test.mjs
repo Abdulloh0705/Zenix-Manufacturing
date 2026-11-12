@@ -227,6 +227,28 @@ test('P2-08: MRP nets reserved, incoming and safety stock without counting anyth
   near(held.rows.find(r=>r.itemId==='rm1').available,available-100,1e-3)
 })
 
+test('P3-P1-01: MRP excludes expired LOT quantities from branch available stock',()=>{
+  let s=put(base(),'w1','rm1',100)
+  s={...s,stockBalances:s.stockBalances.filter(b=>b.itemId!=='rm1'||b.warehouseId==='w1'),lots:[
+    {id:'expired-rm1',code:'EXPIRED',kind:'lot',itemId:'rm1',itemType:'raw',qty:80,warehouseId:'w1',sourceType:'purchase',sourceId:'receipt-old',sourceCode:'PO-OLD',createdAt:'2026-01-01',expiry:'2026-10-20',consumedBy:[]},
+    {id:'usable-rm1',code:'USABLE',kind:'lot',itemId:'rm1',itemType:'raw',qty:20,warehouseId:'w1',sourceType:'purchase',sourceId:'receipt-new',sourceCode:'PO-NEW',createdAt:'2026-10-20',expiry:'2026-10-22',consumedBy:[]},
+    ...s.lots.filter(l=>l.itemId!=='rm1')]}
+  const row=P.runMrp(s,{today:TODAY,branchId:'b1'}).rows.find(r=>r.itemId==='rm1')
+  assert.equal(row.onHand,100)
+  assert.equal(row.available,20)
+})
+
+test('P3-P1-02: a variant BOM creates subassembly demand regardless of product list order',()=>{
+  const initial=createInitialState(T0)
+  const parent=initial.products.find(p=>p.id==='p1')
+  const variantBom={...structuredClone(initial.boms.find(b=>b.id==='bom1')),id:'bom-variant-sub',code:'BOM-VARIANT-SUB',variantId:'v1',components:[{id:'variant-sub',materialId:'p3',qty:2,unit:'dona',waste:0}]}
+  const s={...initial,products:[initial.products.find(p=>p.id==='p3'),...initial.products.filter(p=>p.id!=='p3'&&p.id!=='p2').map(p=>p.id==='p1'?{...p,variantStock:true}:p)],
+    boms:[variantBom,...initial.boms.filter(b=>b.productId!=='p2')],stockBalances:[],productionOrders:[],forecasts:[],salesOrders:[{id:'so-variant',code:'SO-VARIANT',customerId:'cu1',status:'Tasdiqlangan',mode:'Make-to-order',items:[{productId:parent.id,variantId:'v1',qty:5,price:1,delivered:0,reserved:0}],total:5,paymentStatus:'',deliveryDate:'2026-10-27',createdAt:TODAY,branchId:'b1'}]}
+  const plan=P.runMrp(s,{today:TODAY,branchId:'b1'})
+  assert.ok(plan.suggestions.some(x=>x.type==='make'&&x.itemId==='p1~v1'&&x.qty>=5))
+  assert.ok(plan.suggestions.some(x=>x.type==='make'&&x.itemId==='p3'&&x.qty>=10),'variant BOM demand must reach the subassembly')
+})
+
 test('P2-09: suggestions keep their demand, become documents through the domain commands and are never duplicated',()=>{
   let s=put(base(),'w1','rm1',0)
   s={...s,salesOrders:[{id:'so-t',code:'SO-T',customerId:'cu1',status:'Tasdiqlangan',mode:'Make-to-stock',items:[{productId:'p1',qty:50,price:1,delivered:0,reserved:0}],total:50,paymentStatus:'',deliveryDate:'2026-10-31',createdAt:TODAY}]}

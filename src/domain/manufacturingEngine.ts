@@ -121,8 +121,8 @@ export function plannedIssue(order:Pick<ProductionOrder,'bomSnapshot'|'quantity'
   return q3(orderRequirements(order,order.quantity).filter(r=>r.component.materialId===itemId).reduce((a,r)=>a+r.required,0)+extra)
 }
 
-export function issuedQty(order:Pick<ProductionOrder,'consumed'>,itemId:string){
-  return q3(order.consumed.filter(c=>c.materialId===itemId).reduce((a,c)=>a+c.qty,0))
+export function issuedQty(order:Pick<ProductionOrder,'consumed'|'materialReturns'>,itemId:string){
+  return q3(order.consumed.filter(c=>c.materialId===itemId).reduce((a,c)=>a+c.qty,0)-(order.materialReturns||[]).filter(r=>r.materialId===itemId).reduce((a,r)=>a+r.qty,0))
 }
 
 /**
@@ -754,6 +754,8 @@ function componentCost(state:ManufacturingState,itemId:string){
  * price, a produced lot at its order's frozen actual unit cost, anything else at the item's standard cost then.
  */
 export function issueUnitCost(state:ManufacturingState,itemId:string,lot?:string){
+  const released=lot?state.lots.find(l=>l.code===lot&&l.itemId===itemId&&l.unitCost!==undefined):undefined
+  if(released?.unitCost!==undefined)return released.unitCost
   const origin=lot?lotOrigin(state,lot,itemId):undefined
   if(origin?.sourceType==='purchase'){
     const price=state.purchaseOrders.find(p=>p.id===origin.sourceId)?.items.find(i=>i.materialId===itemId)?.price
@@ -819,7 +821,7 @@ export function rollUpStandardCosts(state:ManufacturingState,referenceQty=100):M
  */
 export function actualOrderCost(state:ManufacturingState,order:ProductionOrder):CostBreakdown{
   const policies=state.settings?.policies
-  const material=consumptionValue(state,order.consumed)
+  const material=consumptionValue(state,order.consumed)-(order.materialReturns||[]).reduce((a,r)=>a+r.qty*r.unitCost,0)
   const labor=state.timeLogs.filter(t=>t.orderId===order.id).reduce((a,t)=>a+t.minutes/60*(t.hourlyRate??state.employees.find(e=>e.id===t.employeeId)?.hourlyCost??0),0)
   const machine=order.workOrders.reduce((a,w)=>a+w.actualMin/60*(w.machineRate??machineRateOf(state,w.workCenterId)),0)
   const energy=order.workOrders.reduce((a,w)=>a+w.actualMin/60*(w.energyRate??energyRateOf(state,w.workCenterId)),0)
@@ -881,8 +883,12 @@ export function buildTraceability(state:ManufacturingState,orderId:string){
     const taken=state.lots.filter(l=>l.code===c.lot&&keyOf(l)===c.materialId&&l.consumedBy.includes(order.code))
     for(const l of taken.length?taken:[lotOrigin(state,c.lot,c.materialId)].filter((x):x is LotRecord=>Boolean(x)))upstream.set(l.id,l)
   }
+  const outputLots=state.lots.filter(l=>(l.reworkOrderId===order.id||l.sourceType==='production'&&l.sourceId===order.id&&!l.reworkOrderId)&&l.itemId===order.productId&&(!l.variantId||l.variantId===order.variantId))
+  for(const l of outputLots)if(l.sourceLotCode){
+    const source=state.lots.find(x=>x.code===l.sourceLotCode&&keyOf(x)===keyOf(l)&&x.warehouseId===l.warehouseId&&x.id!==l.id)
+    if(source)upstream.set(source.id,source)
+  }
   const upstreamLots=[...upstream.values()]
-  const outputLots=state.lots.filter(l=>l.sourceType==='production'&&l.sourceId===order.id&&l.itemId===order.productId&&(l.variantId||'')===(l.variantId?order.variantId||'':''))
   const outputCodes=new Set(outputLots.map(l=>l.code))
   const qualityChecks=state.qualityChecks.filter(q=>q.sourceType==='production'&&q.sourceId===order.id)
   const movements=state.stockMovements.filter(m=>m.source===order.code||m.source===order.id)
@@ -899,7 +905,8 @@ export function findTraceOrder(state:ManufacturingState,query:string){
   if(!q)return undefined
   const byCode=state.productionOrders.find(o=>o.code.toLowerCase()===q||o.lot?.toLowerCase()===q)
   if(byCode)return byCode
-  const match=state.lots.find(l=>l.code.toLowerCase()===q||serialInRange(l,q))
+  const match=state.lots.find(l=>l.qty>0&&l.reworkOrderId&&(l.code.toLowerCase()===q||serialInRange(l,q)))||state.lots.find(l=>l.code.toLowerCase()===q||serialInRange(l,q))
+  if(match?.reworkOrderId)return state.productionOrders.find(o=>o.id===match.reworkOrderId)
   const lot=match&&(lotOrigin(state,match.code,match.itemId)||match)
   if(lot?.sourceType==='production')return state.productionOrders.find(o=>o.id===lot.sourceId)
   // A material lot feeds several orders: the latest one that really consumed this item's lot is shown (P1-29).

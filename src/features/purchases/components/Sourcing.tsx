@@ -1,9 +1,9 @@
 // Supplier ↔ material sourcing UI: link terms, supplier comparison for a need, the PO draft it opens,
 // a multi-material purchase plan, and the production-order material panel that starts all of it.
-import {useState} from 'react'
+import {useRef,useState} from 'react'
 import {useNavigate} from 'react-router-dom'
 import {useApp} from '../../../app/providers/AppProvider/AppContext'
-import {Checkbox,Empty,Field,Icon,InfoGrid,Input,Modal,Select,StatusBadge,nonNegative,positive,required,useForm} from '../../../shared/ui'
+import {Checkbox,Empty,Field,Icon,InfoGrid,Input,Modal,Select,StatusBadge,nonNegative,positive,required,useDirtyMarker,useForm} from '../../../shared/ui'
 import type {CurrencyCode,ProductionOrder,SupplierMaterial} from '../../../types'
 import {orderMaterialPlan,rawWarehouseFor} from '../../../domain/manufacturingEngine'
 import {needsSecondApprover} from '../../../domain/actions'
@@ -190,6 +190,8 @@ export function PurchasePlanModal({needs,title='Xarid rejasi',subtitle,onClose}:
   const app=useApp(),s=app.state
   const initial=(n:SourcingNeed):PlanRow=>{const sid=preferredSupplierId(s,n.materialId)||'';const l=sid?findLink(s,sid,n.materialId):undefined;return {supplierId:sid,units:l?String(orderProposal(l,n.need).purchaseQty):''}}
   const [rows,setRows]=useState<PlanRow[]>(()=>needs.map(initial))
+  const firstRows=useRef(JSON.stringify(rows))
+  useDirtyMarker(JSON.stringify(rows)!==firstRows.current)
   const [compare,setCompare]=useState<number|null>(null),[linkFor,setLinkFor]=useState<string|null>(null),[belowMoq,setBelowMoq]=useState(false)
   const setRow=(i:number,patch:Partial<PlanRow>)=>setRows(x=>x.map((r,j)=>j===i?{...r,...patch}:r))
   const pick=(i:number,supplierId:string)=>{const l=findLink(s,supplierId,needs[i].materialId);setRow(i,{supplierId,units:l?String(orderProposal(l,needs[i].need).purchaseQty):''})}

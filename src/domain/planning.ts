@@ -3,7 +3,7 @@
 // of the state — planning never changes stock; suggestions become documents only through domain actions.
 import type {Bom,BomComponent,ManufacturingState,ProductionOrder,RawMaterial,SalesOrder} from '../types'
 import {
-  activeBomFor,bucketDemand,estimateOrderCost,incomingSupply,isMakeToOrder,isOpenOrder,isOpenWorkOrder,isProductItem,itemName,itemUnit,
+  activeBomFor,bucketDemand,estimateOrderCost,incomingSupply,isMakeToOrder,isOpenOrder,isOpenWorkOrder,isProductItem,itemName,itemUnit,orderReservations,
   perUnit,remainingQty,unconvertedLine,workCenterDay,workCenterWindows,workOrderRemainingMinutes,
 } from './manufacturingEngine'
 import {baseId,itemKeyFor,keyOf,splitKey,stockKey} from './inventory'
@@ -141,10 +141,22 @@ export function siteSafetyStock(s:S,material:Pick<RawMaterial,'minStock'|'siteSa
 }
 
 /** Stock of one item key in one branch's warehouses. */
-function siteStock(s:S,key:string,branchId:string){
+function siteStock(s:S,key:string,branchId:string,today:string){
   const rows=s.stockBalances.filter(b=>keyOf(b)===key&&branchOfWarehouse(s,b.warehouseId)===branchId)
   const onHand=rows.reduce((a,b)=>a+b.onHand,0),reserved=rows.reduce((a,b)=>a+b.reserved,0),quarantine=rows.reduce((a,b)=>a+(b.quarantine||0),0)
-  return {onHand,reserved,quarantine,available:Math.max(0,onHand-reserved-quarantine)}
+  // Expired physical lots remain in on-hand history but cannot cover new demand. A pin already inside `reserved`
+  // is removed from the expired deduction, so it is not subtracted twice.
+  const pins=new Map<string,number>()
+  const pin=(warehouseId:string,lot:string,qty:number)=>{const id=`${warehouseId}|${lot}`;pins.set(id,(pins.get(id)||0)+qty)}
+  for(const o of s.productionOrders.filter(isOpenOrder))for(const r of orderReservations(s,o))if(r.materialId===key)for(const p of r.lots||[])pin(r.warehouseId,p.lot,p.qty)
+  for(const so of s.salesOrders.filter(o=>o.status!=='Bekor'&&o.status!=='Yetkazildi'))for(const line of so.items)if(itemKeyFor(s,line.productId,line.variantId)===key)for(const r of line.reservations||[])for(const p of r.lots||[])pin(r.warehouseId,p.lot,p.qty)
+  let expired=0
+  for(const l of s.lots)if(keyOf(l)===key&&rows.some(b=>b.warehouseId===l.warehouseId)&&l.qty>0&&l.expiry&&l.expiry<today&&!['quarantine','hold','rework'].includes(l.status||'available')){
+    const id=`${l.warehouseId}|${l.code}`,held=pins.get(id)||0
+    expired+=Math.max(0,l.qty-held)
+    pins.set(id,Math.max(0,held-l.qty))
+  }
+  return {onHand,reserved,quarantine,available:Math.max(0,q3(onHand-reserved-quarantine-expired))}
 }
 
 /**
@@ -178,7 +190,9 @@ export function runMrp(s:S,opts:MrpOptions={}){
     const known=levels.get(productId)
     if(known!==undefined&&known>=depth&&stack.length)return
     levels.set(productId,Math.max(known??0,depth))
-    for(const c of activeBomFor(s,productId)?.components||[]){
+    // Every active variant routing contributes edges to the product's low-level code. Otherwise a child that
+    // appears earlier in the product list may be netted before its variant parent creates dependent demand.
+    for(const bom of s.boms.filter(b=>b.productId===productId&&b.status==='Faol'))for(const c of bom.components){
       if(isProductItem(s,c.materialId))visit(c.materialId,depth+1,[...stack,productId])
       else levels.set(c.materialId,Math.max(levels.get(c.materialId)??0,depth+1))
     }
@@ -261,7 +275,7 @@ export function runMrp(s:S,opts:MrpOptions={}){
       const product=item.kind==='product'?s.products.find(p=>p.id===baseItem)!:undefined
       const material=item.kind==='material'?s.rawMaterials.find(m=>m.id===item.id)!:undefined
       const a=of(item.id)
-      const stock=siteStock(s,item.id,site)
+      const stock=siteStock(s,item.id,site,today)
       // Each site holds its own safety stock (siteSafetyStock) against its own stock, reservations and receipts.
       const safety=material?siteSafetyStock(s,material,site):0
       // A site with no stock, no demand and no receipts of an item has nothing to plan or show.
@@ -377,6 +391,20 @@ export function runMrp(s:S,opts:MrpOptions={}){
   return {today,bucket:daily?'day' as const:'week' as const,periods,rows,suggestions,transfers,issues,sites}
 }
 export type MrpResult=ReturnType<typeof runMrp>
+
+/** Branch-specific material needs for actionable purchasing pages; all figures come from runMrp. */
+export function branchPurchaseNeeds(s:S,plan:MrpResult=runMrp(s)){
+  return plan.rows.filter(r=>r.kind==='material').map(row=>{
+    const material=s.rawMaterials.find(m=>m.id===row.itemId)!
+    const picks=plan.suggestions.filter(x=>x.type==='buy'&&x.itemId===row.itemId&&x.branchId===row.branchId)
+    const warehouse=s.warehouses.find(w=>w.branchId===row.branchId&&w.status==='Faol'&&(w.type==='Raw'||w.type==='Mixed'))
+    const required=q3(row.buckets.reduce((n,b)=>n+b.gross,0))
+    const incoming=q3(row.buckets.reduce((n,b)=>n+b.scheduled,0))
+    const shortage=q3(picks.reduce((n,x)=>n+x.netQty,0))
+    const suggested=q3(picks.reduce((n,x)=>n+x.qty,0))
+    return {id:`${row.branchId}:${row.itemId}`,materialId:row.itemId,branchId:row.branchId,warehouseId:warehouse?.id,m:material,required,available:row.available,incoming,safety:row.safety,shortage,suggested,order:suggested,critical:shortage>0,needBy:picks.map(x=>x.needDate).sort()[0],supplierId:preferredSupplierId(s,row.itemId),supplierCount:orderableLinks(s,row.itemId).length,reserved:row.reserved}
+  })
+}
 
 /* ---------------------------------------------------- Finite schedule -- */
 

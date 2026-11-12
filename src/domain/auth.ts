@@ -4,32 +4,49 @@
 // Everything here runs in the browser: it organises access for honest users, it does not stop someone who
 // edits browser storage. Real protection needs a backend (docs/AUTH.md).
 import type {Employee,ManufacturingState} from '../types'
-import {isSuperAdminRole,roleOf,roleRank} from './access'
+import {hasPermission,isOwnerRole,roleOf,roleRank,scopeBlocker} from './access'
+import type {PermissionAction} from '../types'
 
 type S=ManufacturingState
 
 export type Credential={hash:string;salt:string;iterations:number}
 export type Account={
   id:string;employeeId:string;username:string;email?:string;
+  /** Business Owner phone (canonical +digits), a third sign-in identifier next to username and e-mail. */
+  phone?:string;
+  /** Original company for safe legacy reconstruction when SaaS metadata is absent. Memberships remain authoritative. */
+  tenantId?:string;
   hash:string;salt:string;iterations:number;
   status:'active'|'blocked';failedCount:number;lockedUntil?:string;mustChangePassword:boolean;
   /** Hash of the owner's one-time recovery key; older accounts have none. */
   recovery?:Credential;
+  /** Unused administrator-issued temporary credential expiry. */
+  temporaryExpiresAt?:string;
   createdAt:string;createdBy?:string;updatedAt?:string;lastLoginAt?:string;passwordChangedAt?:string;
 }
 export type SecurityPolicy={minPasswordLength:number;requireLetterAndDigit:boolean;maxFailedAttempts:number;lockMinutes:number;idleMinutes:number;sessionHours:number;rememberDays:number}
 export type AuthEventType='setup'|'login'|'login_failed'|'lockout'|'logout'|'session_expired'|'session_idle'|'password_changed'|'password_reset'|'account_created'|'account_updated'|'account_blocked'|'account_unblocked'|'account_deleted'|'policy_changed'|'recovery_key_created'|'password_recovered'
-export type AuthEvent={id:string;at:string;type:AuthEventType;accountId?:string;login?:string;actorId?:string;actorName?:string;detail?:string}
+export type AuthEvent={id:string;at:string;type:AuthEventType;tenantId?:string;accountId?:string;login?:string;actorId?:string;actorName?:string;detail?:string}
 export type AuthStore={version:1;accounts:Account[];policy:SecurityPolicy;events:AuthEvent[];
+  /** SHA-256 fingerprints of consumed signed recovery tickets. Browser-local demo protection. */
+  consumedRecoveryTickets?:string[];
+  /** Optional company-specific policy. The original global policy remains the legacy/default fallback. */
+  policies?:Record<string,SecurityPolicy>;
   /** Failed sign-ins per typed login, also for logins that do not exist (so they cannot be told apart). */
   attempts:Record<string,{count:number;lockedUntil?:string}>}
-export type Session={id:string;accountId:string;employeeId:string;startedAt:string;lastActivity:string;expiresAt:string;remember:boolean}
-export type AuthCtx={now:Date;actor?:Employee;id:(prefix:string)=>string}
+export type Session={id:string;accountId:string;employeeId:string;tenantId?:string;startedAt:string;lastActivity:string;expiresAt:string;remember:boolean}
+export type AuthCtx={now:Date;actor?:Employee;tenantId?:string;id:(prefix:string)=>string}
 export type AuthOutcome={store:AuthStore;state?:S;error?:undefined;message:string;id?:string}|{error:string}
 
 export const AUTH_EVENT_LIMIT=2000
 export const DEFAULT_POLICY:SecurityPolicy={minPasswordLength:8,requireLetterAndDigit:true,maxFailedAttempts:5,lockMinutes:15,idleMinutes:30,sessionHours:12,rememberDays:30}
 export const emptyAuthStore=():AuthStore=>({version:1,accounts:[],policy:{...DEFAULT_POLICY},events:[],attempts:{}})
+
+/** For a shared login, the strictest tenant threshold and longest lock apply. */
+export function loginFailurePolicy(store:AuthStore,tenantIds:string[]):SecurityPolicy{
+  const policies=tenantIds.map(id=>store.policies?.[id]).filter((p):p is SecurityPolicy=>Boolean(p))
+  return policies.length?{...store.policy,maxFailedAttempts:Math.min(...policies.map(p=>p.maxFailedAttempts)),lockMinutes:Math.max(...policies.map(p=>p.lockMinutes))}:store.policy
+}
 
 const iso=(d:Date)=>d.toISOString()
 const plusMinutes=(d:Date,m:number)=>new Date(d.getTime()+m*60000)
@@ -50,7 +67,8 @@ export function normalizeAuthStore(raw:unknown):AuthStore{
   const r=(raw&&typeof raw==='object'?raw:{}) as Partial<AuthStore>
   // An entry that is not an account (null, a string) would break every lookup by id; it cannot sign in anyway.
   const accounts=Array.isArray(r.accounts)?r.accounts.filter(a=>a&&typeof a==='object'&&typeof a.id==='string'&&typeof a.employeeId==='string'):[]
-  return {version:1,accounts,policy:{...DEFAULT_POLICY,...(r.policy&&typeof r.policy==='object'?r.policy:{})},events:Array.isArray(r.events)?r.events.filter(e=>e&&typeof e==='object'):[],attempts:r.attempts&&typeof r.attempts==='object'?r.attempts:{}}
+  const policies=r.policies&&typeof r.policies==='object'?Object.fromEntries(Object.entries(r.policies).filter(([,v])=>v&&typeof v==='object').map(([id,v])=>[id,{...DEFAULT_POLICY,...v}])):undefined
+  return {version:1,accounts,policy:{...DEFAULT_POLICY,...(r.policy&&typeof r.policy==='object'?r.policy:{})},...(policies?{policies}:{}),events:Array.isArray(r.events)?r.events.filter(e=>e&&typeof e==='object'):[],attempts:r.attempts&&typeof r.attempts==='object'?r.attempts:{},consumedRecoveryTickets:Array.isArray(r.consumedRecoveryTickets)?r.consumedRecoveryTickets.filter(x=>typeof x==='string'&&/^[a-f0-9]{64}$/.test(x)).slice(-1000):[]}
 }
 
 const validTime=(v:unknown):v is string=>typeof v==='string'&&!Number.isNaN(Date.parse(v))
@@ -61,11 +79,12 @@ export function normalizeSession(raw:unknown):Session|null{
   const r=raw as Partial<Session>
   if(typeof r.id!=='string'||typeof r.accountId!=='string'||typeof r.employeeId!=='string')return null
   if(!validTime(r.startedAt)||!validTime(r.lastActivity)||!validTime(r.expiresAt))return null
-  return {id:r.id,accountId:r.accountId,employeeId:r.employeeId,startedAt:r.startedAt,lastActivity:r.lastActivity,expiresAt:r.expiresAt,remember:r.remember===true}
+  if(r.tenantId!==undefined&&(typeof r.tenantId!=='string'||!r.tenantId))return null
+  return {id:r.id,accountId:r.accountId,employeeId:r.employeeId,...(r.tenantId?{tenantId:r.tenantId}:{}),startedAt:r.startedAt,lastActivity:r.lastActivity,expiresAt:r.expiresAt,remember:r.remember===true}
 }
 
 export function logAuth(store:AuthStore,ctx:AuthCtx,e:Omit<AuthEvent,'id'|'at'|'actorId'|'actorName'>):AuthStore{
-  return {...store,events:[{id:ctx.id('ae'),at:iso(ctx.now),actorId:ctx.actor?.id,actorName:ctx.actor?.name,...e},...store.events].slice(0,AUTH_EVENT_LIMIT)}
+  return {...store,events:[{id:ctx.id('ae'),at:iso(ctx.now),...(ctx.tenantId?{tenantId:ctx.tenantId}:{}),actorId:ctx.actor?.id,actorName:ctx.actor?.name,...e},...store.events].slice(0,AUTH_EVENT_LIMIT)}
 }
 
 /* --------------------------------------------------------------- rules -- */
@@ -87,42 +106,42 @@ const validEmail=(email:string)=>!email||/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email
 
 export function findAccount(store:AuthStore,login:string){
   const key=normalizeLogin(login)
-  return key?store.accounts.find(a=>normalizeLogin(a.username)===key||(a.email&&a.email.toLowerCase()===key)):undefined
+  return key?store.accounts.find(a=>normalizeLogin(a.username)===key||(a.email&&a.email.toLowerCase()===key)||(a.phone&&normalizeLogin(a.phone)===key)):undefined
 }
 
-/** Accounts that can still sign in as Super Admin: active, employee not archived, employee holds the Super Admin role. */
+/** Active company owners, including pre-v6 Super Admin records until migration. */
 export function activeSuperAdmins(store:AuthStore,s:S,exceptAccountId?:string){
   return store.accounts.filter(a=>{
     if(a.id===exceptAccountId||a.status!=='active')return false
     const e=s.employees.find(x=>x.id===a.employeeId)
-    return Boolean(e&&e.status!=='Arxiv'&&isSuperAdminRole(roleOf(s,e.id)))
+    return Boolean(e&&e.status!=='Arxiv'&&isOwnerRole(roleOf(s,e.id)))
   })
 }
 
-/** After setup there must always be a Super Admin who can sign in; any change that would end that is refused. */
+/** After setup there must always be a company owner who can sign in. */
 export const superAdminInvariant=(store:AuthStore,s:S)=>!store.accounts.length||activeSuperAdmins(store,s).length>0
 
 /**
  * Role assignments live in the business data, accounts outside it. When the business data had to be started
- * clean (recovery of unreadable data), nobody would hold Super Admin and every action would be blocked: the
- * employee of the oldest active account — the first-run administrator — gets the Super Admin role back.
+ * clean (recovery of unreadable data), no role is guessed from account order.
  * Returns the state unchanged when the invariant already holds or no such employee exists.
  */
 export function restoreSuperAdmin(store:AuthStore,s:S):S{
-  if(superAdminInvariant(store,s))return s
-  const superRole=s.roles.find(r=>r.key==='super_admin')
-  const first=[...store.accounts].filter(a=>a.status==='active').sort((a,b)=>a.createdAt.localeCompare(b.createdAt)).find(a=>s.employees.some(e=>e.id===a.employeeId&&e.status!=='Arxiv'))
-  if(!superRole||!first)return s
-  return {...s,employees:s.employees.map(e=>e.id===first.employeeId?{...e,roleId:superRole.id}:e)}
+  void store
+  return s
 }
 
 /** Whether `actor` may manage the account of `employeeId`: never their own, only people ranked below them (Super Admin: anyone). */
-export function accountManageBlocker(s:S,actor:Employee|undefined,employeeId:string,allowSelf=false):string|null{
+export function accountManageBlocker(s:S,actor:Employee|undefined,employeeId:string,allowSelf=false,action:PermissionAction='edit'):string|null{
   if(!actor)return 'Avval tizimga kiring'
   if(actor.id===employeeId)return allowSelf?null:'O‘z akkauntingizni bu yerda boshqara olmaysiz'
   const mine=roleOf(s,actor.id)
-  if(isSuperAdminRole(mine))return null
+  if(!hasPermission(mine,'users',action))return `users.${action} ruxsati yo‘q`
   const target=s.employees.find(e=>e.id===employeeId)
+  if(!target)return 'Xodim topilmadi'
+  const scope=scopeBlocker(s,actor,'updateEntity',['employees',target.id,target])
+  if(scope)return scope
+  if(isOwnerRole(mine))return null
   if(roleRank(roleOf(s,target?.id))>=roleRank(mine))return `${target?.name||'Bu foydalanuvchi'} sizning darajangizda yoki undan yuqori — faqat Super Admin boshqaradi`
   return null
 }
@@ -143,22 +162,26 @@ export function authStorageDamaged(raw:string|null):boolean{
  * Why first-run setup may not run. It exists only for a browser with no company owner: missing accounts alone are not
  * enough, because lost or damaged account storage next to a company's data must not hand that company to a stranger.
  */
-export function bootstrapBlocker(store:AuthStore,s:S,rawAuth:string|null=null):string|null{
+export function bootstrapBlocker(store:AuthStore,s:S,rawAuth:string|null=null,storedBusinessState=false):string|null{
   if(store.accounts.length)return 'Tizim allaqachon sozlangan — tizimga kiring'
   if(authStorageDamaged(rawAuth))return 'Saqlangan akkauntlarni o‘qib bo‘lmadi. Yangi egasi yaratilmaydi va ma’lumotlar o‘zgartirilmaydi'
+  if(storedBusinessState)return 'Saqlangan korxona ma’lumoti egasi aniqlanmadi. Yangi akkauntga avtomatik berilmaydi; asl nusxani saqlab, administrator orqali tiklang'
   if(rawAuth&&normalizeAuthStore(JSON.parse(rawAuth)).accounts.length)return 'Tizim allaqachon sozlangan — tizimga kiring'
-  if(store.events.some(e=>e.type==='setup')||s.employees.some(e=>isSuperAdminRole(roleOf(s,e.id))))return 'Bu brauzerda kompaniya egasi allaqachon bo‘lgan, lekin akkaunt yozuvlari topilmadi. Yangi egasi yaratilmaydi va ma’lumotlar o‘zgartirilmaydi'
+  if(store.events.some(e=>e.type==='setup')||s.employees.some(e=>isOwnerRole(roleOf(s,e.id))))return 'Bu brauzerda kompaniya egasi allaqachon bo‘lgan, lekin akkaunt yozuvlari topilmadi. Yangi egasi yaratilmaydi va ma’lumotlar o‘zgartirilmaydi'
   return null
 }
 
-export type Registration={name:string;company:string;username:string;email?:string;password:string;confirm:string}
+export type Registration={name:string;company:string;phone:string;username:string;email?:string;password:string;confirm:string}
 export type RegistrationField=keyof Registration
 
 /** The first problem of a registration form, by field, in the order the fields are shown. */
 export function registrationProblem(policy:SecurityPolicy,r:Registration):{field:RegistrationField;message:string}|null{
   if(r.name.trim().length<2)return {field:'name',message:'Ism-familiyani kiriting'}
   if(r.company.trim().length<2)return {field:'company',message:'Kompaniya nomini kiriting'}
-  if(!r.username.trim())return {field:'username',message:'Telefon yoki loginni kiriting'}
+  if(r.company.trim().length>80)return {field:'company',message:'Kompaniya nomi 80 belgidan oshmasin'}
+  if(!r.phone.trim())return {field:'phone',message:'Telefon raqamini kiriting'}
+  if(!normalizePhone(r.phone))return {field:'phone',message:'Telefon raqami noto‘g‘ri (masalan +998 90 123 45 67)'}
+  if(!r.username.trim())return {field:'username',message:'Loginni kiriting'}
   const badLogin=validateUsername(r.username)
   if(badLogin)return {field:'username',message:badLogin}
   if(r.email&&!validEmail(r.email.trim()))return {field:'email',message:'E-pochta noto‘g‘ri'}
@@ -169,10 +192,10 @@ export function registrationProblem(policy:SecurityPolicy,r:Registration):{field
 }
 
 /**
- * First run only: the chosen employee becomes the Super Admin and gets the first account; the owner's name and the
+ * First run only: the chosen employee becomes the Business Owner and gets the first account; the owner's name and the
  * company, when given, go to that employee and the company settings. No default password exists.
  */
-export function setupFirstAdmin(store:AuthStore,s:S,ctx:AuthCtx,input:{employeeId:string;username:string;email?:string;credential:Credential;name?:string;company?:string;recovery?:Credential}):AuthOutcome{
+export function setupFirstAdmin(store:AuthStore,s:S,ctx:AuthCtx,input:{employeeId:string;username:string;email?:string;phone?:string;credential:Credential;name?:string;company?:string;recovery?:Credential}):AuthOutcome{
   const closed=bootstrapBlocker(store,s)
   if(closed)return {error:closed}
   const employee=s.employees.find(e=>e.id===input.employeeId&&e.status!=='Arxiv')
@@ -180,13 +203,25 @@ export function setupFirstAdmin(store:AuthStore,s:S,ctx:AuthCtx,input:{employeeI
   const bad=validateUsername(input.username)
   if(bad)return {error:bad}
   if(input.email&&!validEmail(input.email))return {error:'E-pochta noto‘g‘ri'}
-  const superRole=s.roles.find(r=>r.key==='super_admin')
-  if(!superRole)return {error:'Super Admin roli topilmadi — ma’lumotlar yangilanmagan'}
-  const account:Account={id:ctx.id('acc'),employeeId:employee.id,username:storedLogin(input.username),email:input.email?.trim()||undefined,...input.credential,recovery:input.recovery,status:'active',failedCount:0,mustChangePassword:false,createdAt:iso(ctx.now),passwordChangedAt:iso(ctx.now)}
+  const phone=input.phone?.trim()?normalizePhone(input.phone):undefined
+  if(phone===null)return {error:'Telefon raqami noto‘g‘ri'}
+  const ownerRole=s.roles.find(r=>r.key==='business_owner')
+  if(!ownerRole)return {error:'Biznes egasi roli topilmadi — ma’lumotlar yangilanmagan'}
+  const account:Account={id:ctx.id('acc'),employeeId:employee.id,username:storedLogin(input.username),email:input.email?.trim()||undefined,...(phone?{phone}:{}),...input.credential,recovery:input.recovery,status:'active',failedCount:0,mustChangePassword:false,createdAt:iso(ctx.now),passwordChangedAt:iso(ctx.now)}
   const name=input.name?.trim()||employee.name,company=input.company?.trim()||s.settings.company.name
-  const state={...s,settings:{...s.settings,company:{...s.settings.company,name:company}},employees:s.employees.map(e=>e.id===employee.id?{...e,name,roleId:superRole.id}:e)}
-  const next=logAuth({...store,accounts:[account]},{...ctx,actor:employee},{type:'setup',accountId:account.id,login:account.username,detail:`${name} → Super Admin`})
-  return {store:next,state,message:'Super Admin yaratildi',id:account.id}
+  const state={...s,settings:{...s.settings,company:{...s.settings.company,name:company}},employees:s.employees.map(e=>e.id===employee.id?{...e,name,roleId:ownerRole.id}:e)}
+  const next=logAuth({...store,accounts:[account]},{...ctx,actor:employee},{type:'setup',accountId:account.id,login:account.username,detail:`${name} → Biznes egasi`})
+  return {store:next,state,message:'Biznes egasi yaratildi',id:account.id}
+}
+
+/** Public tenant creation has stricter required identity fields than legacy first-run migration. */
+export function registerCompanyOwner(store:AuthStore,s:S,ctx:AuthCtx,input:{employeeId:string;username:string;email?:string;phone:string;credential:Credential;name:string;company:string;recovery?:Credential}):AuthOutcome{
+  if(input.name.trim().length<2)return {error:'Ism-familiyani kiriting'}
+  if(input.company.trim().length<2)return {error:'Kompaniya nomini kiriting'}
+  if(!input.phone?.trim()||!normalizePhone(input.phone))return {error:'Telefon raqamini to‘g‘ri kiriting'}
+  // The owner's phone must not already identify another account in the same store.
+  if(findAccount(store,input.phone))return {error:'Bu telefon raqami boshqa akkauntda'}
+  return setupFirstAdmin(store,s,ctx,input)
 }
 
 /* ------------------------------------------------------------- recovery -- */
@@ -197,9 +232,9 @@ export const recoveryAttemptKey=(login:string)=>`recovery:${normalizeLogin(login
 /** The text an owner's recovery ticket signs: it is good for one login and one visit of the recovery page, until it expires. */
 export const recoveryTicketMessage=(login:string,code:string,expiresAt:number|string)=>`zenix-recovery-v1|${login}|${code}|${expiresAt}`
 
-/** A signed ticket restores only an active Super Admin; other people ask an administrator. */
+/** A signed ticket restores only an active company owner; other people ask an administrator. */
 export function ownerRecoveryBlocker(store:AuthStore,s:S,account:Account|undefined):string|null{
-  if(!account||!activeSuperAdmins(store,s).some(a=>a.id===account.id))return 'Bu yo‘l faqat faol Super Admin uchun. Xodimlar parolni administrator orqali tiklaydi'
+  if(!account||!activeSuperAdmins(store,s).some(a=>a.id===account.id))return 'Bu yo‘l faqat faol biznes egasi uchun. Xodimlar parolni administrator orqali tiklaydi'
   return null
 }
 
@@ -213,11 +248,11 @@ export function recoverPassword(store:AuthStore,ctx:AuthCtx,accountId:string,inp
   return {store:next,message:'Parol yangilandi — yangi parol bilan kiring',id:accountId}
 }
 
-/** A signed-in Super Admin makes (or replaces) their recovery key, after the app verified their password. */
+/** A signed-in owner makes (or replaces) their recovery key after password verification. */
 export function setRecoveryKey(store:AuthStore,s:S,ctx:AuthCtx,accountId:string,recovery:Credential):AuthOutcome{
   const account=store.accounts.find(a=>a.id===accountId)
   if(!account)return {error:'Akkaunt topilmadi'}
-  if(!activeSuperAdmins(store,s).some(a=>a.id===accountId))return {error:'Tiklash kaliti faqat Super Admin uchun'}
+  if(!activeSuperAdmins(store,s).some(a=>a.id===accountId))return {error:'Tiklash kaliti faqat biznes egasi uchun'}
   const next=logAuth({...store,accounts:store.accounts.map(a=>a.id===accountId?{...a,recovery,updatedAt:iso(ctx.now)}:a)},ctx,{type:'recovery_key_created',accountId,login:account.username})
   return {store:next,message:'Tiklash kaliti yaratildi',id:accountId}
 }
@@ -244,19 +279,34 @@ export function recordFailure(store:AuthStore,ctx:AuthCtx,login:string,account?:
 }
 
 /** Why a correctly authenticated account still may not sign in (blocked, employee archived or missing). */
-export function signInBlocker(s:S,account:Account):string|null{
+export function signInBlocker(s:S,account:Account,employeeId=account.employeeId,now=new Date()):string|null{
   if(account.status==='blocked')return 'Akkaunt bloklangan — administratorga murojaat qiling'
-  const e=s.employees.find(x=>x.id===account.employeeId)
+  if(account.mustChangePassword&&account.temporaryExpiresAt&&account.temporaryExpiresAt<=iso(now))return 'Vaqtinchalik parol muddati tugagan — administratordan yangi parol oling'
+  const e=s.employees.find(x=>x.id===employeeId)
   if(!e)return 'Akkauntga bog‘langan xodim topilmadi — administratorga murojaat qiling'
   if(e.status==='Arxiv')return 'Xodim arxivlangan — kirish yopiq'
   if(!roleOf(s,e.id))return 'Xodimga rol biriktirilmagan — administratorga murojaat qiling'
+  const site=activationScopeBlocker(s,e)
+  if(site)return site
   return null
 }
 
-export function recordSuccess(store:AuthStore,ctx:AuthCtx,account:Account,remember:boolean):{store:AuthStore;session:Session}{
+/** A scoped credential is useful only while its employee has a valid assigned site. */
+export function activationScopeBlocker(s:S,employee:Employee):string|null{
+  const assigned=roleOf(s,employee.id)
+  const wc=s.workCenters.find(w=>w.id===employee.workCenterId),wh=s.warehouses.find(w=>w.id===employee.warehouseId)
+  const sites=[employee.branchId,...(employee.branchIds||[]),wc?.branchId,wh?.branchId].filter(Boolean)
+  if(assigned?.scope==='workcenter'&&!wc)return 'Bu rol uchun ish markazini tanlang'
+  if(assigned?.scope==='warehouse'&&!wh)return 'Bu rol uchun omborni tanlang'
+  if(assigned&&assigned.scope!=='all'&&!sites.length)return 'Bu rol uchun filial, ish markazi yoki omborni tanlang'
+  if(sites.some(id=>!s.branches.some(b=>b.id===id&&b.status!=='Arxiv')))return 'Xodimning filiali topilmadi yoki arxivlangan'
+  return null
+}
+
+export function recordSuccess(store:AuthStore,ctx:AuthCtx,account:Account,remember:boolean,tenantId?:string,employeeId=account.employeeId):{store:AuthStore;session:Session}{
   const key=normalizeLogin(account.username),p=store.policy
   const {[key]:_,...attempts}=store.attempts
-  const session:Session={id:ctx.id('ses'),accountId:account.id,employeeId:account.employeeId,startedAt:iso(ctx.now),lastActivity:iso(ctx.now),expiresAt:iso(plusMinutes(ctx.now,remember?p.rememberDays*1440:p.sessionHours*60)),remember}
+  const session:Session={id:ctx.id('ses'),accountId:account.id,employeeId,tenantId,startedAt:iso(ctx.now),lastActivity:iso(ctx.now),expiresAt:iso(plusMinutes(ctx.now,remember?p.rememberDays*1440:p.sessionHours*60)),remember}
   const next=logAuth({...store,attempts,accounts:store.accounts.map(a=>a.id===account.id?{...a,failedCount:0,lockedUntil:undefined,lastLoginAt:iso(ctx.now)}:a)},ctx,{type:'login',accountId:account.id,login:account.username,detail:remember?'eslab qolish bilan':''})
   return {store:next,session}
 }
@@ -268,8 +318,8 @@ export function sessionProblem(session:Session|null,store:AuthStore,s:S,now:Date
   // Times that cannot be read would never expire: such a session is treated as expired.
   if(!validTime(session.expiresAt)||!validTime(session.lastActivity)||!validTime(session.startedAt))return 'expired'
   const account=store.accounts.find(a=>a.id===session.accountId)
-  if(!account||account.employeeId!==session.employeeId)return 'missing'
-  if(signInBlocker(s,account))return 'blocked'
+  if(!account||(!session.tenantId&&account.employeeId!==session.employeeId))return 'missing'
+  if(signInBlocker(s,account,session.employeeId,now))return 'blocked'
   // A password set after this session began (reset by an administrator, or changed elsewhere) ends it.
   if(account.passwordChangedAt&&account.passwordChangedAt>session.startedAt)return 'credentials'
   if(session.expiresAt<=iso(now))return 'expired'
@@ -285,15 +335,18 @@ export function createAccount(store:AuthStore,s:S,ctx:AuthCtx,input:AccountInput
   const employee=s.employees.find(e=>e.id===input.employeeId)
   if(!employee)return {error:'Xodimni tanlang'}
   if(employee.status==='Arxiv')return {error:'Arxivlangan xodimga akkaunt ochilmaydi'}
-  const blocked=accountManageBlocker(s,ctx.actor,employee.id)
+  const blocked=accountManageBlocker(s,ctx.actor,employee.id,false,'create')
   if(blocked)return {error:blocked}
+  const invalidScope=activationScopeBlocker(s,employee)
+  if(invalidScope)return {error:invalidScope}
   if(store.accounts.some(a=>a.employeeId===employee.id))return {error:`${employee.name} uchun akkaunt allaqachon bor`}
   const bad=validateUsername(input.username)
   if(bad)return {error:bad}
   if(findAccount(store,input.username))return {error:'Bu login band'}
   if(input.email&&!validEmail(input.email))return {error:'E-pochta noto‘g‘ri'}
   if(input.email&&findAccount(store,input.email))return {error:'Bu e-pochta boshqa akkauntda'}
-  const account:Account={id:ctx.id('acc'),employeeId:employee.id,username:storedLogin(input.username),email:input.email?.trim()||undefined,...input.credential,status:'active',failedCount:0,mustChangePassword:input.mustChangePassword??true,createdAt:iso(ctx.now),createdBy:ctx.actor?.id,passwordChangedAt:iso(ctx.now)}
+  const temporary=input.mustChangePassword??true
+  const account:Account={id:ctx.id('acc'),employeeId:employee.id,username:storedLogin(input.username),email:input.email?.trim()||undefined,...(ctx.tenantId?{tenantId:ctx.tenantId}:{}),...input.credential,status:'active',failedCount:0,mustChangePassword:temporary,...(temporary?{temporaryExpiresAt:iso(plusMinutes(ctx.now,7*1440))}:{}),createdAt:iso(ctx.now),createdBy:ctx.actor?.id,passwordChangedAt:iso(ctx.now)}
   const next=logAuth({...store,accounts:[...store.accounts,account]},ctx,{type:'account_created',accountId:account.id,login:account.username,detail:employee.name})
   return {store:next,message:`${account.username} akkaunti yaratildi`,id:account.id}
 }
@@ -314,13 +367,13 @@ export function updateAccount(store:AuthStore,s:S,ctx:AuthCtx,accountId:string,p
   return {store:next,message:'Akkaunt saqlandi',id:accountId}
 }
 
-/** Block or unblock (unblocking also lifts a failed-attempts lock). The last active Super Admin is never blocked. */
+/** Block or unblock (unblocking also lifts a failed-attempts lock). The last active owner is protected. */
 export function setAccountStatus(store:AuthStore,s:S,ctx:AuthCtx,accountId:string,status:Account['status']):AuthOutcome{
   const account=store.accounts.find(a=>a.id===accountId)
   if(!account)return {error:'Akkaunt topilmadi'}
   const blocked=accountManageBlocker(s,ctx.actor,account.employeeId)
   if(blocked)return {error:blocked}
-  if(status==='blocked'&&!activeSuperAdmins(store,s,accountId).length&&activeSuperAdmins(store,s).some(a=>a.id===accountId))return {error:'Oxirgi faol Super Admin’ni bloklab bo‘lmaydi'}
+  if(status==='blocked'&&!activeSuperAdmins(store,s,accountId).length&&activeSuperAdmins(store,s).some(a=>a.id===accountId))return {error:'Oxirgi faol biznes egasini bloklab bo‘lmaydi'}
   const key=normalizeLogin(account.username)
   const {[key]:_,...attempts}=store.attempts
   const next=logAuth({...store,attempts:status==='active'?attempts:store.attempts,accounts:store.accounts.map(a=>a.id===accountId?{...a,status,...(status==='active'?{failedCount:0,lockedUntil:undefined}:{}),updatedAt:iso(ctx.now)}:a)},ctx,{type:status==='blocked'?'account_blocked':'account_unblocked',accountId,login:account.username})
@@ -333,7 +386,7 @@ export function resetPassword(store:AuthStore,s:S,ctx:AuthCtx,accountId:string,c
   if(!account)return {error:'Akkaunt topilmadi'}
   const blocked=accountManageBlocker(s,ctx.actor,account.employeeId)
   if(blocked)return {error:blocked}
-  const next=logAuth({...store,accounts:store.accounts.map(a=>a.id===accountId?{...a,...credential,mustChangePassword:true,failedCount:0,lockedUntil:undefined,passwordChangedAt:iso(ctx.now),updatedAt:iso(ctx.now)}:a)},ctx,{type:'password_reset',accountId,login:account.username})
+  const next=logAuth({...store,accounts:store.accounts.map(a=>a.id===accountId?{...a,...credential,mustChangePassword:true,temporaryExpiresAt:iso(plusMinutes(ctx.now,7*1440)),failedCount:0,lockedUntil:undefined,passwordChangedAt:iso(ctx.now),updatedAt:iso(ctx.now)}:a)},ctx,{type:'password_reset',accountId,login:account.username})
   return {store:next,message:`${account.username}: vaqtinchalik parol o‘rnatildi`,id:accountId}
 }
 
@@ -341,16 +394,16 @@ export function resetPassword(store:AuthStore,s:S,ctx:AuthCtx,accountId:string,c
 export function changeOwnPassword(store:AuthStore,ctx:AuthCtx,accountId:string,credential:Credential):AuthOutcome{
   const account=store.accounts.find(a=>a.id===accountId)
   if(!account)return {error:'Akkaunt topilmadi'}
-  const next=logAuth({...store,accounts:store.accounts.map(a=>a.id===accountId?{...a,...credential,mustChangePassword:false,passwordChangedAt:iso(ctx.now),updatedAt:iso(ctx.now)}:a)},ctx,{type:'password_changed',accountId,login:account.username})
+  const next=logAuth({...store,accounts:store.accounts.map(a=>a.id===accountId?{...a,...credential,mustChangePassword:false,temporaryExpiresAt:undefined,passwordChangedAt:iso(ctx.now),updatedAt:iso(ctx.now)}:a)},ctx,{type:'password_changed',accountId,login:account.username})
   return {store:next,message:'Parol yangilandi',id:accountId}
 }
 
 export function deleteAccount(store:AuthStore,s:S,ctx:AuthCtx,accountId:string):AuthOutcome{
   const account=store.accounts.find(a=>a.id===accountId)
   if(!account)return {error:'Akkaunt topilmadi'}
-  const blocked=accountManageBlocker(s,ctx.actor,account.employeeId)
+  const blocked=accountManageBlocker(s,ctx.actor,account.employeeId,false,'delete')
   if(blocked)return {error:blocked}
-  if(activeSuperAdmins(store,s).some(a=>a.id===accountId)&&!activeSuperAdmins(store,s,accountId).length)return {error:'Oxirgi faol Super Admin akkauntini o‘chirib bo‘lmaydi'}
+  if(activeSuperAdmins(store,s).some(a=>a.id===accountId)&&!activeSuperAdmins(store,s,accountId).length)return {error:'Oxirgi faol biznes egasi akkauntini o‘chirib bo‘lmaydi'}
   const next=logAuth({...store,accounts:store.accounts.filter(a=>a.id!==accountId)},ctx,{type:'account_deleted',accountId,login:account.username})
   return {store:next,message:`${account.username} akkaunti o‘chirildi`,id:accountId}
 }

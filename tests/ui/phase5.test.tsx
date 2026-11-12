@@ -4,6 +4,7 @@ import {STATE_KEY,mountApp,seedState} from './appFixture'
 import test,{afterEach} from 'node:test'
 import assert from 'node:assert/strict'
 import * as A from '../../src/domain/actions'
+import {SCHEMA_VERSION} from '../../src/domain/migrations'
 import type {Ctx} from '../../src/domain/actions'
 import type {ManufacturingState} from '../../src/types'
 
@@ -110,9 +111,9 @@ test('pre-merge: opening v4 data keeps a v4 backup under its own key; an older v
   seedState(s=>({...s,schemaVersion:4}))
   localStorage.setItem('zenix-manufacturing-before-v4',JSON.stringify({savedAt:'2026-01-01 00:00',from:3,to:4,state:{marker:'v3-copy'}}))
   await mountApp('/')
-  const v5=JSON.parse(localStorage.getItem('zenix-manufacturing-before-v5')||'null')
-  assert.ok(v5,'the v4 data was copied before the upgrade')
-  assert.equal(v5.from,4)
-  assert.equal(v5.state.schemaVersion,4)
+  const backup=JSON.parse(localStorage.getItem(`zenix-manufacturing-before-v${SCHEMA_VERSION}`)||'null')
+  assert.ok(backup,'the v4 data was copied before the upgrade')
+  assert.equal(backup.from,4)
+  assert.equal(backup.state.schemaVersion,4)
   assert.equal(JSON.parse(localStorage.getItem('zenix-manufacturing-before-v4')!).state.marker,'v3-copy','the earlier backup stays')
 })

@@ -32,15 +32,18 @@ export const PERMISSION_MODULES:Array<{key:string;label:string;icon:string;actio
   {key:'users',label:'Foydalanuvchilar',icon:'user',actions:['view','create','edit','delete'],admin:true},
   {key:'roles',label:'Rollar va ruxsatlar',icon:'lock',actions:['view','create','edit','delete'],admin:true},
   {key:'audit',label:'Faoliyat jurnali',icon:'clock',actions:['view','export'],admin:true},
+  {key:'subscription',label:'Obuna va limitlar',icon:'chart',actions:['view','edit'],admin:true},
 ]
 export const MODULE_KEYS=PERMISSION_MODULES.map(m=>m.key)
 
 /* ------------------------------------------------------------- roles -- */
 
-const RANK:Record<SystemRoleKey,number>={super_admin:3,admin:2,production_manager:1,operator:1,quality:1,maintenance:1,warehouse:1,supply_sales:1}
+const RANK:Record<SystemRoleKey,number>={super_admin:5,business_owner:4,admin:3,production_manager:2,operator:1,quality:1,maintenance:1,warehouse:1,supply_sales:2}
 export const isSuperAdminRole=(role:Pick<Role,'key'>|undefined)=>role?.key==='super_admin'
-/** Super Admin 3 › Admin 2 › every other role 1. A user only manages roles and people ranked below them. */
-export const roleRank=(role:Pick<Role,'key'>|undefined)=>role?.key?RANK[role.key]:1
+export const isOwnerRole=(role:Pick<Role,'key'>|undefined)=>role?.key==='business_owner'||role?.key==='super_admin'
+/** Separate owner, admin and manager ranks: a delegated manager may manage subordinate employees. */
+export const roleRank=(role:Pick<Role,'key'|'rank'>|undefined)=>role?.key?RANK[role.key]:role?.rank||1
+export const scopeMayDelegate=(mine:Role['scope']|undefined,target:Role['scope'])=>mine==='all'||mine==='branch'&&target!=='all'||mine===target
 
 export function roleOf(s:S,employeeId:string|undefined):Role|undefined{
   const roleId=s.employees.find(e=>e.id===employeeId)?.roleId
@@ -50,7 +53,9 @@ export function roleOf(s:S,employeeId:string|undefined):Role|undefined{
 /** Super Admin can do everything; the dashboard is open to every signed-in user; otherwise the role's matrix decides. */
 export function hasPermission(role:Role|undefined,module:string,action:PermissionAction='view'){
   if(!role)return false
-  if(isSuperAdminRole(role))return true
+  if(module==='platform')return false // Platform identity is separate from company roles.
+  if(module==='subscription'&&action==='edit')return role.key==='business_owner'
+  if(isSuperAdminRole(role))return action==='view'
   if(module==='dashboard'&&action==='view')return true
   return role.permissions?.[module]?.[action]===true
 }
@@ -73,19 +78,20 @@ export const ACTION_RULES:Record<string,Rules|((args:unknown[])=>Rules)>={
     // Running, pausing and handing over to QC is shop-floor work; planning decisions stay with planners.
     return ['Jarayonda','Pauzada','Sifat nazoratida'].includes(String(status))?PROD_RUN:[['production','edit']]
   },
-  reportOutput:PROD_RUN,recordScrap:PROD_RUN,issueExtraMaterial:[['production','edit']],startWorkOrder:PROD_RUN,pauseWorkOrder:PROD_RUN,finishWorkOrder:PROD_RUN,recordMaterialScan:PROD_RUN,
+  reportOutput:PROD_RUN,recordScrap:PROD_RUN,issueExtraMaterial:[['production','edit']],returnUnusedMaterial:[['production','edit'],['warehouse','edit']],startWorkOrder:PROD_RUN,pauseWorkOrder:PROD_RUN,finishWorkOrder:PROD_RUN,recordMaterialScan:PROD_RUN,
   splitProduction:[['production','edit']],mergeProduction:[['production','edit']],createBackorder:[['production','edit']],unbuildProduct:[['production','edit']],checkAvailability:[['production','edit']],
   setForecast:[['production','edit']],rollUpCosts:[['products','edit']],refreshMaterialReservation:[['production','edit']],
   // Job cards: operators run and report their operation; assigning people and moving dates is planning.
   reportOperationOutput:PROD_RUN,markSetupDone:PROD_RUN,assignWorkOrder:[['production','edit']],rescheduleProductionOrder:[['production','edit']],
   // An MRP suggestion becomes a draft PO (purchases.create) or a draft MO (production.create).
   confirmMrpSuggestion:args=>String(args[0]).startsWith('buy:')?[['purchases','create']]:[['production','create']],
-  createReworkOrder:[['quality','edit'],['production','create']],createQualityCheck:[['quality','create'],...PROD_RUN],resolveQuality:[['quality','edit']],createQualityAlert:[['quality','create']],
+  createReworkOrder:[['quality','edit'],['production','create']],reconcileReworkOwnership:[['quality','edit'],['production','edit']],createQualityCheck:[['quality','create'],...PROD_RUN],resolveQuality:[['quality','edit']],createQualityAlert:[['quality','create']],
   // A PO that skips the draft stage is an approval, so it needs the approve right (A-M6).
   createPurchaseOrder:args=>isDraftPo(args[0])?[['purchases','create']]:[['purchases','approve']],
   createPurchaseOrders:args=>Array.isArray(args[0])&&args[0].every(isDraftPo)?[['purchases','create']]:[['purchases','approve']],
   linkSupplierMaterial:[['purchases','edit'],['materials','edit']],updateSupplierMaterial:[['purchases','edit'],['materials','edit']],removeSupplierMaterial:[['purchases','edit'],['materials','edit']],setPreferredSupplier:[['materials','edit'],['purchases','edit']],
-  confirmPurchase:[['purchases','approve']],markPurchaseInTransit:[['purchases','edit']],cancelPurchase:[['purchases','edit']],closePurchaseShort:[['purchases','edit']],updatePurchaseMeta:[['purchases','edit']],receivePurchase:[['purchases','edit'],['warehouse','edit']],returnPurchaseToSupplier:[['purchases','edit'],['warehouse','edit']],advanceSubcontract:[['purchases','edit']],
+  confirmPurchase:[['purchases','approve']],markPurchaseInTransit:[['purchases','edit']],cancelPurchase:[['purchases','edit']],closePurchaseShort:[['purchases','edit']],updatePurchaseMeta:[['purchases','edit']],receivePurchase:[['purchases','edit'],['warehouse','edit']],returnPurchaseToSupplier:[['purchases','edit'],['warehouse','edit']],advanceSubcontract:[['purchases','edit']],correctSubcontractServiceCost:[['purchases','edit']],cancelSubcontract:[['purchases','edit']],
+  recordSupplierPayment:[['purchases','approve'],['costs','edit']],adjustSupplierBalance:[['purchases','approve'],['costs','edit']],
   // Draft lines are purchasing work; an inspection decision and the write-off of rejected goods are quality decisions.
   updatePurchaseDraft:[['purchases','edit']],inspectReceipt:[['quality','edit']],scrapRejectedReceipt:[['quality','edit']],
   // Supplier replacement (audit #27): asking / closing is purchasing work; receiving moves stock too.
@@ -124,7 +130,7 @@ export function entityRules(key:EntityKeyName,action:PermissionAction):Rules{
 /* ------------------------------------------- escalation and lock-out guards -- */
 
 /** Non-archived employees holding the Super Admin role (the domain-level count; accounts add their own status on top). */
-export const superAdminEmployees=(s:S,except?:string)=>s.employees.filter(e=>e.id!==except&&e.status!=='Arxiv'&&isSuperAdminRole(s.roles.find(r=>r.id===e.roleId)))
+export const superAdminEmployees=(s:S,except?:string)=>s.employees.filter(e=>e.id!==except&&e.status!=='Arxiv'&&isOwnerRole(s.roles.find(r=>r.id===e.roleId)))
 
 /**
  * Whether `actor` may switch one permission of a role (A-C1). A user never edits their own role, never touches
@@ -133,7 +139,10 @@ export const superAdminEmployees=(s:S,except?:string)=>s.employees.filter(e=>e.i
 export function rolePermissionBlocker(s:S,actor:Employee|undefined,roleId:string,module:string,action:PermissionAction):string|null{
   const role=s.roles.find(r=>r.id===roleId)
   if(!role)return 'Rol topilmadi'
+  if(!PERMISSION_MODULES.some(m=>m.key===module&&m.actions.includes(action)))return 'Kompaniya roli uchun bunday ruxsat mavjud emas'
+  if(module==='subscription'&&action==='edit')return 'Obunani boshqarish huquqi faqat biznes egasiga tegishli'
   const mine=roleOf(s,actor?.id)
+  if(mine?.scope!=='all'&&(role.system||s.employees.some(e=>e.roleId===roleId)))return 'Doirasi cheklangan menejer umumiy yoki ishlatilayotgan rolni o‘zgartira olmaydi'
   if(isSuperAdminRole(role))return 'Super Admin roli barcha huquqlarga ega va tahrirlanmaydi'
   if(mine&&mine.id===role.id)return 'O‘z rolingiz ruxsatlarini o‘zgartira olmaysiz — buni yuqoriroq darajadagi administrator qiladi'
   if(!isSuperAdminRole(mine)&&roleRank(role)>=roleRank(mine))return `${role.name} roli sizning darajangizda yoki undan yuqori — faqat Super Admin tahrirlaydi`
@@ -146,6 +155,7 @@ export function roleManageBlocker(s:S,actor:Employee|undefined,roleId:string):st
   const role=s.roles.find(r=>r.id===roleId)
   if(!role)return 'Rol topilmadi'
   const mine=roleOf(s,actor?.id)
+  if(mine?.scope!=='all'&&(role.system||s.employees.some(e=>e.roleId===roleId)))return 'Doirasi cheklangan menejer umumiy yoki ishlatilayotgan rolni o‘zgartira olmaydi'
   if(isSuperAdminRole(role))return 'Super Admin roli o‘zgartirilmaydi'
   if(mine?.id===role.id)return 'O‘z rolingizni o‘zgartira olmaysiz'
   if(!isSuperAdminRole(mine)&&roleRank(role)>=roleRank(mine))return `${role.name} roli sizning darajangizda yoki undan yuqori`
@@ -157,12 +167,17 @@ export function assignRoleBlocker(s:S,actor:Employee|undefined,target:Employee|u
   const role=s.roles.find(r=>r.id===roleId)
   if(!role)return 'Rol topilmadi'
   const mine=roleOf(s,actor?.id),superActor=isSuperAdminRole(mine)
+  if(isSuperAdminRole(role))return 'Platform Super Admin roli kompaniya ichida berilmaydi'
+  if(!scopeMayDelegate(mine?.scope,role.scope))return 'Bu rol doirasi sizning vakolatingizdan keng'
   if(target&&actor&&target.id===actor.id&&target.roleId!==roleId)return 'O‘z rolingizni o‘zgartira olmaysiz'
   if(!superActor&&roleRank(role)>=roleRank(mine))return `${role.name} rolini faqat Super Admin bera oladi`
   if(target){
     const current=s.roles.find(r=>r.id===target.roleId)
     if(!superActor&&roleRank(current)>=roleRank(mine)&&target.roleId!==roleId)return `${target.name} sizning darajangizda yoki undan yuqori — rolini faqat Super Admin o‘zgartiradi`
-    if(isSuperAdminRole(current)&&!isSuperAdminRole(role)&&!superAdminEmployees(s,target.id).length)return 'Oxirgi faol Super Admin rolini o‘zgartirib bo‘lmaydi'
+    if(isOwnerRole(current)&&!isOwnerRole(role)&&!superAdminEmployees(s,target.id).length)return 'Oxirgi faol biznes egasi rolini o‘zgartirib bo‘lmaydi'
+  }
+  for(const [module,permissions] of Object.entries(role.permissions))for(const [action,enabled] of Object.entries(permissions)){
+    if(enabled&&!hasPermission(mine,module,action as PermissionAction))return `Sizda “${module}.${action}” huquqi yo‘q`
   }
   return null
 }
@@ -174,18 +189,37 @@ export function employeeRemovalBlocker(s:S,actor:Employee|undefined,targetId:str
   if(actor&&target.id===actor.id)return 'O‘zingizni bloklay yoki o‘chira olmaysiz'
   const mine=roleOf(s,actor?.id),theirs=s.roles.find(r=>r.id===target.roleId)
   if(!isSuperAdminRole(mine)&&roleRank(theirs)>=roleRank(mine))return `${target.name} sizning darajangizda yoki undan yuqori — faqat Super Admin boshqaradi`
-  if(isSuperAdminRole(theirs)&&!superAdminEmployees(s,target.id).length)return 'Oxirgi faol Super Admin’ni bloklash yoki o‘chirish mumkin emas'
+  if(isOwnerRole(theirs)&&!superAdminEmployees(s,target.id).length)return 'Oxirgi faol biznes egasini bloklash yoki o‘chirish mumkin emas'
   return null
 }
 
 /** Rules for a generic employee write: role and blocking changes are user administration, not HR data. */
 export function employeeWriteBlocker(s:S,actor:Employee|undefined,row:Record<string,unknown>,before?:Employee):string|null{
+  const mine=roleOf(s,actor?.id)
+  if(!hasPermission(mine,'employees',before?'edit':'create'))return 'Xodimni boshqarish huquqi yo‘q'
+  if(!before&&!hasPermission(mine,'users','create'))return 'Akkaunt yaratish huquqi yo‘q'
+  if(before&&row.roleId!==before.roleId&&!hasPermission(mine,'users','edit'))return 'Rolni o‘zgartirish huquqi yo‘q'
+  if(before&&row.status==='Arxiv'&&before.status!=='Arxiv'&&!hasPermission(mine,'users','edit'))return 'Xodimni arxivlash huquqi yo‘q'
+  const scope=scopeBlocker(s,actor,before?'updateEntity':'createEntity',before?['employees',before.id,row]:['employees',row])
+  if(scope)return scope
   const roleId=String(row.roleId||'')
+  const assigned=roleId?s.roles.find(r=>r.id===roleId):undefined
+  const branchId=typeof row.branchId==='string'?row.branchId:''
+  const branchIds=Array.isArray(row.branchIds)?row.branchIds:[]
+  if(branchIds.some(id=>typeof id!=='string'||!s.branches.some(b=>b.id===id&&b.status!=='Arxiv')))return 'Xodimning filiallar ro‘yxatida noma’lum yoki arxivlangan filial bor'
+  if(branchId&&!s.branches.some(b=>b.id===branchId&&b.status!=='Arxiv'))return 'Xodim filiali topilmadi'
+  const wc=s.workCenters.find(w=>w.id===row.workCenterId),wh=s.warehouses.find(w=>w.id===row.warehouseId)
+  const sites=new Set([branchId,...branchIds,wc?.branchId,wh?.branchId].filter(Boolean))
+  if(branchIds.length&&branchId&&!branchIds.includes(branchId))return 'Asosiy filial biriktirilgan filiallar ro‘yxatida bo‘lsin'
+  if(branchIds.length&&[wc?.branchId,wh?.branchId].some(id=>id&&!branchIds.includes(id)))return 'Ish markazi va ombor xodimning filiallaridan bo‘lsin'
+  if(assigned?.scope==='workcenter'&&!wc)return 'Bu rol uchun ish markazini tanlang'
+  if(assigned?.scope==='warehouse'&&!wh)return 'Bu rol uchun omborni tanlang'
+  if(assigned&&assigned.scope!=='all'&&!sites.size)return 'Bu rol uchun filial, ish markazi yoki omborni tanlang'
   if(!before)return roleId?assignRoleBlocker(s,actor,undefined,roleId):null
   if(roleId&&roleId!==before.roleId){const b=assignRoleBlocker(s,actor,before,roleId);if(b)return b}
   if(row.status==='Arxiv'&&before.status!=='Arxiv'){const b=employeeRemovalBlocker(s,actor,before.id);if(b)return b}
   // Editing another person's record at or above your own rank is user administration too.
-  const mine=roleOf(s,actor?.id),theirs=s.roles.find(r=>r.id===before.roleId)
+  const theirs=s.roles.find(r=>r.id===before.roleId)
   if(actor&&before.id!==actor.id&&!isSuperAdminRole(mine)&&roleRank(theirs)>=roleRank(mine))return `${before.name} sizning darajangizda yoki undan yuqori — faqat Super Admin tahrirlaydi`
   return null
 }
@@ -193,6 +227,8 @@ export function employeeWriteBlocker(s:S,actor:Employee|undefined,row:Record<str
 /* -------------------------------------------------------------- scope (A-H6) -- */
 
 type ScopeTargets={workCenters:string[];warehouses:string[];branches:string[]}
+/** Legacy subcontract drafts had no store; their output was tied to the default line's finished store. */
+const subcontractWarehouse=(s:S,o:S['subcontractOrders'][number])=>o.warehouseId||s.warehouses.find(w=>w.branchId===s.productionLines.find(l=>l.id===s.settings.defaultLineId)?.branchId&&w.status==='Faol'&&(w.type==='Finished'||w.type==='Mixed'))?.id||''
 
 /** Where the units of a return sit: its receiving warehouse, else the warehouses its sales order shipped from. */
 function returnWarehouses(s:S,returnId:unknown){
@@ -217,7 +253,8 @@ export function scopeTargets(s:S,name:string,args:unknown[]):ScopeTargets{
   const addLine=(lineId:unknown)=>{const line=s.productionLines.find(l=>l.id===lineId);if(line)t.branches.push(line.branchId)}
   switch(name){
     case 'reportOutput':case 'recordScrap':case 'recordMaterialScan':case 'transitionProduction':case 'issueExtraMaterial':
-    case 'shortCloseProduction':case 'splitProduction':case 'createBackorder':case 'checkAvailability':case 'createReworkOrder':case 'rescheduleProductionOrder':case 'refreshMaterialReservation':addOrder(order(args[0]));break
+    case 'shortCloseProduction':case 'splitProduction':case 'createBackorder':case 'checkAvailability':case 'createReworkOrder':case 'reconcileReworkOwnership':case 'rescheduleProductionOrder':case 'refreshMaterialReservation':addOrder(order(args[0]));break
+    case 'returnUnusedMaterial':{const o=order(args[0]);addOrder(o);const issue=o?.consumed.find(c=>c.id===args[1]);if(issue?.warehouseId)t.warehouses.push(issue.warehouseId);break}
     case 'confirmMrpSuggestion':{
       // A suggestion becomes a document at its planning site (key …@branch, audit #16); older keys mean the default site.
       const site=String(args[0]).split('@')[1]
@@ -245,6 +282,7 @@ export function scopeTargets(s:S,name:string,args:unknown[]):ScopeTargets{
       break
     }
     case 'updatePurchaseDraft':{addPo(args[0]);const p=args[1] as {warehouseId?:string}|undefined;if(p?.warehouseId)t.warehouses.push(p.warehouseId);break}
+    case 'recordSupplierPayment':{const p=args[0] as {purchaseOrderId?:string}|undefined;if(p?.purchaseOrderId)addPo(p.purchaseOrderId);break}
     case 'requestSupplierReplacement':{const p=args[0] as {qualityCheckId?:string}|undefined;const q=s.qualityChecks.find(x=>x.id===p?.qualityCheckId),po=s.purchaseOrders.find(x=>x.id===q?.sourceId);const wh=po?.receipts.find(r=>r.id===q?.receiptId)?.warehouseId||po?.warehouseId;if(wh)t.warehouses.push(wh);break}
     case 'receiveSupplierReplacement':case 'closeSupplierReplacement':{
       const rep=(s.supplierReplacements||[]).find(x=>x.id===args[0]),po=s.purchaseOrders.find(x=>x.id===rep?.purchaseOrderId)
@@ -271,7 +309,7 @@ export function scopeTargets(s:S,name:string,args:unknown[]):ScopeTargets{
     // Every change of a sales order is bound to where it sits (reservations, shipments, its MOs) — audit #6.
     case 'cancelSalesOrder':case 'reserveSalesOrder':case 'updateSalesMeta':addSo(args[0]);break
     case 'createQualityAlert':{const p=args[0] as {sourceId?:string}|undefined;addOrder(order(p?.sourceId));break}
-    case 'advanceSubcontract':{const sc=s.subcontractOrders.find(x=>x.id===args[0]);if(sc?.warehouseId)t.warehouses.push(sc.warehouseId);break}
+    case 'advanceSubcontract':case 'correctSubcontractServiceCost':case 'cancelSubcontract':{const sc=s.subcontractOrders.find(x=>x.id===args[0]);if(sc)t.warehouses.push(subcontractWarehouse(s,sc));break}
     case 'createEntity':case 'updateEntity':case 'deleteEntity':case 'duplicateEntity':{
       // Location-bound master data: a branch-scoped role manages only its own branch's sites (P1-2).
       const key=String(args[0]),id=args[1],patch=(name==='createEntity'?args[1]:args[2]) as Record<string,unknown>|undefined
@@ -281,6 +319,26 @@ export function scopeTargets(s:S,name:string,args:unknown[]):ScopeTargets{
       if(key==='workCenters'){t.branches.push(...field('branchId'));if(row)t.workCenters.push(String(row.id))}
       if(key==='warehouses'&&row)t.warehouses.push(String(row.id))
       if(key==='equipment')t.workCenters.push(...field('workCenterId'))
+      if(key==='expenses'){
+        const expense={...(row||{}),...(patch||{})} as unknown as S['expenses'][number]
+        const sites=expenseBranchIds(s,expense)
+        t.branches.push(...(sites.length?sites:expense.sourceId==='manual'?[s.settings.defaultBranchId]:['__unknown_expense_site__']))
+        t.branches.push(...field('branchId'))
+      }
+      if(key==='subcontractOrders'){
+        for(const id of field('warehouseId'))t.warehouses.push(id)
+        if(!field('warehouseId').length)t.warehouses.push(subcontractWarehouse(s,(row||patch) as unknown as S['subcontractOrders'][number]))
+      }
+      if(key==='employees'){
+        t.workCenters.push(...field('workCenterId'))
+        t.warehouses.push(...field('warehouseId'))
+        t.branches.push(...field('branchId'))
+        for(const source of [row?.branchIds,patch?.branchIds])if(Array.isArray(source))t.branches.push(...source.filter((id):id is string=>typeof id==='string'))
+        if(name==='deleteEntity'||name==='duplicateEntity'){
+          if(row?.workCenterId)t.workCenters.push(String(row.workCenterId))
+          if(row?.warehouseId)t.warehouses.push(String(row.warehouseId))
+        }
+      }
       if(['maintenanceOrders','maintenanceRequests','repairOrders'].includes(key))for(const eq of field('equipmentId')){const e=s.equipment.find(x=>x.id===eq);if(e)t.workCenters.push(e.workCenterId)}
       break
     }
@@ -337,7 +395,8 @@ export function stockScope(s:S,actor:Employee|undefined):Set<string>|null{
   if(!actor||!role||isSuperAdminRole(role)||!role.scope||role.scope==='all')return null
   const home=homeOf(s,actor)
   if(role.scope==='warehouse'&&home.warehouse)return new Set([home.warehouse.id])
-  return new Set(home.branchId?s.warehouses.filter(w=>w.branchId===home.branchId).map(w=>w.id):[])
+  const branches=new Set(employeeBranchIds(s,actor))
+  return new Set(s.warehouses.filter(w=>branches.has(w.branchId)).map(w=>w.id))
 }
 
 /** Where a sales order sits: the stores it reserves in, the stores it shipped from and its MOs' output stores. */
@@ -361,12 +420,13 @@ export function scopeBlocker(s:S,actor:Employee|undefined,name:string,args:unkno
   const t=scopeTargets(s,name,args)
   if(!t.workCenters.length&&!t.warehouses.length&&!t.branches.length)return null
   const home=homeOf(s,actor)
-  if(!home.branchId)return `“${role.name}” roli joy bilan cheklangan, lekin sizga ish markazi yoki ombor biriktirilmagan — administratorga murojaat qiling`
+  const branches=new Set(employeeBranchIds(s,actor))
+  if(!branches.size)return `“${role.name}” roli joy bilan cheklangan, lekin sizga filial, ish markazi yoki ombor biriktirilmagan — administratorga murojaat qiling`
   // An id that matches no site has no branch to compare: a scoped role may not act on it (audit #3).
   const unknown=[...t.warehouses.filter(id=>id&&!s.warehouses.some(w=>w.id===id)),...t.workCenters.filter(id=>id&&!s.workCenters.some(w=>w.id===id))]
   if(unknown.length)return `Noma’lum ombor yoki ish markazi (${[...new Set(unknown)].join(', ')}) — “${role.name}” roli joy bilan cheklangan`
   const centerName=(id:string)=>s.workCenters.find(w=>w.id===id)?.name||id
-  if(role.scope==='workcenter'&&home.workCenter&&t.workCenters.length&&!t.workCenters.includes(home.workCenter.id))
+  if(role.scope==='workcenter'&&home.workCenter&&t.workCenters.some(id=>id!==home.workCenter!.id))
     return `Bu ish ${[...new Set(t.workCenters)].map(centerName).join(', ')} ish markaziga tegishli — siz faqat ${home.workCenter.name}da ishlaysiz`
   // A "warehouse" role tied to one warehouse moves stock only there (P1-2).
   if(role.scope==='warehouse'&&home.warehouse){
@@ -374,7 +434,7 @@ export function scopeBlocker(s:S,actor:Employee|undefined,name:string,args:unkno
     if(other.length)return `Bu amal ${other.map(id=>s.warehouses.find(w=>w.id===id)?.name||id).join(', ')} omboriga tegishli — siz faqat ${home.warehouse.name} omborida ishlaysiz`
   }
   const branchOf=(kind:'wc'|'wh',id:string)=>kind==='wc'?s.workCenters.find(w=>w.id===id)?.branchId:s.warehouses.find(w=>w.id===id)?.branchId
-  const foreign=[...t.workCenters.map(id=>branchOf('wc',id)),...t.warehouses.map(id=>branchOf('wh',id)),...t.branches].filter((b):b is string=>Boolean(b)&&b!==home.branchId)
+  const foreign=[...t.workCenters.map(id=>branchOf('wc',id)),...t.warehouses.map(id=>branchOf('wh',id)),...t.branches].filter((b):b is string=>typeof b==='string'&&Boolean(b)&&!branches.has(b))
   if(foreign.length){
     const mine=s.branches.find(b=>b.id===home.branchId)?.name||home.branchId
     return `Bu amal boshqa filialga tegishli — “${role.name}” roli faqat ${mine} filialida ishlaydi`
@@ -397,7 +457,7 @@ export function operatorScopeBlocker(s:S,employee:Employee|undefined,workCenterI
   if(!center)return 'Work center topilmadi'
   const home=homeOf(s,employee)
   if(role.scope==='workcenter'&&home.workCenter?.id!==center.id)return `${employee.name} faqat ${home.workCenter?.name||'o‘z ish markazida'} ishlaydi — ${center.name} uning doirasida emas`
-  if(home.branchId!==center.branchId)return `${employee.name} boshqa filialga biriktirilgan — ${center.name} uning doirasida emas`
+  if(!employeeBranchIds(s,employee).includes(center.branchId))return `${employee.name} boshqa filialga biriktirilgan — ${center.name} uning doirasida emas`
   return null
 }
 
@@ -405,7 +465,26 @@ export function operatorScopeBlocker(s:S,employee:Employee|undefined,workCenterI
 export function homeOf(s:S,actor:Employee){
   const workCenter=s.workCenters.find(w=>w.id===actor.workCenterId)
   const warehouse=actor.warehouseId?s.warehouses.find(w=>w.id===actor.warehouseId):undefined
-  return {workCenter,warehouse,branchId:warehouse?.branchId||workCenter?.branchId}
+  return {workCenter,warehouse,branchId:actor.branchId||warehouse?.branchId||workCenter?.branchId||actor.branchIds?.[0]}
+}
+
+/** Legacy profiles use their assigned site; a multi-branch profile lists every explicitly delegated branch. */
+export function employeeBranchIds(s:S,employee:Employee):string[]{
+  const home=homeOf(s,employee)
+  return [...new Set((employee.branchIds?.length?employee.branchIds:[employee.branchId,home.warehouse?.branchId,home.workCenter?.branchId]).filter((id):id is string=>Boolean(id)&&s.branches.some(b=>b.id===id&&b.status!=='Arxiv')))]
+}
+
+/** Financial rows without a provable site remain company-wide, never visible to a scoped role. */
+function expenseBranchIds(s:S,expense:S['expenses'][number]):string[]{
+  const id=expense.sourceId
+  const wh=s.warehouses.find(x=>x.id===id),wc=s.workCenters.find(x=>x.id===id),line=s.productionLines.find(x=>x.id===id)
+  const equipment=s.equipment.find(x=>x.id===id)
+  const mo=s.productionOrders.find(x=>x.id===id),po=s.purchaseOrders.find(x=>x.id===id),sub=s.subcontractOrders.find(x=>x.id===id)
+  const so=s.salesOrders.find(x=>x.id===id)
+  const maintenance=s.maintenanceOrders.find(x=>x.id===id)
+  const equipCenter=s.workCenters.find(x=>x.id===(equipment?.workCenterId||s.equipment.find(e=>e.id===maintenance?.equipmentId)?.workCenterId))
+  const sites=so?salesOrderSites(s,so).map(site=>s.warehouses.find(w=>w.id===site)?.branchId):[]
+  return [...new Set([expense.branchId,s.branches.find(b=>b.id===id)?.id,wh?.branchId,wc?.branchId,line?.branchId,equipCenter?.branchId,s.warehouses.find(w=>w.id===(mo?.warehouseId||po?.warehouseId||sub?.warehouseId))?.branchId,so?.branchId,...sites].filter((v):v is string=>Boolean(v)))]
 }
 
 /**
@@ -423,8 +502,9 @@ export function scopedView(s:S,actor:Employee|undefined):S{
   const role=roleOf(s,actor?.id)
   if(!actor||!role||isSuperAdminRole(role)||!role.scope||role.scope==='all')return s
   const home=homeOf(s,actor)
-  const branchWarehouses=new Set(s.warehouses.filter(w=>w.branchId===home.branchId).map(w=>w.id))
-  const branchCenters=new Set(s.workCenters.filter(w=>w.branchId===home.branchId).map(w=>w.id))
+  const branches=new Set(employeeBranchIds(s,actor))
+  const branchWarehouses=new Set(s.warehouses.filter(w=>branches.has(w.branchId)).map(w=>w.id))
+  const branchCenters=new Set(s.workCenters.filter(w=>branches.has(w.branchId)).map(w=>w.id))
   const stockWarehouses=role.scope==='warehouse'&&home.warehouse?new Set([home.warehouse.id]):branchWarehouses
   const centers=role.scope==='workcenter'&&home.workCenter?new Set([home.workCenter.id]):branchCenters
   const orderVisible=(o:S['productionOrders'][number])=>role.scope==='workcenter'
@@ -441,7 +521,7 @@ export function scopedView(s:S,actor:Employee|undefined):S{
   const salesIds=new Set(salesOrders.map(o=>o.id))
   const returns=s.returns.filter(r=>r.warehouseId?branchWarehouses.has(r.warehouseId):salesIds.has(r.salesOrderId))
   const returnIds=new Set(returns.map(r=>r.id))
-  const subcontractOrders=s.subcontractOrders.filter(o=>!o.warehouseId||branchWarehouses.has(o.warehouseId))
+  const subcontractOrders=s.subcontractOrders.filter(o=>branchWarehouses.has(subcontractWarehouse(s,o)))
   const subcontractIds=new Set(subcontractOrders.map(o=>o.id))
   const qualityChecks=s.qualityChecks.filter(q=>q.sourceType==='production'?orderIds.has(q.sourceId):q.sourceType==='purchase'?purchaseIds.has(q.sourceId):q.sourceType==='return'?returnIds.has(q.sourceId):subcontractIds.has(q.sourceId))
   const stockMovements=s.stockMovements.filter(m=>stockWarehouses.has(m.warehouseId))
@@ -460,12 +540,28 @@ export function scopedView(s:S,actor:Employee|undefined):S{
   const linkedId=(path?:string)=>/[?&]id=([^&]+)/.exec(path||'')?.[1]
   const qualityAlerts=s.qualityAlerts.filter(a=>!hiddenIds.has(a.sourceId))
   hide(s.qualityAlerts,new Set(qualityAlerts.map(a=>a.id)))
+  const employees=s.employees.filter(e=>role.scope==='warehouse'?Boolean(home.warehouse&&e.warehouseId===home.warehouse.id):role.scope==='workcenter'?Boolean(home.workCenter&&e.workCenterId===home.workCenter.id):employeeBranchIds(s,e).some(id=>branches.has(id)))
+  const employeeIds=new Set(employees.map(e=>e.id))
+  const visibleCustomers=new Set(salesOrders.map(o=>o.customerId))
+  const visibleSuppliers=new Set(purchaseOrders.map(o=>o.supplierId))
+  const receivables=(s.receivables||[]).filter(e=>Boolean(e.salesOrderId&&salesIds.has(e.salesOrderId)))
+  const payables=(s.payables||[]).filter(e=>Boolean(e.purchaseOrderId&&purchaseIds.has(e.purchaseOrderId)))
+  const scopedBalance=(entries:{amount:number}[])=>Math.round(entries.reduce((sum,e)=>sum+e.amount,0)*100)/100
   return {...s,
+    branches:s.branches.filter(b=>branches.has(b.id)),
+    warehouses:s.warehouses.filter(w=>stockWarehouses.has(w.id)),
+    workCenters:s.workCenters.filter(w=>centers.has(w.id)),
+    productionLines:s.productionLines.filter(l=>branches.has(l.branchId)),
+    employees,
+    customers:s.customers.filter(c=>visibleCustomers.has(c.id)).map(c=>({...c,debt:scopedBalance(receivables.filter(e=>e.customerId===c.id))})),
+    suppliers:s.suppliers.filter(p=>visibleSuppliers.has(p.id)).map(p=>({...p,debt:scopedBalance(payables.filter(e=>e.supplierId===p.id))})),
     productionOrders,
     stockBalances:s.stockBalances.filter(b=>stockWarehouses.has(b.warehouseId)),
     stockMovements,
     lots:s.lots.filter(l=>stockWarehouses.has(l.warehouseId)),
     purchaseOrders,
+    payables,
+    receivables,
     salesOrders,
     timeLogs:s.timeLogs.filter(l=>orderIds.has(l.orderId)),
     downtimeEvents:s.downtimeEvents.filter(d=>centers.has(d.workCenterId)),
@@ -477,13 +573,13 @@ export function scopedView(s:S,actor:Employee|undefined):S{
     qualityAlerts,
     subcontractOrders,
     returns,
-    expenses:s.expenses.filter(e=>!hiddenIds.has(e.sourceId)),
+    expenses:s.expenses.filter(e=>{const sites=expenseBranchIds(s,e);return sites.length>0&&sites.every(id=>branches.has(id))&&!hiddenIds.has(e.sourceId)}),
     attachments:s.attachments.filter(a=>!hiddenIds.has(a.entityId)),
     // A notification of another site's event stays with that site (audit #27).
-    notifications:s.notifications.filter(n=>{const id=linkedId(n.path);return (!n.branchId||n.branchId===home.branchId)&&(!id||!hiddenIds.has(id))}),
+    notifications:s.notifications.filter(n=>{const id=linkedId(n.path);return (!n.branchId||branches.has(n.branchId))&&(!id||!hiddenIds.has(id))}),
     supplierReplacements:(s.supplierReplacements||[]).filter(r=>purchaseIds.has(r.purchaseOrderId)),
     receivableReconciliations:(s.receivableReconciliations||[]).filter(r=>salesIds.has(r.salesOrderId)),
-    activity:s.activity.filter(a=>!a.source||!hiddenCodes.has(a.source)),
+    activity:s.activity.filter(a=>(!a.userId||employeeIds.has(a.userId))&&(!a.source||!hiddenCodes.has(a.source))),
   }
 }
 
@@ -498,8 +594,9 @@ const viewExport=():Grant=>grant(['view','export'])
 
 /** The eight system roles. Ids of the five that existed before are kept, so employees stay attached to them. */
 export const SYSTEM_ROLES:Array<{id:string;key:SystemRoleKey;name:string;scope:Role['scope'];description:string;permissions:PermissionMap}>=[
-  {id:'role0',key:'super_admin',name:'Super Admin',scope:'all',description:'Tizim egasi: barcha huquqlar, administratorlarni boshqaradi. Tahrirlanmaydi.',permissions:Object.fromEntries(MODULE_KEYS.map(m=>[m,full(m)]))},
-  {id:'role1',key:'admin',name:'Admin / Direktor',scope:'all',description:'Korxona rahbari: barcha modullar, foydalanuvchi va rollarni (o‘zidan past darajada) boshqaradi.',permissions:Object.fromEntries(MODULE_KEYS.map(m=>[m,full(m)]))},
+  {id:'role0',key:'super_admin',name:'Eski Super Admin',scope:'all',description:'Faqat eski ma’lumotlarni o‘qish uchun saqlangan rol. Yangi tayinlash taqiqlangan; platforma identifikatori emas.',permissions:Object.fromEntries(MODULE_KEYS.map(m=>[m,full(m)]))},
+  {id:'role_owner',key:'business_owner',name:'Biznes egasi',scope:'all',description:'Kompaniya egasi: operatsiyalar, xodimlar va obunani boshqaradi. Platforma huquqlari yo‘q.',permissions:Object.fromEntries(MODULE_KEYS.map(m=>[m,full(m)]))},
+  {id:'role1',key:'admin',name:'Admin / Direktor',scope:'all',description:'Korxona rahbari: barcha modullar, foydalanuvchi va rollarni (o‘zidan past darajada) boshqaradi.',permissions:{...Object.fromEntries(MODULE_KEYS.map(m=>[m,full(m)])),subscription:view()}},
   {id:'role2',key:'production_manager',name:'Ishlab chiqarish menejeri',scope:'branch',description:'Rejalashtirish, MO, BOM, material va sex nazorati.',permissions:{
     production:full('production'),products:full('products'),materials:full('materials'),warehouse:grant(['view','edit','export']),quality:grant(['view','create','export']),
     equipment:grant(['view','create','edit','export']),purchases:grant(['view','create','export']),sales:viewExport(),employees:view(),costs:viewExport(),reports:viewExport(),ai:view()}},

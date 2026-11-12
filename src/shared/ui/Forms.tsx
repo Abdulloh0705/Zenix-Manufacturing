@@ -115,6 +115,19 @@ export function Select({value,onChange,children,className='',placeholder='Tanlan
 /* ------------------------------------------------------------------ forms -- */
 
 type Errors<T>=Partial<Record<keyof T,string>>
+/** Mounted forms with unsaved values; used to preserve drafts during a session change in another tab. */
+const dirtyForms=new Set<symbol>()
+export const hasDirtyForms=()=>dirtyForms.size>0
+/** For editors with existing custom state that cannot use useForm. */
+export function useDirtyMarker(dirty:boolean){
+  const formId=useRef(Symbol('form'))
+  useEffect(()=>{
+    const id=formId.current
+    if(dirty)dirtyForms.add(id)
+    else dirtyForms.delete(id)
+    return()=>{dirtyForms.delete(id)}
+  },[dirty])
+}
 /** After a failed submit, move focus to the first field showing an error (in the top-most dialog, if any). */
 export function focusFirstInvalid(){
   const schedule=typeof requestAnimationFrame==='function'?requestAnimationFrame:(fn:()=>void)=>setTimeout(fn,0)
@@ -155,6 +168,7 @@ export function useForm<T extends Record<string,unknown>>(initial:T|(()=>T),vali
   const touch=(key:keyof T)=>setTouched(t=>t[key]?t:{...t,[key]:true})
   const error=(key:keyof T)=>submitted||touched[key]?errors[key]:undefined
   const dirty=JSON.stringify(values)!==JSON.stringify(initialRef.current)
+  useDirtyMarker(dirty)
   const reset=(next?:T)=>{if(next)initialRef.current=next;setValues(initialRef.current);setTouched({});setSubmitted(false)}
   const submit=(fn:(values:T)=>boolean|void)=>{
     setSubmitted(true)

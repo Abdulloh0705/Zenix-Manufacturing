@@ -3,7 +3,7 @@ import type {DragEvent} from 'react'
 import {useNavigate,useSearchParams} from 'react-router-dom'
 import {useApp} from '../../../app/providers/AppProvider/AppContext'
 import {unbuildPreview} from '../../../domain/actions'
-import {Card,Checkbox,Confirm,Empty,Field,FilterSelect,Icon,InfoGrid,Input,KPI,Modal,MoreFilters,PageHeader,Progress,ResourceTable,Segmented,Select,StatusBadge,positive,useForm,useRecordParam,useSearchParamState} from '../../../shared/ui'
+import {Card,Checkbox,Confirm,Empty,Field,FilterSelect,Icon,InfoGrid,Input,KPI,Modal,MoreFilters,PageHeader,Progress,ResourceTable,Segmented,Select,StatusBadge,positive,useDirtyMarker,useForm,useRecordParam,useSearchParamState} from '../../../shared/ui'
 import type {DowntimeReason,ProductionOrder} from '../../../types'
 import {calculateCapacityLoads,createMpsRows,createMrpPlan,deliveryRisk,isOpenOrder,issuedQty,itemName,jobCard,mpsCapacityByWeek,operationQueues,orderBlocker,plannedIssue,remainingQty,stockOf,weeklyProductionPlan} from '../../../domain/manufacturingEngine'
 import {runMrp,scheduleOperations} from '../../../domain/planning'
@@ -14,7 +14,7 @@ import {cls,money,num,qty} from '../../../utils/format'
 import {employeeName,itemUnitOf,materialName,productName,supplierName,useNow,workCenterCode,workCenterName} from '../../common/lookups'
 import {BLOCKER_LABEL,OPEN_STATUSES,OperationOutputModal,OrderDrawer,OrderFormModal,OutputModal,PRIORITIES,ScrapModal,WorkOrderList,liveMinutes} from '../components/OrderParts'
 import {Overview} from './Overview'
-import {PurchasePlanModal,SourcingModal} from '../../purchases/components/Sourcing'
+import {SourcingModal} from '../../purchases/components/Sourcing'
 import type {SourcingNeed} from '../../purchases/components/Sourcing'
 
 type Open=(id:string)=>void
@@ -181,6 +181,7 @@ function ForecastInput({productId,period,value}:{productId:string;period:string;
   const app=useApp()
   const [draft,setDraft]=useState(String(value))
   const [editing,setEditing]=useState(false)
+  useDirtyMarker(editing&&draft!==String(value))
   const commit=()=>{setEditing(false);const n=Math.max(0,Math.round(Number(draft)||0));if(n!==value)app.setForecast(productId,period,n);setDraft(String(n))}
   if(!app.can('production','edit'))return <span>{num(value)}</span>
   return <input className="ui-input cell-input" type="number" min="0" aria-label={`Forecast ${period}`} value={editing?draft:String(value)} onFocus={()=>{setEditing(true);setDraft(String(value))}} onChange={e=>setDraft(e.target.value)} onBlur={commit} onKeyDown={e=>{if(e.key==='Enter')(e.target as HTMLInputElement).blur();if(e.key==='Escape'){setDraft(String(value));setEditing(false);(e.target as HTMLInputElement).blur()}}}/>
@@ -190,29 +191,25 @@ function ForecastInput({productId,period,value}:{productId:string;period:string;
 function MRP({open}:{open:Open}){
   const app=useApp(),s=app.state,navigate=useNavigate()
   const plan=createMrpPlan(s)
-  const buys=plan.purchases.filter(p=>p.suggested>0)
   const shortages=plan.purchases.filter(p=>p.shortage>0)
   const [short,setShort]=useSearchParamState('short')
   const purchases=short==='1'?shortages:plan.purchases
-  const [sourcing,setSourcing]=useState<SourcingNeed|null>(null),[planBuy,setPlanBuy]=useState(false)
+  const [sourcing,setSourcing]=useState<SourcingNeed|null>(null)
   const [horizon,setHorizon]=useSearchParamState('h','8w'),[site,setSite]=useSearchParamState('site')
   const options=horizon==='14d'?{bucket:'day' as const,horizonDays:14}:{bucket:'week' as const,horizonWeeks:Number(horizon.replace('w',''))||8}
   // Every branch is netted on its own stock, receipts and demand (audit #16); the filter only narrows what is shown.
   const phased=useMemo(()=>runMrp(s,{...(horizon==='14d'?{bucket:'day' as const,horizonDays:14}:{bucket:'week' as const,horizonWeeks:Number(horizon.replace('w',''))||8}),branchId:site||undefined}),[s,horizon,site])
   const makes=phased.suggestions.filter(x=>x.type==='make'),buysTp=phased.suggestions.filter(x=>x.type==='buy')
-  const needOf=(p:typeof buys[number]):SourcingNeed=>({materialId:p.materialId,need:p.suggested,needBy:p.needBy,source:'MRP'})
   const waiting=s.productionOrders.filter(o=>o.status==='Material kutilmoqda')
-  const canBuy=app.can('purchases','create')
   return <div className="page-stack">
-    <PageHeader title="MRP" subtitle="Ko‘p bosqichli netting: talab → rezerv → available → yo‘lda → yetishmovchilik → amal"
-      actions={buys.length>0&&canBuy?<button type="button" className="primary-glass-btn" onClick={()=>setPlanBuy(true)}><Icon name="cart"/>Xarid rejasi ({buys.length})</button>:undefined}/>
+    <PageHeader title="MRP" subtitle="Filial bo‘yicha talab → available → yo‘ldagi ta’minot → tavsiya"/>
     <div className="kpi-grid">
       <KPI label="Make tavsiyalari" value={makes.length} sub={`${buysTp.length} ta xarid · ${phased.periods.length} ${phased.bucket==='day'?'kun':'hafta'}`} tone="mfg" icon={<Icon name="factory"/>}/>
-      <KPI label="Yetishmovchilik" value={shortages.length} sub={`${buys.length} ta xarid tavsiyasi`} tone={shortages.length?'pink':'mint'} icon={<Icon name="warning"/>} onClick={()=>navigate('/materials?view=shortages')}/>
+      <KPI label="Filial yetishmovchiligi" value={buysTp.length} sub="filial bo‘yicha xarid tavsiyasi" tone={buysTp.length?'pink':'mint'} icon={<Icon name="warning"/>}/>
       <KPI label="Material kutayotgan MO" value={waiting.length} sub={waiting.map(o=>o.code).join(', ')||undefined} tone="orange" icon={<Icon name="clock"/>} onClick={()=>navigate('/production?view=orders&status=Material kutilmoqda')}/>
       <KPI label="Yo‘ldagi xarid" value={num(s.purchaseOrders.filter(p=>['Tasdiqlangan','Yo‘lda','Qisman qabul'].includes(p.status)).length)} tone="purple" icon={<Icon name="truck"/>} onClick={()=>navigate('/purchases?view=orders&status=Yo‘lda')}/>
     </div>
-    <Card className="flush" title="Xomashyo balansi (jami)" subtitle="talab + safety − available − yo‘lda · butun birlikka yaxlitlanadi · vaqt bo‘yicha emas" actions={<Segmented ariaLabel="Material filtri" items={[{value:'',label:'Barchasi',count:plan.purchases.length},{value:'1',label:'Yetishmaydi',count:shortages.length}]} value={short==='1'?'1':''} onChange={setShort}/>}>
+    <Card className="flush" title="Xomashyo balansi (jami, faqat ma’lumot)" subtitle="Filiallar jamlanmasi · bu jadval asosida xarid ochmang; amaliy tavsiyalar quyida filial bo‘yicha" actions={<Segmented ariaLabel="Material filtri" items={[{value:'',label:'Barchasi',count:plan.purchases.length},{value:'1',label:'Yetishmaydi',count:shortages.length}]} value={short==='1'?'1':''} onChange={setShort}/>}>
       {!purchases.length?<Empty compact icon="check" title="Material yetishmovchiligi yo‘q" text="Talab va safety stock available + yo‘ldagi xarid bilan qoplangan"/>:<div className="table-scroll"><table className="mrp-table"><thead><tr><th>Material</th><th className="align-right">Talab</th><th className="align-right">Rezerv</th><th className="align-right">Available</th><th className="align-right">Yo‘lda</th><th className="align-right">Safety</th><th className="align-right">Yetishmaydi</th><th className="align-right">Tavsiya</th><th>Supplier · kerak</th><th className="align-right">Amal</th></tr></thead><tbody>{purchases.map(p=>{const m=s.rawMaterials.find(x=>x.id===p.materialId)!,st=stockOf(s,p.materialId);return <tr key={p.materialId} className={p.shortage>0?'row-danger':p.suggested>0?'row-warning':undefined}>
         <td><div className="cell-main"><b>{m.name}</b><small>{m.sku} · {m.unit}</small></div></td>
         <td className="align-right">{num(p.required)}</td>
@@ -223,16 +220,15 @@ function MRP({open}:{open:Open}){
         <td className="align-right">{p.shortage>0?<b className="negative">{num(p.shortage)}</b>:<span className="muted">—</span>}</td>
         <td className="align-right">{p.suggested?<b>{qty(p.suggested,m.unit)}</b>:<StatusBadge tone="success">OK</StatusBadge>}</td>
         <td>{p.supplierId?supplierName(s,p.supplierId):p.supplierCount>1?<span className="warning-text">{p.supplierCount} ta — tanlang</span>:<span className="negative">Supplier yo‘q</span>}<small className="cell-sub">{p.needBy}</small></td>
-        <td className="align-right">{p.suggested>0&&<button type="button" className="soft-glass-btn compact" disabled={!canBuy} onClick={()=>setSourcing(needOf(p))}><Icon name="truck" size={14}/>Supplier</button>}</td>
+        <td className="align-right muted">—</td>
       </tr>})}</tbody></table></div>}
     </Card>
     <div className="filter-strip"><FilterSelect label="Filial (sayt)" value={site} onChange={setSite} options={s.branches.filter(b=>b.status!=='Arxiv').map(b=>({value:b.id,label:b.name}))}/><span className="soft-meta">Har filial o‘z ombori, kirimi va talabi bilan alohida rejalashtiriladi — boshqa filial qoldig‘i “mavjud” hisoblanmaydi</span></div>
-    <MrpSuggestions plan={phased} options={options} horizon={horizon} setHorizon={setHorizon} onSupplier={sug=>setSourcing({materialId:sug.itemId,need:sug.qty,needBy:sug.needDate,source:'MRP'})}/>
+    <MrpSuggestions plan={phased} options={options} horizon={horizon} setHorizon={setHorizon} onSupplier={sug=>setSourcing({materialId:sug.itemId,need:sug.qty,needBy:sug.needDate,warehouseId:s.warehouses.find(w=>w.branchId===sug.branchId&&w.status==='Faol'&&(w.type==='Raw'||w.type==='Mixed'))?.id,source:`MRP ${sug.branchId}`})}/>
     <MrpTransfers plan={phased}/>
     <TimePhasedGrid plan={phased}/>
     {waiting.length>0&&<Card title="Material kutayotgan buyurtmalar">{waiting.map(o=><button type="button" key={o.id} className="list-row is-clickable" onClick={()=>open(o.id)}><span className="list-row-copy"><b>{o.code} · {productName(s,o.productId)}</b><small>{num(o.quantity)} · due {o.due}</small></span><StatusBadge>{o.status}</StatusBadge><Icon name="chevron" size={13} className="list-row-chevron"/></button>)}</Card>}
     {sourcing&&<SourcingModal need={sourcing} onClose={()=>setSourcing(null)}/>}
-    {planBuy&&<PurchasePlanModal needs={buys.map(needOf)} title="MRP — xarid" onClose={()=>setPlanBuy(false)}/>}
   </div>
 }
 
@@ -398,7 +394,7 @@ function ShopFloor({open}:{open:Open}){
   const [selected,setSelected]=useSearchParamState('mo',active.find(o=>o.status==='Jarayonda')?.id||active[0]?.id||'')
   const [scan,setScan]=useState(''),[modal,setModal]=useState<'output'|'opOutput'|'scrap'|'stop'|null>(null)
   const o=s.productionOrders.find(x=>x.id===selected)&&active.some(x=>x.id===selected)?s.productionOrders.find(x=>x.id===selected)!:active[0]
-  if(!o)return <div className="page-stack"><PageHeader title="Shop Floor" subtitle="Operator ekrani"/><Card><Empty icon="factory" title="Faol buyurtma yo‘q" text="Tasdiqlangan yoki jarayondagi MO shu yerda ko‘rinadi"/></Card></div>
+  if(!o)return <div className="page-stack"><PageHeader title="Sex ishlari" subtitle="Operator ekrani"/><Card><Empty icon="factory" title="Faol buyurtma yo‘q" text="Tasdiqlangan yoki jarayondagi MO shu yerda ko‘rinadi"/></Card></div>
   const product=s.products.find(p=>p.id===o.productId)
   const current=o.workOrders.find(w=>w.status==='Jarayonda')||o.workOrders.find(w=>w.status==='Pauzada')||o.workOrders.find(w=>w.status==='Tayyor')||o.workOrders.find(w=>w.status==='Kutilmoqda'&&!w.dependsOn.length)
   const op=o.bomSnapshot.operations.find(x=>x.id===current?.operationId)
@@ -413,7 +409,7 @@ function ShopFloor({open}:{open:Open}){
   const submitScan=()=>{if(!scan.trim())return;app.recordMaterialScan(o.id,scan);setScan('')}
   return <div className="page-stack shop-floor">
     <div className="shop-floor-top">
-      <PageHeader title="Shop Floor" subtitle={<>Operator ekrani · <button type="button" className="link-btn" onClick={()=>open(o.id)}>{o.code}</button> · {product?.name}</>}/>
+      <PageHeader title="Sex ishlari" subtitle={<>Operator ekrani · <button type="button" className="link-btn" onClick={()=>open(o.id)}>{o.code}</button> · {product?.name}</>}/>
       <Select value={o.id} onChange={setSelected} ariaLabel="Buyurtma tanlash">{active.map(x=><option key={x.id} value={x.id}>{x.code} · {productName(s,x.productId)} · {x.status}</option>)}</Select>
     </div>
     <div className="shop-grid">

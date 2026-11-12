@@ -5,6 +5,7 @@ import {useApp} from '../../../app/providers/AppProvider/AppContext'
 import {Card,Empty,FilterSelect,Icon,InfoGrid,KPI,PageHeader,StatusBadge,useSearchParamState} from '../../../shared/ui'
 import type {ManufacturingState} from '../../../types'
 import {buildTraceability,calculateCapacityLoads,downtimeByReason,findTraceOrder,orderCosting,productionOee,stockOf,workCenterOee} from '../../../domain/manufacturingEngine'
+import {profitabilityByProduct} from '../../../domain/profitability'
 import {addDays,daysBetween,displayStamp,shortDate,todayISO} from '../../../utils/dates'
 import {compactMoney,money,num} from '../../../utils/format'
 import {exportRows} from '../../../utils/exportData'
@@ -146,15 +147,13 @@ function buildReport(view:string,s:S,since:string,period:number):Report{
       </>}
   }
   if(view==='profitability'){
-    const lines=s.salesOrders.filter(o=>o.status==='Yetkazildi'&&inPeriod(o.deliveredAt||o.createdAt)).flatMap(o=>o.items.map(i=>({o,i})))
-    const unitCost=(pid:string)=>{const done=s.productionOrders.filter(o=>o.productId===pid&&o.status==='Yakunlangan'&&o.completed>0);return done.length?done.reduce((a,o)=>a+orderCosting(s,o).actual.total,0)/done.reduce((a,o)=>a+o.completed,0):s.products.find(p=>p.id===pid)?.standardCost||0}
-    const rows=s.products.map(p=>{const ls=lines.filter(x=>x.i.productId===p.id);const qty=ls.reduce((a,x)=>a+x.i.delivered,0),revenue=ls.reduce((a,x)=>a+x.i.delivered*x.i.price,0),cogs=qty*unitCost(p.id);return {p,qty,revenue,cogs,margin:revenue-cogs}}).filter(r=>r.qty>0)
-    const totalRevenue=rows.reduce((a,r)=>a+r.revenue,0),totalMargin=rows.reduce((a,r)=>a+r.margin,0)
-    return {title:'Profitability',subtitle:'Tushum − COGS (haqiqiy birlik tannarx)',
-      rows:rows.map(r=>({Mahsulot:r.p.name,SKU:r.p.sku,Sotildi:r.qty,Tushum:Math.round(r.revenue),COGS:Math.round(r.cogs),Marja:Math.round(r.margin),'Marja %':r.revenue?Math.round(r.margin/r.revenue*100):0})),
+    const rows=profitabilityByProduct(s,since).map(({product,...row})=>({p:product,...row}))
+    const totalRevenue=rows.reduce((a,r)=>a+r.revenue,0),allKnown=rows.every(r=>r.margin!==null),totalMargin=rows.reduce((a,r)=>a+(r.margin||0),0)
+    return {title:'Profitability',subtitle:'Jo‘natilgan LOT tannarxi · kelib chiqishi yetishmasa COGS ko‘rsatilmaydi',
+      rows:rows.map(r=>({Mahsulot:r.p.name,SKU:r.p.sku,Sotildi:r.qty,Tushum:Math.round(r.revenue),COGS:r.cogs===null?'Mavjud emas':Math.round(r.cogs),Tannarx:r.costBasis,Marja:r.margin===null?'Mavjud emas':Math.round(r.margin),'Marja %':r.revenue&&r.margin!==null?Math.round(r.margin/r.revenue*100):'—'})),
       body:<>
-        <div className="kpi-grid cols-3"><KPI label="Tushum" value={compactMoney(totalRevenue)} icon={<Icon name="wallet"/>}/><KPI label="Yalpi marja" value={compactMoney(totalMargin)} tone="mint" icon={<Icon name="chart"/>}/><KPI label="Marja %" value={totalRevenue?`${Math.round(totalMargin/totalRevenue*100)}%`:'—'} tone="purple" icon={<Icon name="target"/>}/></div>
-        {rows.length?<div className="card flush"><div className="table-scroll"><table className="fit"><thead><tr><th>Mahsulot</th><th className="align-right">Sotildi</th><th className="align-right">Tushum</th><th className="align-right">COGS</th><th className="align-right">Marja</th><th className="align-right">Marja %</th></tr></thead><tbody>{rows.map(r=>{const pct=r.revenue?Math.round(r.margin/r.revenue*100):0;return <tr key={r.p.id}><td><div className="cell-main"><b>{r.p.name}</b><small>{r.p.sku}</small></div></td><td className="align-right">{num(r.qty)} {r.p.unit}</td><td className="align-right">{compactMoney(r.revenue)}</td><td className="align-right">{compactMoney(r.cogs)}</td><td className={`align-right ${r.margin<0?'negative':''}`}><b>{compactMoney(r.margin)}</b></td><td className="align-right"><b className={pct<0?'negative':pct>=20?'positive':undefined}>{pct}%</b></td></tr>})}</tbody></table></div></div>:<Card><Empty title="Davrda yetkazilgan sotuv yo‘q" text="Davrni kengaytiring"/></Card>}
+        <div className="kpi-grid cols-3"><KPI label="Tushum" value={compactMoney(totalRevenue)} icon={<Icon name="wallet"/>}/><KPI label="Yalpi marja" value={allKnown?compactMoney(totalMargin):'Mavjud emas'} tone="mint" icon={<Icon name="chart"/>}/><KPI label="Marja %" value={allKnown&&totalRevenue?`${Math.round(totalMargin/totalRevenue*100)}%`:'—'} tone="purple" icon={<Icon name="target"/>}/></div>
+        {rows.length?<div className="card flush"><div className="table-scroll"><table className="fit"><thead><tr><th>Mahsulot</th><th className="align-right">Sotildi</th><th className="align-right">Tushum</th><th className="align-right">COGS</th><th className="align-right">Marja</th><th className="align-right">Marja %</th></tr></thead><tbody>{rows.map(r=>{const pct=r.revenue&&r.margin!==null?Math.round(r.margin/r.revenue*100):null;return <tr key={r.p.id}><td><div className="cell-main"><b>{r.p.name}</b><small>{r.p.sku} · {r.costBasis==='actual'?'LOT tannarxi':r.costBasis==='estimated'?'Taxminiy tannarx':r.costBasis==='provisional'?'QC paytidagi dastlabki tannarx':'Tannarx ma’lum emas'}</small></div></td><td className="align-right">{num(r.qty)} {r.p.unit}</td><td className="align-right">{compactMoney(r.revenue)}</td><td className="align-right">{r.cogs===null?'—':compactMoney(r.cogs)}</td><td className={`align-right ${r.margin!==null&&r.margin<0?'negative':''}`}><b>{r.margin===null?'—':compactMoney(r.margin)}</b></td><td className="align-right"><b className={pct===null?undefined:pct<0?'negative':pct>=20?'positive':undefined}>{pct===null?'—':`${pct}%`}</b></td></tr>})}</tbody></table></div></div>:<Card><Empty title="Davrda yetkazilgan sotuv yo‘q" text="Davrni kengaytiring"/></Card>}
       </>}
   }
   return {title:'Hisobot topilmadi',subtitle:'Tanlangan ko‘rinish mavjud emas.',rows:[],body:<Card><Empty title="Hisobot topilmadi" action={<Link className="primary-glass-btn" to="/reports">Katalogga qaytish</Link>}/></Card>}

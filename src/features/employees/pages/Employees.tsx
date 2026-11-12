@@ -11,6 +11,7 @@ import {addDays,formatMinutes,minutesBetween,periodStart,stamp,todayISO} from '.
 import {compactMoney,initials,money,num} from '../../../utils/format'
 import {orderCode,productName,useNow,workCenterCode,workCenterName} from '../../common/lookups'
 import {ActivityPanel} from '../../common/RecordPanels'
+import {CreateAccountForEmployee} from '../../admin/pages/Admin'
 import {BarList} from '../../common/charts'
 
 export default function Employees(){
@@ -42,16 +43,21 @@ function All(){
   const [q,setQ]=useSearchParamState('q'),[dept,setDept]=useSearchParamState('dept'),[role,setRole]=useSearchParamState('role')
   const [id,setId]=useRecordParam()
   const [edit,setEdit]=useState<Employee|null|'new'>(null)
+  const [activateId,setActivateId]=useState<string|null>(null)
   const rows=s.employees.filter(e=>(!dept||e.department===dept)&&(!role||e.roleId===role))
+  const activate=s.employees.find(e=>e.id===activateId)
   const employee=s.employees.find(e=>e.id===id)
   return <div className="page-stack">
     <PageHeader title="Xodimlar" subtitle="Rol, bo‘lim, smena va ish vaqti" actions={<button type="button" className="primary-glass-btn" disabled={!app.can('employees','create')} onClick={()=>setEdit('new')}><Icon name="plus"/>Xodim qo‘shish</button>}/>
     <ResourceTable rows={rows} query={q} onQuery={setQ} placeholder="Ism, bo‘lim, rol..." onRow={e=>setId(e.id)} exportName="employees" resetKey={`${dept}|${role}`}
       filtersActive={Boolean(dept||role)} onResetFilters={()=>{setDept('');setRole('')}}
-      filters={<><FilterSelect label="Bo‘lim" value={dept} onChange={setDept} options={[...new Set(s.employees.map(e=>e.department))]}/><FilterSelect label="Rol" value={role} onChange={setRole} options={s.roles.map(r=>({value:r.id,label:r.name}))}/></>}
+      filters={<><FilterSelect label="Bo‘lim" value={dept} onChange={setDept} options={[...new Set(s.employees.map(e=>e.department))]}/><FilterSelect label="Rol" value={role} onChange={setRole} options={s.roles.filter(r=>!isSuperAdminRole(r)).map(r=>({value:r.id,label:r.name}))}/></>}
       columns={[
         {key:'name',label:'Xodim',value:e=>e.name,render:e=><div className="person-cell"><span className="avatar sm">{initials(e.name)}</span><div className="cell-main"><b>{e.name}</b><small>{e.department}</small></div></div>},
         {key:'role',label:'Rol',value:e=>s.roles.find(r=>r.id===e.roleId)?.name||''},
+        {key:'branch',label:'Filial',value:e=>s.branches.find(b=>b.id===e.branchId)?.name||'',priority:'low'},
+        {key:'login',label:'Login',value:e=>app.auth.accounts.find(a=>a.employeeId===e.id)?.username||'',render:e=>app.auth.accounts.find(a=>a.employeeId===e.id)?.username||'—'},
+        {key:'account',label:'Akkaunt',value:e=>{const a=app.auth.accounts.find(a=>a.employeeId===e.id);return a?e.status==='Arxiv'?'Arxiv':a.status==='blocked'?'Bloklangan':a.mustChangePassword?'Parol almashtiriladi':'Faol':'Akkaunt yo‘q'},render:e=>{const a=app.auth.accounts.find(a=>a.employeeId===e.id);return <StatusBadge tone={!a||a.status==='blocked'||e.status==='Arxiv'?'warning':'success'}>{a?e.status==='Arxiv'?'Arxiv':a.status==='blocked'?'Bloklangan':a.mustChangePassword?'Parol almashtiriladi':'Faol':'Akkaunt yo‘q'}</StatusBadge>}},
         {key:'wc',label:'Work center',value:e=>workCenterCode(s,e.workCenterId),priority:'low'},
         {key:'shift',label:'Smena',value:e=>e.shift,priority:'low'},
         {key:'status',label:'Status',value:e=>e.status,render:e=><StatusBadge>{e.status}</StatusBadge>},
@@ -60,26 +66,30 @@ function All(){
         // Wages are cost data: shown only to roles that may view costs (A-M1).
         ...(app.can('costs')?[{key:'rate',label:'Stavka',align:'right' as const,value:(e:Employee)=>e.hourlyCost,render:(e:Employee)=>compactMoney(e.hourlyCost),priority:'low' as const}]:[]),
       ]}/>
-    {edit&&<EmployeeModal employee={edit==='new'?undefined:edit} onClose={()=>setEdit(null)}/>}
+    {edit&&<EmployeeModal employee={edit==='new'?undefined:edit} onClose={()=>setEdit(null)} onCreated={id=>{setEdit(null);setActivateId(id)}}/>}
+    {activate&&<CreateAccountForEmployee employee={activate} onClose={()=>setActivateId(null)}/>}
     {employee&&<EmployeeDrawer key={employee.id} employee={employee} onClose={()=>setId(null)} onEdit={()=>setEdit(employee)}/>}
   </div>
 }
 
-function EmployeeModal({employee,onClose}:{employee?:Employee;onClose:()=>void}){
+function EmployeeModal({employee,onClose,onCreated}:{employee?:Employee;onClose:()=>void;onCreated:(id:string)=>void}){
   const app=useApp(),s=app.state
   // Only roles this user may hand out are offered; the employee's current role stays visible (A-C2).
-  const assignable=s.roles.filter(r=>r.id===employee?.roleId||!assignRoleBlocker(s,app.currentEmployee,employee,r.id))
+  const assignable=s.roles.filter(r=>!isSuperAdminRole(r)&&!assignRoleBlocker(s,app.currentEmployee,employee,r.id))
   const self=employee?.id===app.currentEmployee.id
   const roleLocked=self||!app.can('users','edit')||Boolean(employee&&assignable.length<=1)
-  const form=useForm({name:employee?.name||'',department:employee?.department||'Production',roleId:employee?.roleId||assignable.find(r=>r.key==='operator')?.id||assignable[0]?.id||'',workCenterId:employee?.workCenterId||s.workCenters[0]?.id||'',warehouseId:employee?.warehouseId||'',shift:employee?.shift||'A',status:employee?.status||'Faol',hourlyCost:String(employee?.hourlyCost??40000),attendance:String(employee?.attendance??100)},v=>({name:required(v.name,'F.I.Sh')||(v.name.trim().split(/\s+/).length<2?'Ism va familiyani kiriting':undefined),hourlyCost:nonNegative(v.hourlyCost,'Stavka'),attendance:Number(v.attendance)>=0&&Number(v.attendance)<=100?undefined:'0–100%'}))
+  const initialBranch=employee?.branchId||s.workCenters.find(w=>w.id===employee?.workCenterId)?.branchId||s.warehouses.find(w=>w.id===employee?.warehouseId)?.branchId||s.branches[0]?.id||''
+  const form=useForm({name:employee?.name||'',department:employee?.department||'Production',roleId:employee?.roleId||assignable.find(r=>r.key==='operator')?.id||assignable[0]?.id||'',branchId:initialBranch,branchIds:employee?.branchIds?.length?employee.branchIds:[initialBranch].filter(Boolean),workCenterId:employee?.workCenterId||s.workCenters.find(w=>w.branchId===initialBranch)?.id||'',warehouseId:employee?.warehouseId||'',shift:employee?.shift||'A',status:employee?.status||'Faol',hourlyCost:String(employee?.hourlyCost??40000),attendance:String(employee?.attendance??100)},v=>({name:required(v.name,'F.I.Sh')||(v.name.trim().split(/\s+/).length<2?'Ism va familiyani kiriting':undefined),branchId:s.roles.find(r=>r.id===v.roleId)?.scope!=='all'&&!v.branchId?'Filialni tanlang':undefined,workCenterId:s.roles.find(r=>r.id===v.roleId)?.scope==='workcenter'&&!v.workCenterId?'Ish markazini tanlang':undefined,warehouseId:s.roles.find(r=>r.id===v.roleId)?.scope==='warehouse'&&!v.warehouseId?'Omborni tanlang':undefined,hourlyCost:nonNegative(v.hourlyCost,'Stavka'),attendance:Number(v.attendance)>=0&&Number(v.attendance)<=100?undefined:'0–100%'}))
   return <Modal open onClose={onClose} title={employee?'Xodimni tahrirlash':'Yangi xodim'} size="lg"
-    footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Bekor qilish</button><button type="button" className="primary-glass-btn" onClick={()=>form.submit(v=>{const payload={...v,name:v.name.trim(),warehouseId:v.warehouseId||undefined,hourlyCost:Number(v.hourlyCost),attendance:Number(v.attendance)};const r=employee?app.updateEntity('employees',employee.id,payload):app.createEntity('employees',{...payload,efficiency:0});if(r.ok)onClose();return r.ok})}>Saqlash</button></>}>
+    footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Bekor qilish</button><button type="button" className="primary-glass-btn" onClick={()=>form.submit(v=>{const payload={...v,name:v.name.trim(),warehouseId:v.warehouseId||undefined,hourlyCost:Number(v.hourlyCost),attendance:Number(v.attendance)};const r=employee?app.updateEntity('employees',employee.id,payload):app.createEntity('employees',{...payload,efficiency:0});if(r.ok){if(!employee&&r.id&&app.can('users','create'))onCreated(r.id);else onClose()}return r.ok})}>{employee||!app.can('users','create')?'Saqlash':'Saqlash va login yaratish'}</button></>}>
     <div className="form-grid">
       <Field label="F.I.Sh" required error={form.error('name')}><Input {...form.input('name')} autoFocus/></Field>
       <Field label="Bo‘lim"><Select value={form.values.department} onChange={v=>form.set('department',v)}>{['Production','Quality','Maintenance','Warehouse','Procurement','Management'].map(x=><option key={x} value={x}>{x}</option>)}</Select></Field>
       <Field label="Rol (RBAC)" hint={self?'O‘z rolingizni o‘zgartira olmaysiz':!app.can('users','edit')?'Rol berish uchun users.edit kerak':undefined}><Select value={form.values.roleId} disabled={roleLocked} onChange={v=>form.set('roleId',v)}>{assignable.map(r=><option key={r.id} value={r.id}>{r.name}</option>)}</Select></Field>
-      <Field label="Work center"><Select value={form.values.workCenterId} onChange={v=>form.set('workCenterId',v)}>{s.workCenters.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</Select></Field>
-      <Field label="Ish ombori" hint="“Ombor” doirasidagi rol faqat shu omborda ishlaydi; bo‘sh — filial bo‘yicha"><Select value={form.values.warehouseId} onChange={v=>form.set('warehouseId',v)}><option value="">— Filial bo‘yicha —</option>{s.warehouses.filter(w=>w.status==='Faol'||w.id===form.values.warehouseId).map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</Select></Field>
+      <Field label="Asosiy filial" required error={form.error('branchId')}><Select value={form.values.branchId} onChange={v=>{form.set('branchId',v);form.set('branchIds',[v,...form.values.branchIds.filter(id=>id!==form.values.branchId&&id!==v)]);form.set('workCenterId','');form.set('warehouseId','')}}><option value="">— Tanlang —</option>{s.branches.filter(b=>b.status!=='Arxiv').map(b=><option key={b.id} value={b.id}>{b.name}</option>)}</Select></Field>
+      {s.roles.find(r=>r.id===form.values.roleId)?.scope==='branch'&&s.branches.length>1&&<Field label="Qo‘shimcha filiallar" hint="Faqat aniq biriktirilgan filiallar ko‘rinadi"><div className="badge-row">{s.branches.filter(b=>b.status!=='Arxiv'&&b.id!==form.values.branchId).map(b=><label key={b.id}><input type="checkbox" checked={form.values.branchIds.includes(b.id)} onChange={e=>form.set('branchIds',e.target.checked?[...form.values.branchIds,b.id]:form.values.branchIds.filter(id=>id!==b.id))}/>{b.name}</label>)}</div></Field>}
+      <Field label="Work center" error={form.error('workCenterId')}><Select value={form.values.workCenterId} onChange={v=>form.set('workCenterId',v)}><option value="">— Tanlanmagan —</option>{s.workCenters.filter(w=>form.values.branchIds.includes(w.branchId)).map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</Select></Field>
+      <Field label="Ish ombori" error={form.error('warehouseId')} hint="“Ombor” doirasidagi rol faqat shu omborda ishlaydi"><Select value={form.values.warehouseId} onChange={v=>form.set('warehouseId',v)}><option value="">— Tanlanmagan —</option>{s.warehouses.filter(w=>(w.status==='Faol'||w.id===form.values.warehouseId)&&form.values.branchIds.includes(w.branchId)).map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</Select></Field>
       <Field label="Smena"><Select value={form.values.shift} onChange={v=>form.set('shift',v)}>{['A','B','C','Kunduzgi'].map(x=><option key={x} value={x}>{x}</option>)}</Select></Field>
       <Field label="Status"><Select value={form.values.status} onChange={v=>form.set('status',v)}>{['Faol','Smenada','Ta’tilda','Arxiv'].map(x=><option key={x} value={x}>{x}</option>)}</Select></Field>
       {app.can('costs')&&<Field label="Soatbay stavka" error={form.error('hourlyCost')} hint="Labor cost uchun"><MoneyInput min="0" {...form.money('hourlyCost')}/></Field>}
@@ -95,11 +105,11 @@ function EmployeeDrawer({employee,onClose,onEdit}:{employee:Employee;onClose:()=
   const role=s.roles.find(r=>r.id===employee.roleId)
   const blocker=employeeRemovalBlocker(s,app.currentEmployee,employee.id)||referenceBlocker(s,'employees',employee.id)
   return <Drawer open onClose={onClose} title={employee.name} eyebrow="Xodim" icon="user" size="lg" subtitle={`${employee.department} · ${role?.name} · smena ${employee.shift}`} headerExtra={<StatusBadge>{employee.status}</StatusBadge>}
-    actions={<>{app.can('users','delete')&&<button type="button" className="ghost-btn" onClick={()=>setRemove(true)}><Icon name="trash" size={15}/>O‘chirish</button>}<span className="spacer"/>{app.can('employees','edit')&&<button type="button" className="primary-glass-btn" onClick={onEdit}><Icon name="edit" size={16}/>Tahrirlash</button>}</>}>
+    actions={<>{app.can('users','delete')&&!isSuperAdminRole(role)&&<button type="button" className="ghost-btn" onClick={()=>setRemove(true)}><Icon name="trash" size={15}/>O‘chirish</button>}<span className="spacer"/>{app.can('employees','edit')&&!isSuperAdminRole(role)&&<button type="button" className="primary-glass-btn" onClick={onEdit}><Icon name="edit" size={16}/>Tahrirlash</button>}</>}>
     <Tabs items={[{value:'overview',label:'Umumiy'},{value:'time',label:'Ish vaqti',count:stats.logs.length},{value:'access',label:'Ruxsatlar'},{value:'history',label:'Faoliyat'}]} active={tab} onChange={setTab}/>
     {tab==='overview'&&<InfoGrid items={[{label:'30 kun ish vaqti',value:formatMinutes(stats.logged)},{label:'Samaradorlik',value:stats.efficiency===null?'—':`${stats.efficiency}%`},...(app.can('costs')?[{label:'Labor cost (30 kun)',value:money(stats.cost)}]:[]),{label:'Buyurtmalar',value:stats.orders},{label:'Work center',value:workCenterName(s,employee.workCenterId)},...(app.can('costs')?[{label:'Stavka',value:`${money(employee.hourlyCost)}/soat`}]:[]),{label:'Davomat (HR)',value:`${employee.attendance}%`}]}/>}
     {tab==='time'&&(stats.logs.length?<div className="stack-list">{stats.logs.map(t=>{const o=s.productionOrders.find(x=>x.id===t.orderId),w=o?.workOrders.find(x=>x.id===t.workOrderId);return <button type="button" className="list-row is-clickable" key={t.id} onClick={()=>navigate(`/production?view=orders&id=${t.orderId}`)}><span className="list-row-copy"><b>{o?.code} · {w?.name}</b><small>{t.start} → {t.end?t.end.slice(11):'davom etmoqda'} · {workCenterName(s,t.workCenterId)}</small></span><b className="num">{t.end?formatMinutes(t.minutes):'—'}</b></button>})}</div>:<Empty compact title="Ish vaqti qayd etilmagan"/>)}
-    {tab==='access'&&<div className="badge-row">{PERMISSION_MODULES.map(m=>{const edit=hasPermission(role,m.key,'edit')||hasPermission(role,m.key,'execute'),viewOnly=hasPermission(role,m.key,'view');return <StatusBadge key={m.key} tone={edit?'success':viewOnly?'info':'neutral'}>{m.label}: {isSuperAdminRole(role)?'to‘liq':edit?'tahrir':viewOnly?'ko‘rish':'yo‘q'}</StatusBadge>})}</div>}
+    {tab==='access'&&<div className="badge-row">{PERMISSION_MODULES.map(m=>{const edit=hasPermission(role,m.key,'edit')||hasPermission(role,m.key,'execute'),viewOnly=hasPermission(role,m.key,'view');return <StatusBadge key={m.key} tone={edit?'success':viewOnly?'info':'neutral'}>{m.label}: {edit?'tahrir':viewOnly?'ko‘rish':'yo‘q'}</StatusBadge>})}</div>}
     {tab==='history'&&<ActivityPanel sources={[employee.name]}/>}
     <Confirm open={remove} onClose={()=>setRemove(false)} onConfirm={()=>{if(app.deleteEntity('employees',employee.id).ok)onClose()}} danger title="Xodim o‘chirilsinmi?" text={blocker?`O‘chirib bo‘lmaydi: ${blocker}. Status’ni “Arxiv” qiling.`:'Xodim yozuvi o‘chiriladi; ish vaqti tarixi hisobotlarda qoladi.'} confirmText="O‘chirish"/>
   </Drawer>
@@ -107,16 +117,17 @@ function EmployeeDrawer({employee,onClose,onEdit}:{employee:Employee;onClose:()=
 
 function Roles(){
   const app=useApp(),s=app.state
-  const [roleId,setRoleId]=useSearchParamState('role',s.roles[0]?.id||'')
-  const role=s.roles.find(r=>r.id===roleId)||s.roles[0]
+  const tenantRoles=s.roles.filter(r=>!isSuperAdminRole(r))
+  const [roleId,setRoleId]=useSearchParamState('role',tenantRoles[0]?.id||'')
+  const role=tenantRoles.find(r=>r.id===roleId)||tenantRoles[0]
   const canEdit=app.can('roles','edit')
+  if(!role)return <Empty title="Rol yo‘q"/>
   return <div className="page-stack">
     <PageHeader title="Rollar va ruxsatlar" subtitle="O‘zgarish darhol sidebar, URL va amallarga qo‘llanadi"/>
     <div className="master-detail">
-      <Card className="master-pane"><div className="master-list" role="listbox" aria-label="Rollar">{s.roles.map(r=><button type="button" role="option" aria-selected={r.id===role.id} key={r.id} className={r.id===role.id?'active':''} onClick={()=>setRoleId(r.id)}><span><b>{r.name}</b><small>{s.employees.filter(e=>e.roleId===r.id).length} xodim · {r.scope}</small></span></button>)}</div></Card>
+      <Card className="master-pane"><div className="master-list" role="listbox" aria-label="Rollar">{tenantRoles.map(r=><button type="button" role="option" aria-selected={r.id===role.id} key={r.id} className={r.id===role.id?'active':''} onClick={()=>setRoleId(r.id)}><span><b>{r.name}</b><small>{s.employees.filter(e=>e.roleId===r.id).length} xodim · {r.scope}</small></span></button>)}</div></Card>
       <Card className="detail-pane" title={role.name} subtitle={`Scope: ${role.scope} · ${s.employees.filter(e=>e.roleId===role.id).map(e=>e.name).join(', ')||'xodim yo‘q'}`}>
         {!canEdit&&<div className="inline-note warning"><Icon name="lock"/>Ruxsatlarni o‘zgartirish uchun roles.edit huquqi kerak.</div>}
-        {isSuperAdminRole(role)&&<div className="inline-note"><Icon name="shield"/>Super Admin barcha huquqlarga ega; bu rol tahrirlanmaydi.</div>}
         <PermissionMatrix role={role}/>
         <p className="soft-meta">“Ko‘rish” o‘chsa boshqa amallar ham o‘chadi · o‘z rolingizni va o‘zingizdan yuqori rollarni o‘zgartira olmaysiz</p>
       </Card>

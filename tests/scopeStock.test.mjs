@@ -47,7 +47,7 @@ function withPerson(s,person,role){
 const SALES_B2={id:'role-sb2',name:'Chirchiq sotuvchi',scope:'branch',description:'',permissions:{sales:{view:true,create:true,edit:true},warehouse:{view:true,edit:true},production:{view:true}}}
 const branchSeller=s=>withPerson(s,{id:'em10',name:'Chirchiq sotuvchi',roleId:'role-sb2',workCenterId:'wc4'},SALES_B2)
 const keeperW1=s=>withPerson(s,{id:'em11',name:'Xomashyo omborchisi',roleId:'role6',workCenterId:'wc1',warehouseId:'w1'})
-const superAdmin=s=>withPerson(s,{id:'em12',name:'Super Bosh',roleId:'role0'})
+const companyOwner=s=>withPerson(s,{id:'em12',name:'Biznes egasi',roleId:'role_owner'})
 const em=(s,id)=>s.employees.find(e=>e.id===id)
 
 /** A draft p3 MO (rm2 only, routing on wc2 / branch b1) in clean data with the given rm2 lots in w1. */
@@ -366,8 +366,8 @@ test('#6: a warehouse-bound keeper moves, adjusts, ships and reads only its own 
   assert.deepEqual(A.salesSources(s,keeper),[])
 })
 
-test('#7: scoped lists, global search and deep links hide another branch’s records alike; Super Admin sees all',()=>{
-  let s=superAdmin(branchSeller(seed()))
+test('#7: scoped lists, global search and deep links hide another branch’s records alike; Business Owner sees all',()=>{
+  let s=companyOwner(branchSeller(seed()))
   s=withStock(s,'p3','w4',[{code:'B2',qty:9}])
   const own=A.createSalesOrder(s,ctx(s,'em10'),{customerId:'cu1',mode:'Make-to-stock',lines:[{productId:'p3',qty:2}]});s=ok(own)
   const foreign=s.salesOrders.filter(o=>X.salesOrderSites(s,o).some(w=>w!=='w4'))

@@ -252,10 +252,10 @@ function MaterialPanel({x}:PanelProps){
       </button></div>
       <div className="table-scroll"><table className="fit is-interactive dash-table pc-material-table"><thead><tr><th>Material</th><th className="align-right">Rezerv</th><th className="align-right">Available</th><th className="align-right">Yo‘lda</th><th className="align-right">Yetishmaydi</th></tr></thead><tbody>
         {rows.slice(0,MATERIAL_ROWS).map(r=>{
-          const goTo=()=>go(`/materials?view=stock&id=${r.id}`)
+          const goTo=()=>go(`/materials?view=stock&id=${r.materialId}`)
           const note=r.shortage>0?'':r.level==='critical'?'min zaxiradan past':r.level==='low'?'reorder’dan past':''
           return <tr key={r.id} tabIndex={0} aria-label={`${r.m.name} — materialni ochish`} onClick={goTo} onKeyDown={rowKey(goTo)} className={r.level==='critical'?'row-danger':r.level==='low'?'row-warning':undefined}>
-            <td className="c-name"><div className="cell-main"><b>{r.m.name}</b><small>{r.m.unit}{r.required?` · talab ${num(r.required)}`:''}{note&&<span className={r.level==='critical'?'negative':'pc-warn'}> · {note}</span>}</small></div></td>
+            <td className="c-name"><div className="cell-main"><b>{r.m.name}</b><small>{r.branchId} · {r.m.unit}{r.required?` · talab ${num(r.required)}`:''}{note&&<span className={r.level==='critical'?'negative':'pc-warn'}> · {note}</span>}</small></div></td>
             <td className="c-rz align-right" data-label="Rezerv">{r.reserved?num(r.reserved):<span className="muted">—</span>}</td>
             <td className="c-av align-right" data-label="Available"><b>{num(r.available)}</b></td>
             <td className="c-in align-right" data-label="Yo‘lda">{r.incoming?num(r.incoming):<span className="muted">—</span>}</td>

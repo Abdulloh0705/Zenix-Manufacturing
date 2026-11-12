@@ -1,6 +1,7 @@
 import type {ManufacturingState,ProductionOrder,QualityCheck,WorkOrder} from '../types'
 import {DASHBOARD_PERIODS,dashboardSnapshot} from './dashboard'
-import {createMrpPlan,deliveryRisk,equipmentActivity,itemName,laborNow,loggedMinutes,operationQueues,orderBlocker,orderCosting,orderMaterialLines,orderMaterialStatus,prioritizedOrders,reworkOrders,scrapEvents,stockOf,weeklyProductionPlan} from './manufacturingEngine'
+import {createMrpPlan,deliveryRisk,equipmentActivity,itemName,laborNow,loggedMinutes,operationQueues,orderBlocker,orderCosting,orderMaterialLines,orderMaterialStatus,prioritizedOrders,reworkOrders,scrapEvents,weeklyProductionPlan} from './manufacturingEngine'
+import {branchPurchaseNeeds} from './planning'
 import type {EquipmentActivity} from './manufacturingEngine'
 import {daysBetween,periodStart} from '../utils/dates'
 
@@ -76,13 +77,7 @@ export function productionControl(s:ManufacturingState,now=new Date()){
 
   // Is there enough material? MRP netting per raw material, the materials to act on, and what each waiting order is missing.
   const plan=createMrpPlan(s)
-  const rows=plan.purchases.flatMap(p=>{
-    const m=s.rawMaterials.find(x=>x.id===p.materialId)
-    if(!m)return []
-    // Same levels as Xomashyo → Yetishmovchiliklar: critical = MRP shortage or below min stock, low = below the reorder point.
-    const level:'critical'|'low'|'ok'=p.shortage>0||p.available<m.minStock?'critical':p.available<m.reorderPoint?'low':'ok'
-    return [{...p,id:p.materialId,m,reserved:stockOf(s,p.materialId).reserved,level}]
-  })
+  const rows=branchPurchaseNeeds(s).map(p=>({...p,level:p.shortage>0||p.available<p.safety?'critical' as const:p.branchId===s.settings.defaultBranchId&&p.available<p.m.reorderPoint?'low' as const:'ok' as const}))
   const materials={rows,short:rows.filter(r=>r.shortage>0),shortages:d.materials.shortages,critical:d.materials.critical,
     waiting:d.materials.waiting.map(order=>({order,missing:orderMaterialLines(s,order).filter(l=>l.shortage>0)}))}
 

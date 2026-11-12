@@ -2,7 +2,7 @@ import {byText,cleanup,click,flush,key,render,type} from './helpers'
 import test,{afterEach} from 'node:test'
 import assert from 'node:assert/strict'
 import {useState} from 'react'
-import {Field,Input,Modal,Select,Tabs,Toggle,required,useForm} from '../../src/shared/ui'
+import {Field,Input,Modal,Select,Tabs,Toggle,hasDirtyForms,required,useDirtyMarker,useForm} from '../../src/shared/ui'
 
 afterEach(cleanup)
 
@@ -26,6 +26,22 @@ test('Form: switching to another record resets values, touched state and errors 
   await view.rerender(<Editor record={b} onSave={()=>undefined}/>)
   assert.equal(input().value,'Beta','values come from record B')
   assert.equal(document.querySelector('.field-error'),null,'record A’s error is gone')
+})
+
+test('dirty registry tracks shared and custom editors, then clears on reset and unmount',async()=>{
+  const shared=await render(<Editor record={{id:'a',name:'Alpha'}} onSave={()=>undefined}/>)
+  assert.equal(hasDirtyForms(),false)
+  await type(document.getElementById('name'),'Changed')
+  assert.equal(hasDirtyForms(),true)
+  await shared.rerender(<Editor record={{id:'b',name:'Beta'}} onSave={()=>undefined}/>)
+  assert.equal(hasDirtyForms(),false)
+  await shared.unmount()
+  function Custom(){const [value,setValue]=useState('');useDirtyMarker(Boolean(value));return <Input id="custom" value={value} onChange={e=>setValue(e.target.value)}/>}
+  const custom=await render(<Custom/>)
+  await type(document.getElementById('custom'),'draft')
+  assert.equal(hasDirtyForms(),true)
+  await custom.unmount()
+  assert.equal(hasDirtyForms(),false)
 })
 
 test('Form: a failed submit focuses the first invalid field',async()=>{

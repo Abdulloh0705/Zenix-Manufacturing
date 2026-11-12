@@ -1,7 +1,8 @@
 // Rule-based manufacturing copilot. Every statement is derived from the current engine state,
 // so the AI drawer and the AI workspace always agree with the rest of the product.
 import type {ManufacturingState} from '../types'
-import {calculateCapacityLoads,createMrpPlan,deliveryRisk,isOpenOrder,orderCosting,productionOee,stockOf,workCenterOee} from './manufacturingEngine'
+import {calculateCapacityLoads,deliveryRisk,isOpenOrder,orderCosting,productionOee,stockOf,workCenterOee} from './manufacturingEngine'
+import {branchPurchaseNeeds} from './planning'
 import {todayISO,addDays} from '../utils/dates'
 
 export type Insight={id:string;tone:'danger'|'warning'|'info'|'success';title:string;text:string;path:string;action:string}
@@ -12,10 +13,10 @@ const CLOSED='Bu ma’lumot sizning rolingiz uchun yopiq.'
 
 export function buildInsights(s:ManufacturingState,allow:ModuleGate=everything):Insight[]{
   const out:Insight[]=[]
-  const plan=createMrpPlan(s)
-  for(const p of plan.purchases.filter(p=>p.shortage>0).slice(0,3)){
+  const plan=branchPurchaseNeeds(s)
+  for(const p of plan.filter(p=>p.shortage>0).slice(0,3)){
     const m=s.rawMaterials.find(x=>x.id===p.materialId)
-    out.push({id:`buy-${p.materialId}`,tone:'warning',title:`${m?.name} yetishmaydi`,text:`Rejali talab ${Math.round(p.required)} ${m?.unit}, available ${Math.round(p.available)} + yo‘lda ${Math.round(p.incoming)}. Tavsiya: ${p.suggested} ${m?.unit} xarid.`,path:`/materials?view=all&id=${p.materialId}`,action:'Material'})
+    out.push({id:`buy-${p.branchId}-${p.materialId}`,tone:'warning',title:`${m?.name} · ${p.branchId} yetishmaydi`,text:`Rejali talab ${Math.round(p.required)} ${m?.unit}, available ${Math.round(p.available)} + yo‘lda ${Math.round(p.incoming)}. Tavsiya: ${p.suggested} ${m?.unit} xarid.`,path:'/materials?view=shortages',action:'Material'})
   }
   for(const o of s.productionOrders.filter(o=>deliveryRisk(s,o)).slice(0,3)){
     out.push({id:`risk-${o.id}`,tone:'danger',title:`${o.code} muddat riski`,text:`${s.products.find(p=>p.id===o.productId)?.name}: ${o.status}, due ${o.due}. ${o.status==='Material kutilmoqda'?'Material kutilmoqda.':'Qolgan ish hajmi smena sig‘imidan katta.'}`,path:`/production?view=orders&id=${o.id}`,action:'Buyurtmani ochish'})
@@ -38,17 +39,14 @@ export function buildInsights(s:ManufacturingState,allow:ModuleGate=everything):
 
 export function answerQuestion(s:ManufacturingState,question:string,allow:ModuleGate=everything){
   const t=question.toLowerCase()
-  const plan=createMrpPlan(s)
+  const plan=branchPurchaseNeeds(s)
   if(/material|xomash|tugay|shortage|xarid/.test(t)){
     if(!allow('materials'))return CLOSED
-    const short=plan.purchases.filter(p=>p.shortage>0)
+    const short=plan.filter(p=>p.shortage>0)
     if(!short.length){
-      const low=s.rawMaterials.filter(m=>stockOf(s,m.id).available<m.reorderPoint)
-      return low.length
-        ?`Rejali talab qoplangan, lekin reorder darajasidan past: ${low.map(m=>`${m.name} (${Math.round(stockOf(s,m.id).available)} / ${m.reorderPoint} ${m.unit})`).join(', ')}. Xomashyo → Yetishmovchiliklar’dan xarid yarating.`
-        :'Rejali talab bo‘yicha xomashyo yetarli: barcha materiallar available + yo‘ldagi qoldiq bilan qoplangan.'
+      return 'Filiallar bo‘yicha rejalashtirilgan material yetishmovchiligi yo‘q.'
     }
-    return short.map(p=>{const m=s.rawMaterials.find(x=>x.id===p.materialId);return `${m?.name}: talab ${Math.round(p.required)} ${m?.unit}, available ${Math.round(p.available)}, yo‘lda ${Math.round(p.incoming)} → ${p.suggested} ${m?.unit} xarid qiling`}).join(' · ')+'. Xaridni Xomashyo → Yetishmovchiliklar’dan yarating.'
+    return short.map(p=>{const m=s.rawMaterials.find(x=>x.id===p.materialId);return `${m?.name} (${p.branchId}): talab ${Math.round(p.required)} ${m?.unit}, available ${Math.round(p.available)}, yo‘lda ${Math.round(p.incoming)} → ${p.suggested} ${m?.unit} xarid qiling`}).join(' · ')+'. Xaridni Xomashyo → Yetishmovchiliklar’dan yarating.'
   }
   if(/delay|kech|muddat|risk/.test(t)){
     if(!allow('production'))return CLOSED

@@ -1,5 +1,64 @@
 # ZENIX — yagona BUG reyestri
 
+## Phase 3.4 holati (2026-11-07) — PARTIAL
+
+Ikkala ochiq Phase 3.3 masalasi tuzatildi. Frontend demo Phase 4 ishlari uchun tayyor; ishlab chiqarish SaaS chiqarilishi uchun tayyor deb baholanmaydi. Batafsil dalil va qamrov: [`audits/PHASE34_FINAL_READINESS.md`](audits/PHASE34_FINAL_READINESS.md).
+
+| ID | Holat | Sabab, yechim va dalil |
+|---|---|---|
+| P32-010 | FIXED | Boshqa tab sessiyasi almashganda root provider tenantni darhol remount qilgan va dirty forma yo‘qolgan. Umumiy `useForm` va mustaqil BOM, PO, receiving, sourcing, sales delivery, material safety, forecast va maintenance editorlari dirty signal beradi. O‘zgargan sessiyada eski forma inert holda saqlanadi, ogohlantirish va aniq discard/reload ko‘rsatiladi; domain, sozlama, auth va SaaS yozuvlari saqlangan sessiya va tenant a’zoligini qayta tekshiradi. `tests/ui/tenant.test.tsx`, `e2e/smoke.spec.ts` (desktop va mobile, 820 px tablet tekshiruvi). |
+| P32-011 | FIXED | Final QC LOTni chiqarar, ammo COGS faqat MO close `costSnapshot`idan olinardi. Endi Final QC release paytida fizik LOTning qayd etilgan material, mehnat, uskuna, energiya va overhead tannarxi muzlatiladi; MO hali ochiq bo‘lsa `provisional`, tarixiy input yetishmasa `estimated` deb belgilanadi. Yetkazish harakatiga aynan shu qiymat yoziladi; MO close uni qayta post/revalue qilmaydi, qaytarish asl jo‘natish qiymatini qaytaradi. Eski provenance noma’lum bo‘lsa COGS mavjud emas. `tests/phase34.test.mjs`, `tests/phase31.test.mjs`. |
+
+**Phase 3.2/3.3 kuzatilgan P32 qoldig‘i:** P0 0, P1 0, P2 0, P3 0. **Phase 3.4 umumiy statusi PARTIAL:** avvalgi N-07 subcontract xizmat xarajati mahsulot tannarxiga kiritilmaydi va bu moliyaviy oqim ishlab chiqarish da’vosi uchun muhim. Bu Phase 3.4 doirasidan tashqarida, alohida cost-design qarori talab qiladi. AI javoblarining mazmuni va barcha UI yo‘llari ham to‘liq qo‘lda tasdiqlanmagan. Browser/localStorage RBAC va tenant ajratish server xavfsizlik chegarasi emas.
+
+**Yakuniy tekshiruv:** domain 417/417, UI 77/77, o‘rnatilgan Chrome Playwright 27/27 (setup 1, desktop 13, mobile 13), maintenance/KPI/export maqsadli 14/14; TypeScript, ESLint, production build va `git diff --check` o‘tdi. E2E alohida test brauzer xotirasida bajarildi; mavjud ERP/localStorage tozalanmadi. Commit/push/deploy qilinmadi.
+
+## Phase 3.3 holati (2026-11-07) — PARTIAL
+
+Quyidagi jadval Phase 3.3 **tarixiy snapshoti**: undagi P32-010/011 `OPEN` yozuvlari yuqoridagi Phase 3.4 `FIXED` holati bilan almashtirilgan. Manba shu lokal ishchi daraxti va undagi avvalgi saqlanmagan ishlar. Faqat frontend demo nazorati; server tomonidagi xavfsizlik deb talqin qilinmaydi. `tests/phase33.test.mjs` va `tests/ui/phase33.test.tsx` yangi regression dalillaridir.
+
+| ID | Holat | Tekshirilgan yechim / chegara |
+|---|---|---|
+| P32-001 | FIXED | Oddiy backup import rollar, ruxsatlar, xodim roli/holati/joyini o‘zgartirsa **oldindan** rad etiladi; rad etilgan import hatto oldingi nusxa kalitini ham yozmaydi. Egasi uchun alohida to‘liq tiklash yo‘li maxsus rollar va xodim tayinlovlarini tiklaydi, tizim rollari, joriy egasi va akkaunt havolalarini tekshiradi. Akkaunt parollari va tenant a’zoligi backupga kirmaydi. Legacy `role0` faqat ko‘rish huquqiga ega. |
+| P32-002 | FIXED | Xodim yaratish, ko‘chirish, arxivlash, nusxalash, o‘chirish hamda akkaunt bloklash/parol tiklash manba va manzil scope’i bo‘yicha domain qatlamida tekshiriladi. |
+| P32-003 | FIXED | Yangi rol aktor scope’ini oladi; kengroq scope/rank rad etiladi. Cheklangan menejer tizim yoki ishlatilayotgan umumiy rolni tahrirlay olmaydi. Rol berishda rank, scope va aktorning ruxsatlari tekshiriladi. |
+| P32-004 | FIXED | Muddati tugagan/to‘xtatilgan obuna o‘zini qayta faollashtirmaydi; trial muddati saqlanadi va muddat bo‘lmasa faol emas. Pulli faol rejadan yuqoriga o‘tish platforma to‘lov tasdig‘isiz rad etiladi; pastga tushirish mumkin. |
+| Business Owner xodim oqimi | DEMO VERIFIED | Public Register faqat yangi kompaniya egasini yaratadi. Kompaniya ichida egasi xodim, rol, ish markazi/ombor va vaqtinchalik credential yaratadi; birinchi kirishda parol almashtirish majburiy. Vakolatli menejer o‘z filialida faqat quyi rol bilan akkaunt ochadi. E-pochta/SMS jo‘natilmaydi. UI va domain regression testlari bor. |
+| P32-005 | FIXED | Login urinishida akkaunt tenantlari siyosatining qat’iy chegarasi qo‘llanadi, muvaffaqiyatsiz kirish/lockout hodisasi tenantga bog‘lanadi. |
+| P32-006 | FIXED | Noma’lum, bo‘sh va orqaga qaytuvchi ishlab chiqarish statuslari domain’da rad etiladi; rezerv saqlangan holda noto‘g‘ri status yozilmaydi. |
+| P32-007 | FIXED | Qisman yetkazilgan SO bekor qilinmaydi; mijoz savdo hajmi buyurtma umumiy summasidan emas, yetkazilgan qiymatdan olinadi. Eski bekor qilingan buyurtmaning yetkazilgan qismi ham hisobda qoladi. |
+| P32-008 | FIXED | QC, time log, MO, work order va maintenance tarixida xodim havolasi bo‘lsa hard-delete rad; akkauntga bog‘langan xodim ham o‘chirilmaydi. Arxivlash mavjud. |
+| P32-009 | FIXED | Maxsus rolning aniq rank’i saqlanadi, yaratgan aktor rank’idan past bo‘lishi shart; HR delegatsiyasi shu daraja bilan ishlaydi. |
+| P32-010 | OPEN (P3) | Boshqa tab tenantni almashtirganda ayrim saqlanmagan formalar ogohlantirishsiz yopilishi mumkin. Tablararo form dirty signali kerak. |
+| P32-011 | OPEN (P3) | Final QC chiqargan, ammo MO yopilmagan birlik tannarxi hali “mavjud emas” bo‘lishi mumkin; ishonchli vaqtinchalik snapshot kerak. |
+| P32-012 | FIXED (P3) | Xarid/sotuv/sex sarlavhalari o‘zbekcha. |
+| P32-013 | FIXED (P3) | Domain actions alohida chunk; production build’da 500 kB ogohlantirishi yo‘q. |
+
+**Qolganlar:** P0 0, P1 0, P2 0, P3 2 (P32-010/011). Phase 3.3 barcha P3 masalalari yopilmagani uchun PARTIAL. Brauzer xotirasi, haqiqiy taklifnoma yetkazish, to‘lov va server tranzaksiyasi keyingi backend bosqichiga tegishli. Mavjud biznes yozuvlari yoki localStorage tozalanmadi; commit/push/deploy qilinmadi.
+
+**Tekshiruv:** domain 415/415, UI 76/76, Chrome Playwright 21/21; TypeScript, ESLint, production build va `git diff --check` o‘tdi. E2E alohida test browser xotirasida bajarildi.
+
+## Phase 3.1 yakuniy tuzatishlar (2026-11-07)
+
+Ishchi manba: `C:\Users\user\Documents\ChatGPT\zenix` (`main`, `dbbe317` ustidagi saqlangan Phase 1 SaaS ishchi o‘zgarishlari). Eski ZIP yoki branch bilan almashtirilmadi.
+
+| ID | Daraja | Holat | Dalil / qolgan cheklov |
+|---|---|---|---|
+| P3-P0-01/02/04/05/06 | P0 | FIXED (yangi oqimlar) | Rework good/scrap, Final Scrap, qaytgan mahsulot, serial, band qilingan LOT va izchillik: `tests/workflows.test.mjs`. Rework LOT qismiga yangi kod va manba LOT havolasi beriladi. |
+| P3-P0-03 | P0 | FIXED | Barcha birliklari scrap bo‘lgan MO imkonsiz Final QC kutmasdan yopiladi. |
+| P3-P0-07 | P0 | FIXED | Eski rework egaligi faqat bitta isbotlangan LOTda avtomatik tiklanadi. Bir nechta mos LOT bo‘lsa vakolatli operator manba MO, ombor, variant, miqdor va QC tarixini ko‘rib tanlaydi; noto‘g‘ri/aniqlanmagan egalik Final QC chiqarishini bloklaydi. LOT ajratilishi va audit metama’lumoti saqlanadi, stock avtomatik bo‘shatilmaydi: `tests/phase31.test.mjs`. |
+| P3-P1-01/02 | P1 | FIXED | Muddati o‘tgan LOT available emas; variant BOM subassembly talabi mahsulot tartibidan qat’i nazar hisoblanadi: `tests/phase2.test.mjs`. |
+| P3-P1-03 | P1 | FIXED | Profitability qisman jo‘natish va qaytarishni net hisoblaydi; ishonchli LOT provenance bo‘lsa uning tannarxini oladi: `tests/profitability.test.mjs`, `tests/phase31.test.mjs`. |
+| P3-P1-04 | P1 | FIXED | Incoming QC Hold to‘liq partiyasi qayta tekshiriladi; qisman supplierga qaytarilgan partiyani butunlay Passed qilish rad etiladi. |
+| P3-P1-05 | P1 | FIXED | Qo‘lda berilgan materialning isbotlangan ishlatilmagan qismi asl LOT/ombor/joyiga qaytadi; harakat, sabab, actor va tannarx yoziladi. Backflush, keyingi ish/natija va noaniq eski issue qaytarilmaydi: `tests/phase31.test.mjs`. |
+| P3-P1-06 | P1 | FIXED | Receipt, supplier return, replacement, qisman to‘lov va tuzatishlar payable ledgerga yoziladi; PO/supplier qoldiq va status ledgerdan hisoblanadi. Eski qarz faqat boshlang‘ich qoldiq, avvalgi to‘lov tafsiloti noma’lum: `tests/phase31.test.mjs`. |
+| P3-MRP | P1 | FIXED | Amaliy xarid/shortage/ogohlantirishlar `runMrp`ning filial bo‘yicha net talabidan olinadi. Eski global jadval faqat ma’lumot sifatida belgilangan, undan xarid ochilmaydi: `tests/phase31.test.mjs`. |
+| P3-COGS | P1 | FIXED | Jo‘natilgan LOTning muzlatilgan MO tannarxi, rework qo‘shimchasi va qaytarishning asl qiymati ishlatiladi. Eski provenance yetarli bo‘lmasa natija taxminiy yoki mavjud emas deb ko‘rsatiladi; marja u holda da’vo qilinmaydi: `tests/phase31.test.mjs`. |
+
+Auth, tenant membership, role va obuna browser/localStorage demo nazorati bo‘lib qoladi; haqiqiy xavfsizlik, to‘lov va tranzaksion yaxlitlik uchun `docs/BACKEND_CONTRACT.md`dagi server cheklovlari talab etiladi. Phase 3.1 **COMPLETE**: besh qolgan muammo tuzatildi; Phase 3.2 to‘liq frontend/RBAC audit keyingi bosqich.
+
+Tekshiruv (2026-11-07): domain **406/406**, UI **75/75**, Chrome Playwright **21/21**; TypeScript, ESLint, production build va `git diff --check` o‘tdi. Playwright o‘rnatilgan Chrome bilan ishga tushirildi; paketdagi Chromium executable mavjud emas edi.
+
 Manbalar: 1-audit (BUG-01…18), mahsulot auditi (N-01…26), 3-audit (B3-01…15), Login/RBAC auditi (A-C1…A-L4).
 Takrorlar bitta qatorga birlashtirilgan, har bir ID saqlangan. Oxirgi yangilanish: 2026-10-28 (Audit Phase 1/5).
 
@@ -28,13 +87,13 @@ Takrorlar bitta qatorga birlashtirilgan, har bir ID saqlangan. Oxirgi yangilanis
 | BUG-06 | QC’dan keyin berk ko‘cha, 0 miqdor bilan yopilish | FIXED | QC → Jarayonda qaytish; natijasiz QC/short close rad etiladi | bugRegistry BUG-06 | — |
 | BUG-07 | Ledger/faoliyat kesiladi, ADJ/TR raqamlari takrorlanadi | FIXED | Ombor harakatlari va time log kesilmaydi; raqamlar noyob (`nextRef`); faoliyat domain’da kesilmaydi — eng yangi 3000 tasi ish ma’lumotida, eskilari `zenix-activity-archive-v1` arxiviga ko‘chiriladi (yozib bo‘lmasa ma’lumotda qoladi, ogohlantiriladi); audit jurnali ikkalasini ko‘rsatadi | bugRegistry BUG-07, release BUG-07/A-M2 | Hammasi brauzer xotirasi (~5 MB) bilan chegaralangan; bildirishnomalar oxirgi 150 ta (vaqtinchalik xabar, tarix emas). O‘zgarmas audit uchun backend kerak |
 | BUG-08 | Tarixiy tannarx o‘zgaradi | FIXED | Yakunlanganda `costSnapshot` muzlatiladi; v4 migratsiyasi eski yakunlangan MO’larni bir marta muzlatadi; hisobotlar snapshot’ni o‘qiydi | bugRegistry BUG-08, access “v4 migration … freezes completed order costs” | Migratsiya paytidagi narx bilan muzlaydi (undan oldingi tarixiy narx saqlanmagan) |
-| BUG-14 | Tablar, debounce, buzilgan JSON, import | FIXED | Har bir domain amali saqlangan oxirgi nusxani o‘qib, boshqa tab yozganini davom ettiradi va darhol saqlaydi (`syncedState.ts`); `storage` event sinxronlash; tab yopilganda flush; o‘qilmagan JSON alohida kalitga; import/restore ruxsat bilan, oldin zaxira oladi, shakl va Super Admin tekshiruvi | release BUG-14 (2 test) | localStorage’da qulf yo‘q: ikki tab bir necha millisekund ichida yozsa poyga mumkin. Bu tranzaksiya emas — server kerak |
+| BUG-14 | Tablar, debounce, buzilgan JSON, import | FIXED | Har bir domain amali saqlangan oxirgi nusxani o‘qib, boshqa tab yozganini davom ettiradi va darhol saqlaydi (`syncedState.ts`); `storage` event sinxronlash; tab yopilganda flush; o‘qilmagan JSON alohida kalitga; import/restore ruxsat, shakl, owner invariant va Phase 3.3 xavfsizlik holati tekshiruvidan keyingina oldingi nusxani yozadi | release BUG-14 (2 test), phase33 P32-001 | localStorage’da qulf yo‘q: ikki tab bir necha millisekund ichida yozsa poyga mumkin. Bu tranzaksiya emas — server kerak |
 | B3-01 | Split bola MO Passed QC holatini meros oladi | FIXED | Bola MO `Pending` bilan boshlanadi | bugRegistry B3-01 | — |
 | B3-02 = A-H1 | Demo foydalanuvchi almashtirgichdan qaytib bo‘lmaydi | FIXED | `switchUser` olib tashlandi; identifikatsiya faqat login sessiyasidan | access A-61 (`switchUser:allowed→refused`), auth | — |
 | B3-03 | Qo‘lda kirish QC’si birinchi receipt’ni hal qiladi | FIXED | Aniq receipt majburiy; eski yozuvlar faqat bitta mos receipt bo‘lsa | bugRegistry B3-03 | — |
 | N-01 | Final QC natijadan oldin Passed bo‘ladi | FIXED | Natijasiz Final yaratilmaydi/hal qilinmaydi | bugRegistry N-01 | — |
 | N-02 | Final Scrap omborga ta’sir qilmaydi | FIXED | Ushlab turilgan birliklar scrap sifatida chiqadi | bugRegistry N-02 | — |
-| N-03 | Supplier return takrorlanadi | FIXED | `returnedQty`; ikkinchi qaytarish rad etiladi | bugRegistry N-03 | Supplier qarzi (debit) yozilmaydi — moliya moduli yo‘q |
+| N-03 | Supplier return takrorlanadi | FIXED | `returnedQty`; ikkinchi qaytarish rad etiladi, yangi receiptning payable krediti bir marta yoziladi | bugRegistry N-03, phase31 P3-P1-06 | Eski receiptlar uchun ledgerdan oldingi qarz/tarix boshlang‘ich qoldiq sifatida saqlanadi |
 | N-04 | Merge ikkinchi SO bog‘lanishini yo‘qotadi | FIXED | Turli SO’li MO’lar birlashtirilmaydi | bugRegistry N-04 | — |
 | N-07 | Subcontract karantindagi materialni jo‘natadi, QC’siz qabul | PARTIAL | Jo‘natishda karantin hisobga olinadi; Final QC majburiy bo‘lsa qabul karantinga tushadi va kirish tekshiruvi ochiladi (Passed → bo‘shaydi, Scrap → hisobdan chiqadi) | release N-07 (2 test: jo‘natish va qabul) | Xizmat narxi hali `Overhead` xarajati sifatida yoziladi, mahsulot tannarxiga qo‘shilmaydi; partiya qisman qabul qilinmaydi (butunlay Passed yoki Scrap) |
 
@@ -314,3 +373,28 @@ Testlar: `tests/premerge.test.mjs` (4), `tests/ui/phase5.test.tsx` (+1).
 | PM-04 (Medium) | Zona o‘zgarishi atrofidagi yozuv nisbiy vaqt / dashboard’da aniq vaqt sifatida ko‘rinardi | FIXED | `stampZones` / `isAmbiguousStamp` / `displayStamp`: ma’lum zonadagi eski vaqt bugungi zonaga o‘giriladi, noaniq vaqt yozilganicha “vaqt noaniq” / “≈” belgisi bilan |
 
 **Qolgan xavflar:** Chrome localStorage ≈ 5,23 M belgi (o‘lchangan); bir serial birlik ≈ 600 belgi → amalda ~7 000 birlikdan keyin saqlash rad etiladi va amal qaytariladi (ma’lumot yo‘qolmaydi); 10 000+ uchun IndexedDB/backend kerak. `origin/main` build’ida yangi-versiya qulfi yo‘q: v5 ma’lumot ochilgandan keyin main build’ga qaytish xavfli — `before-v5` nusxasidan tiklang. Davomiylik (time log) hisobi zona o‘zgarishi oynasidagi yozuvlar uchun |Δoffset| gacha farq qilishi mumkin.
+
+## Phase 3.6 (2026-11-09) — RBAC, auth va subcontract qiymati
+
+### ZENIX-Pro 2026-11-11 qo‘shimcha tekshiruvi
+
+| ID | Holat | Tuzatish va dalil |
+| --- | --- | --- |
+| ZP-001/002 | FIXED | Yangi tenantda eski `super_admin` roli yo‘q; v7 hydration uni qayta qo‘shmaydi; kompaniya rol ro‘yxati, nusxalash va platform ruxsati domain chegarasida bloklangan. Domain, UI, desktop/mobil E2E. |
+| ZP-003 | FIXED | Employees profilidan login yaratishga o‘tiladi, vaqtinchalik parol bir marta ko‘rsatiladi; xodim birinchi kirishda parolini almashtiradi. Desktop/mobil E2E. |
+| ZP-004 | FIXED | Akkaunt yaratish xatosidan keyin qayta urinish saqlangan xodim profilini ishlatadi; ikkinchi profil ochmaydi. UI regressiya. |
+| ZP-005 | FIXED (future migration) | Eski `super_admin` tayinlovi avtomatik `business_owner` ga aylantirilmaydi. Ilgari saqlangan o‘zgarishlar avtomatik qaytarilmaydi; alohida vakolatli tekshiruv kerak. Domain regressiya. |
+
+To‘liq dalil va cheklovlar: `docs/audits/ZENIX_PRO_FULL_AUDIT.md`.
+
+| ID | Holat | Natija |
+| --- | --- | --- |
+| ZA-001 | FIXED (frontend demo) | Filialga cheklangan xodim, sayt, xarajat va ledger ko‘rinishi hamda qarz yig‘indisi scope bo‘yicha tanlanadi; ko‘p filial topshirig‘i aniq yoziladi. |
+| ZA-002 | CORE FIXED | Yuborilgan material va UZS ga konvertatsiya qilingan xizmat qiymati qisman qabulga taqsimlanadi; QC Passed LOT tannarxini ochadi, Scrap xarajatga chiqaradi; takror qabul kaliti bloklanadi. Qabulgacha sababli tuzatish va Draft bekori bor. |
+| ZA-004 | FIXED | Ommaviy ro‘yxatdan o‘tishning domain kirishida egasi va kompaniya nomi majburiy. |
+| ZA-005 | FIXED (bir brauzer) | Ishlatilgan imzolangan recovery chipta fingerprinti saqlanadi va qayta ishlatilmaydi. |
+| ZA-006 | FIXED | Platforma chiptasi muddati tugaganda sahifadagi maxfiy metama’lumot avtomatik yashiriladi. |
+| ZA-007 | PARTIAL | Ishlatilmagan vaqtinchalik parol 7 kunda tugaydi; xavfsiz yetkazish backendga bog‘liq. |
+| ZA-012 | FIXED | Scoped rol uchun xodim profilida va akkaunt faollashtirishda filial/ish markazi/ombor tekshiriladi. |
+
+**Ochiq:** ZA-008 yakuniy COGS farq jurnali, ZA-009 ko‘p kalitli ro‘yxatdan o‘tish atomikligi, ZA-010 kompaniya nomi/ID siyosati, yuborilgan material qaytarishi va qabuldan keyingi subcontract narx tuzatishi. Bularni tarixiy tannarxni dalilsiz qayta yozmasdan loyihalash kerak. Tafsilot va tekshiruvlar: `docs/audits/ZENIX_PHASE36_REPORT.md`.

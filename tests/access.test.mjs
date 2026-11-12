@@ -10,6 +10,21 @@ let n=0
 const ctx=(s,userId='em1')=>({now:new Date(),user:s.employees.find(e=>e.id===userId),id:p=>`${p}-a${++n}`})
 const fresh=()=>createSeedState(new Date())
 const roleByKey=(s,key)=>s.roles.find(r=>r.key===key)
+
+test('tenant role actions reject a forged platform grant and a legacy Super Admin copy',()=>{
+  const s=createInitialState()
+  const owner=s.employees.find(e=>e.id==='em1')
+  const owned={...s,employees:s.employees.map(e=>e.id===owner.id?{...e,roleId:'role_owner'}:e)}
+  const created=A.createRole(owned,ctx(owned),{name:'Custom Worker'})
+  assert.equal(created.result.ok,true)
+  const grant=A.updateRolePermission(created.state,ctx(created.state),created.result.id,'platform','view',true)
+  assert.equal(grant.result.ok,false)
+  const copy=A.duplicateRole(owned,ctx(owned),'role0')
+  assert.equal(copy.result.ok,false)
+  const target=owned.roles.find(r=>r.key==='operator')
+  assert.ok(X.rolePermissionBlocker(owned,owner,target.id,'platform','view'))
+  assert.ok(X.assignRoleBlocker(owned,owner,undefined,'role0'))
+})
 /** Seed plus: em8 Super Admin, em9 a second admin. em1 is the seed's Admin / Direktor. */
 function withPeople(){
   const s=fresh()
@@ -80,9 +95,12 @@ test('execute: operators run work but cannot plan, cancel or close orders',()=>{
   for(const name of ['createProductionOrder','splitProduction','shortCloseProduction','resolveQuality','adjustStock','createReturn'])assert.equal(X.allowedBy(op,X.actionRules(name)),false,name)
 })
 
-test('Super Admin holds every permission; the dashboard is open to every role',()=>{
+test('Business Owner holds company permissions; legacy Super Admin is read-only',()=>{
   const s=fresh()
-  for(const m of X.PERMISSION_MODULES)for(const a of m.actions)assert.ok(X.hasPermission(roleByKey(s,'super_admin'),m.key,a))
+  for(const m of X.PERMISSION_MODULES)for(const a of m.actions){
+    assert.ok(X.hasPermission(roleByKey(s,'business_owner'),m.key,a))
+    assert.equal(X.hasPermission(roleByKey(s,'super_admin'),m.key,a),a==='view'&&m.key!=='subscription'||a==='view'&&m.key==='subscription')
+  }
   for(const r of s.roles)assert.ok(X.hasPermission(r,'dashboard','view'))
   assert.equal(X.hasPermission(undefined,'dashboard','view'),false,'no role, no access')
 })
@@ -101,43 +119,67 @@ test('A-C1: nobody edits their own role, and nobody grants a permission they do 
 })
 
 test('A-C2: no one promotes themselves or hands out a role at or above their own rank',()=>{
-  const s=withPeople()
-  assert.match(A.updateEntity(s,ctx(s,'em2'),'employees','em2',{roleId:'role1'},'Xodim').result.message,/O‘z rolingiz/)
+  const base=withPeople(),s={...base,employees:base.employees.map(e=>e.id==='em8'?{...e,roleId:'role_owner'}:e)}
+  assert.match(A.updateEntity(s,ctx(s,'em2'),'employees','em2',{roleId:'role1'},'Xodim').result.message,/huquqi yo‘q|O‘z rolingiz/)
   assert.match(A.updateEntity(s,ctx(s),'employees','em3',{roleId:'role1'},'Xodim').result.message,/Super Admin/,'the admin cannot create another admin')
   assert.match(A.updateEntity(s,ctx(s),'employees','em3',{roleId:'role0'},'Xodim').result.message,/Super Admin/)
   assert.match(A.createEntity(s,ctx(s),'employees',{name:'Yangi Kishi',roleId:'role0',status:'Faol'},'Xodim').result.message,/Super Admin/)
   assert.match(A.updateEntity(s,ctx(s),'employees','em9',{shift:'B'},'Xodim').result.message,/darajangizda/,'an admin does not edit another admin')
-  assert.ok(A.updateEntity(s,ctx(s),'employees','em3',{roleId:'role6'},'Xodim').result.ok,'the admin assigns a lower role')
-  assert.ok(A.updateEntity(s,ctx(s,'em8'),'employees','em9',{roleId:'role2'},'Xodim').result.ok,'the Super Admin may demote an admin')
+  assert.ok(A.updateEntity(s,ctx(s),'employees','em3',{roleId:'role6',warehouseId:'w1'},'Xodim').result.ok,'the admin assigns a lower role with a valid warehouse')
+  assert.ok(A.updateEntity(s,ctx(s,'em8'),'employees','em9',{roleId:'role2'},'Xodim').result.ok,'the owner may demote an admin')
+})
+
+test('delegated production manager may assign subordinate roles but cannot grant owner or admin',()=>{
+  const s=fresh(),manager=s.employees.find(e=>e.id==='em2'),operator=roleByKey(s,'operator'),owner=roleByKey(s,'business_owner'),admin=roleByKey(s,'admin')
+  const delegated={...s,roles:s.roles.map(r=>r.key==='production_manager'?{...r,permissions:{...r.permissions,users:{view:true,create:true,edit:true},employees:{view:true,create:true}}}:r)}
+  assert.ok(X.hasPermission(roleByKey(delegated,'production_manager'),'users','create'))
+  assert.equal(X.assignRoleBlocker(delegated,manager,undefined,operator.id),null)
+  assert.ok(X.assignRoleBlocker(delegated,manager,undefined,admin.id))
+  assert.ok(X.assignRoleBlocker(delegated,manager,undefined,owner.id))
+  assert.ok(X.assignRoleBlocker(delegated,manager,undefined,roleByKey(s,'super_admin').id))
+  assert.ok(X.assignRoleBlocker(delegated,manager,manager,owner.id))
+})
+
+test('subscription management stays with the owner even if a custom role stores an edit flag',()=>{
+  const s=fresh(),owner=roleByKey(s,'business_owner'),admin=roleByKey(s,'admin')
+  const custom={id:'custom-subscription',name:'Billing clerk',scope:'all',permissions:{subscription:{view:true,edit:true}}}
+  assert.equal(X.hasPermission(owner,'subscription','edit'),true)
+  assert.equal(X.hasPermission(admin,'subscription','view'),true)
+  assert.equal(X.hasPermission(admin,'subscription','edit'),false)
+  assert.equal(X.hasPermission(custom,'subscription','edit'),false)
+  assert.ok(X.rolePermissionBlocker({...s,roles:[...s.roles,custom]},s.employees[0],custom.id,'subscription','edit'))
+  assert.equal(X.hasPermission(owner,'platform','view'),false)
 })
 
 test('A-H2: the last Super Admin and the acting user cannot be blocked, demoted or deleted',()=>{
   const s=withPeople()
-  assert.match(A.updateEntity(s,ctx(s,'em8'),'employees','em8',{status:'Arxiv'},'Xodim').result.message,/O‘zingizni/)
-  assert.match(A.deleteEntity(s,ctx(s,'em8'),'employees','em8','Xodim').result.message,/O‘zingizni/)
+  assert.match(X.employeeRemovalBlocker(s,s.employees.find(e=>e.id==='em8'),'em8')||'',/O‘zingizni/)
+  assert.match(A.updateEntity(s,ctx(s,'em8'),'employees','em8',{status:'Arxiv'},'Xodim').result.message,/huquqi yo‘q/)
+  assert.match(A.deleteEntity(s,ctx(s,'em8'),'employees','em8','Xodim').result.message,/huquqi yo‘q/)
   assert.match(A.deleteEntity(s,ctx(s),'employees','em8','Xodim').result.message,/Super Admin/)
   assert.match(A.updateEntity(s,ctx(s),'employees','em8',{status:'Arxiv'},'Xodim').result.message,/Super Admin/)
-  // With a second Super Admin, one may retire the other; the remaining one is protected again.
+  // A legacy Super Admin cannot manage another privileged account, even when two exist.
   const two={...s,employees:s.employees.map(e=>e.id==='em9'?{...e,roleId:'role0'}:e)}
   const demoted=A.updateEntity(two,ctx(two,'em8'),'employees','em9',{roleId:'role1'},'Xodim')
-  assert.ok(demoted.result.ok,demoted.result.message)
-  assert.equal(X.superAdminEmployees(demoted.state).length,1)
+  assert.equal(demoted.result.ok,false)
+  assert.equal(demoted.state,two)
   // Defence in depth: even a Super Admin actor cannot demote the only active Super Admin (here the actor is archived).
   const lone={...s,employees:[...s.employees,{...s.employees[0],id:'em10',name:'Arxiv Super',roleId:'role0',status:'Arxiv'}]}
   const actor=lone.employees.find(e=>e.id==='em10')
-  assert.match(X.assignRoleBlocker(lone,actor,lone.employees.find(e=>e.id==='em8'),'role1')||'',/Oxirgi faol Super Admin/)
-  assert.match(X.employeeRemovalBlocker(lone,actor,'em8')||'',/Oxirgi faol Super Admin/)
+  assert.match(X.assignRoleBlocker(lone,actor,lone.employees.find(e=>e.id==='em8'),'role1')||'',/Oxirgi faol biznes egasi/)
+  assert.match(X.employeeRemovalBlocker(lone,actor,'em8')||'',/Oxirgi faol biznes egasi/)
 })
 
 test('roles: system roles and roles in use are never deleted; a copy holds only the copier’s permissions',()=>{
   let s=withPeople()
-  assert.match(A.deleteRole(s,ctx(s,'em8'),'role5').result.message,/tizim roli/)
+  assert.match(A.deleteRole(s,ctx(s),'role5').result.message,/tizim roli/)
   const created=A.createRole(s,ctx(s),{name:'Smena boshlig‘i'});assert.ok(created.result.ok);s=created.state
   s={...s,employees:s.employees.map(e=>e.id==='em7'?{...e,roleId:created.result.id}:e)}
   assert.match(A.deleteRole(s,ctx(s),created.result.id).result.message,/biriktirilgan/)
   s={...s,employees:s.employees.map(e=>e.id==='em7'?{...e,roleId:'role5'}:e)}
   assert.ok(A.deleteRole(s,ctx(s),created.result.id).result.ok)
-  // em2 (production manager) copies the admin role: only what em2 holds is copied.
+  // Delegation is explicit; an all-scope manager may copy only their own permissions.
+  s={...s,roles:s.roles.map(r=>r.id==='role2'?{...r,scope:'all',permissions:{...r.permissions,roles:{view:true,create:true}}}:r)}
   const copy=A.duplicateRole(s,ctx(s,'em2'),'role1');assert.ok(copy.result.ok);const role=copy.state.roles.find(r=>r.id===copy.result.id)
   const pm=roleByKey(s,'production_manager')
   for(const key of permissionKeys(role.permissions)){const [m,a]=key.split('.');assert.ok(X.hasPermission(pm,m,a),key)}
@@ -159,8 +201,8 @@ test('v4 migration: eight roles, ids and assignments kept, untouched roles get t
   const {state:after,applied}=migrateState(before)
   assert.equal(after.schemaVersion,SCHEMA_VERSION)
   // v3 data runs the v4 step and then the v5 version mark (Phase 5), in order.
-  assert.deepEqual(applied.map(a=>a.split(':')[0]),['v4','v5'])
-  assert.deepEqual(after.roles.map(r=>r.key).sort(),['admin','maintenance','operator','production_manager','quality','super_admin','supply_sales','warehouse'])
+  assert.deepEqual(applied.map(a=>a.split(':')[0]),['v4','v5','v6','v7'])
+  assert.deepEqual(after.roles.map(r=>r.key).sort(),['admin','business_owner','maintenance','operator','production_manager','quality','super_admin','supply_sales','warehouse'])
   for(const id of ['role1','role2','role3','role4','role5'])assert.ok(after.roles.some(r=>r.id===id),id)
   assert.deepEqual(after.employees,before.employees,'every employee keeps their role id')
   assert.equal(roleByKey(after,'operator').permissions.production.edit,undefined,'untouched operator gets execute-only defaults')
@@ -202,7 +244,7 @@ test('a fresh install is already current and needs no migration',()=>{
   const s=createInitialState()
   assert.equal(s.schemaVersion,SCHEMA_VERSION)
   assert.equal(migrateState(s).applied.length,0)
-  assert.equal(s.roles.length,8)
+  assert.equal(s.roles.length,9)
   assert.ok(s.roles.every(r=>r.system&&r.key))
 })
 

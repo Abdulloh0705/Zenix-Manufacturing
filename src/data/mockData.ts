@@ -122,7 +122,7 @@ function baseState():ManufacturingState{
       {id:'qcp5',title:'Po‘lat list qalinlik sertifikati',scope:'Incoming',productId:'rm2',frequency:'Every time',sampleRate:100,checkType:'Pass-Fail',instructions:'Mill certificate va 1.5 mm ±0.05 qalinlikni tekshiring.',active:true},
     ],
     maintenanceRequests:[],subcontractOrders:[],repairOrders:[],notifications:[],activity:[],currentEmployeeId:'em1',schemaVersion:SCHEMA_VERSION,
-    timeLogs:[],downtimeEvents:[],lots:[],forecasts:[],returns:[],attachments:[],receivables:[],supplierReplacements:[],receivableReconciliations:[],
+    timeLogs:[],downtimeEvents:[],lots:[],forecasts:[],returns:[],attachments:[],receivables:[],payables:[],supplierReplacements:[],receivableReconciliations:[],
   }
   // Demo customers' balances are opening ledger entries, so the balance shown is the ledger's (audit #19).
   return {...s,receivables:openingEntries(s.customers,stamp(new Date(2026,0,1)))}
@@ -131,6 +131,23 @@ function baseState():ManufacturingState{
 /** Clean start: master data, settings and roles; no orders, stock, purchases, QC, maintenance or history. */
 export function createInitialState(now=new Date()):ManufacturingState{
   return clearTransactions(baseState(),now)
+}
+
+/** A new company's workspace: only an owner profile, roles and a minimal site/warehouse scaffold. */
+export function createEmptyTenantState(company:string,ownerName:string):ManufacturingState{
+  const base=createInitialState()
+  base.roles=base.roles.filter(role=>role.key!=='super_admin')
+  const owner=base.employees[0]
+  return {...base,
+    settings:{...base.settings,defaultBranchId:'b1',defaultWarehouseId:'w1',defaultLineId:'',company:{name:company.trim(),currency:'UZS',timezone:'Asia/Tashkent',taxId:''}},
+    branches:[{id:'b1',name:'Asosiy filial',code:'MAIN',status:'Faol'}],
+    warehouses:[{id:'w1',name:'Asosiy ombor',code:'MAIN-WH',branchId:'b1',type:'Mixed',status:'Faol',locations:['MAIN']}],
+    productionLines:[],workCenters:[],products:[],rawMaterials:[],boms:[],stockBalances:[],stockMovements:[],productionOrders:[],
+    suppliers:[],supplierMaterials:[],purchaseOrders:[],customers:[],salesOrders:[],qualityChecks:[],qualityAlerts:[],equipment:[],maintenanceOrders:[],
+    employees:[{...owner,name:ownerName.trim(),workCenterId:'',attendance:0,efficiency:0,hourlyCost:0}],
+    expenses:[],engineeringChanges:[],qualityControlPoints:[],maintenanceRequests:[],subcontractOrders:[],repairOrders:[],notifications:[],activity:[],
+    timeLogs:[],downtimeEvents:[],lots:[],forecasts:[],returns:[],attachments:[],receivables:[],payables:[],supplierReplacements:[],receivableReconciliations:[],
+  }
 }
 
 /** Demo history for tests — never used to initialise the app. */

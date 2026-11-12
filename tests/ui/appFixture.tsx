@@ -18,8 +18,9 @@ function LocationProbe(){const l=useLocation();location.current=l.pathname+l.sea
  */
 export function signIn(employeeId='em1'){
   const now=new Date(),later=new Date(now.getTime()+864e5).toISOString()
-  localStorage.setItem(AUTH_KEY,JSON.stringify({version:1,accounts:[{id:'acc-test',employeeId,username:'ui.test',hash:'x',salt:'x',iterations:1,status:'active',failedCount:0,mustChangePassword:false,createdAt:now.toISOString()}],policy:{},events:[],attempts:{}}))
-  localStorage.setItem(SESSION_KEY,JSON.stringify({id:'s-test',accountId:'acc-test',employeeId,startedAt:now.toISOString(),lastActivity:now.toISOString(),expiresAt:later,remember:true}))
+  const account=(id:string,employee:string)=>({id,employeeId:employee,username:id,hash:'x',salt:'x',iterations:1,status:'active',failedCount:0,mustChangePassword:false,createdAt:now.toISOString()})
+  localStorage.setItem(AUTH_KEY,JSON.stringify({version:1,accounts:[account('acc-owner','em1'),...(employeeId==='em1'?[]:[account('acc-test',employeeId)])],policy:{},events:[],attempts:{}}))
+  localStorage.setItem(SESSION_KEY,JSON.stringify({id:'s-test',accountId:employeeId==='em1'?'acc-owner':'acc-test',employeeId,startedAt:now.toISOString(),lastActivity:now.toISOString(),expiresAt:later,remember:true}))
 }
 
 /** Seeds stored business data: the initial state plus test records, as if saved by an earlier visit. */
@@ -30,10 +31,10 @@ export function seedState(patch:(s:ManufacturingState)=>ManufacturingState){
 
 export async function mountApp(path='/',employeeId='em1'){
   if(!localStorage.getItem(SESSION_KEY))signIn(employeeId)
-  // Like the first-run setup: the default test user is the Super Admin (the app blocks actions without one).
+  // The fixture has an explicit owner alongside the active test account.
   const stored=localStorage.getItem(STATE_KEY)
   const state:ManufacturingState=stored?JSON.parse(stored):createInitialState()
-  if(employeeId==='em1'){state.employees=state.employees.map(e=>e.id==='em1'?{...e,roleId:'role0'}:e);localStorage.setItem(STATE_KEY,JSON.stringify(state));localStorage.setItem('zenix-manufacturing-v3-clean-start',JSON.stringify(new Date().toISOString()))}
+  state.employees=state.employees.map(e=>e.id==='em1'?{...e,roleId:'role_owner'}:e);localStorage.setItem(STATE_KEY,JSON.stringify(state));localStorage.setItem('zenix-manufacturing-v3-clean-start',JSON.stringify(new Date().toISOString()))
   const view=await render(<MemoryRouter initialEntries={[path]}><AppProvider><App/><LocationProbe/></AppProvider></MemoryRouter>)
   await flush(60)
   return view

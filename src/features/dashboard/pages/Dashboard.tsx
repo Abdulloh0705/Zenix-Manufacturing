@@ -1,8 +1,8 @@
 import {useMemo,useState} from 'react'
-import {useNavigate} from 'react-router-dom'
+import {Link,useNavigate} from 'react-router-dom'
 import {useApp} from '../../../app/providers/AppProvider/AppContext'
 import {Card,Empty,Icon,KPI,PageHeader,Progress,Segmented,StatusBadge,Timeline,useRecordParam,useSearchParamState} from '../../../shared/ui'
-import type {ProductionStatus} from '../../../types'
+import type {ProductionStatus,SystemRoleKey} from '../../../types'
 import {DASHBOARD_PERIODS as P,dashboardSnapshot} from '../../../domain/dashboard'
 import {deliveryRisk} from '../../../domain/manufacturingEngine'
 import type {MaterialStockState} from '../../../domain/manufacturingEngine'
@@ -15,6 +15,36 @@ import {OrderDrawer,OrderFormModal} from '../../production/components/OrderParts
 
 type Attention={id:string;tone:'danger'|'warning';title:string;detail:string;count:number;path:string}
 
+type WorkspaceLink={module:string;label:string;path:string}
+
+const ROLE_WORKSPACE:Partial<Record<SystemRoleKey,WorkspaceLink[]>>={
+  production_manager:[
+    {module:'production',label:'Rejalashtirish',path:'/production?view=planning'},
+    {module:'production',label:'Ishlab chiqarish buyurtmalari',path:'/production?view=orders'},
+    {module:'materials',label:'Material talabi',path:'/materials?view=requirements'},
+  ],
+  operator:[
+    {module:'production',label:'Sex ishlari',path:'/production?view=shop-floor'},
+    {module:'production',label:'Operatsiyalar',path:'/production?view=operations'},
+  ],
+  quality:[
+    {module:'quality',label:'Sifat tekshiruvlari',path:'/quality?view=checks'},
+    {module:'quality',label:'NCR va tuzatishlar',path:'/quality?view=alerts'},
+  ],
+  maintenance:[
+    {module:'equipment',label:'Texnik xizmat',path:'/equipment?view=maintenance'},
+    {module:'equipment',label:'Uskunalar to‘xtashi',path:'/equipment?view=downtime'},
+  ],
+  warehouse:[
+    {module:'warehouse',label:'Ombor qoldiqlari',path:'/warehouse?view=stock'},
+    {module:'warehouse',label:'Transferlar',path:'/warehouse?view=transfers'},
+    {module:'purchases',label:'Qabul qilish',path:'/purchases?view=receiving'},
+  ],
+  supply_sales:[
+    {module:'purchases',label:'Xarid buyurtmalari',path:'/purchases?view=orders'},
+    {module:'sales',label:'Sotuv buyurtmalari',path:'/sales?view=orders'},
+  ],
+}
 const STATUS_SLOT:Record<ProductionStatus,'muted'|'mfg'|number>={'Qoralama':'muted','Material kutilmoqda':2,'Tasdiqlangan':1,'Jarayonda':'mfg','Pauzada':4,'Sifat nazoratida':5,'Yakunlangan':3,'Bekor qilingan':'muted'}
 const STOCK_SLOT:Record<MaterialStockState,string>={Shortage:'danger',Kritik:'2',Reorder:'warning',Normal:'success'}
 const STOCK_TONE:Record<MaterialStockState,'danger'|'warning'|'success'>={Shortage:'danger',Kritik:'danger',Reorder:'warning',Normal:'success'}
@@ -59,12 +89,21 @@ export default function Dashboard(){
   const activity=[...(operational.length>=3?operational:s.activity)].sort((a,b)=>b.date.localeCompare(a.date)).slice(0,6)
   const branch=s.branches.find(b=>b.id===s.settings.defaultBranchId)
 
+  const workspace=app.currentRole.key ? ROLE_WORKSPACE[app.currentRole.key] : undefined
+  const workspaceLinks=workspace?.filter(item=>app.can(item.module))
+
   return <div className="page-stack">
     <PageHeader title="Boshqaruv paneli" subtitle={`${longDate()} · ${branch?.name||'Barcha filiallar'} · ${d.open.length} ochiq buyurtma`}
       actions={<>
         {app.can('ai')&&s.settings.ai.enabled&&<button type="button" className="secondary-glass-btn" onClick={()=>app.setAiOpen(true)}><Icon name="spark"/>AI tahlil</button>}
         {canCreate&&<button type="button" className="primary-glass-btn" onClick={()=>setCreate(true)}><Icon name="plus"/>Yangi buyurtma</button>}
       </>}/>
+
+    {!!workspaceLinks?.length&&<Card title="Ish joyim" subtitle={app.currentRole.name}>
+      <nav className="role-workspace-links" aria-label="Rolga mos ish joyi">
+        {workspaceLinks.map(item=><Link key={item.path} className="secondary-glass-btn" to={item.path}>{item.label}</Link>)}
+      </nav>
+    </Card>}
 
     <div className="dash-grid">
       {/* 1–8: what happened, is it on time, material, efficiency, quality, stops, cost */}

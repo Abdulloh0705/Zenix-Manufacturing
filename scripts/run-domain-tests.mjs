@@ -11,6 +11,7 @@ fs.mkdirSync(out,{recursive:true})
 // Domain modules import each other (engine ← actions ← seed), so bundle each entry point.
 const entries={
   manufacturingEngine:'src/domain/manufacturingEngine.ts',
+  profitability:'src/domain/profitability.ts',
   planning:'src/domain/planning.ts',
   maintenance:'src/domain/maintenance.ts',
   actions:'src/domain/actions.ts',
@@ -22,7 +23,10 @@ const entries={
   exportData:'src/utils/exportData.ts',
   dates:'src/utils/dates.ts',
   access:'src/domain/access.ts',
+  backupSecurity:'src/domain/backupSecurity.ts',
   auth:'src/domain/auth.ts',
+  saas:'src/domain/saas.ts',
+  platform:'src/domain/platform.ts',
   migrations:'src/domain/migrations.ts',
   crypto:'src/shared/lib/crypto.ts',
   syncedState:'src/shared/lib/syncedState.ts',
@@ -32,6 +36,7 @@ const entries={
   uom:'src/domain/uom.ts',
   inventory:'src/domain/inventory.ts',
   receivables:'src/domain/receivables.ts',
+  payables:'src/domain/payables.ts',
   serials:'src/domain/serials.ts',
   notifications:'src/domain/notifications.ts',
   format:'src/utils/format.ts',

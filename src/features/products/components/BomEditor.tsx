@@ -1,6 +1,6 @@
-import {useState} from 'react'
+import {useRef,useState} from 'react'
 import {useApp} from '../../../app/providers/AppProvider/AppContext'
-import {Checkbox,Confirm,Field,Icon,Input,Modal,Select,Textarea} from '../../../shared/ui'
+import {Checkbox,Confirm,Field,Icon,Input,Modal,Select,Textarea,useDirtyMarker} from '../../../shared/ui'
 import type {Bom,BomComponent,BomOperation} from '../../../types'
 import {estimateOrderCost} from '../../../domain/manufacturingEngine'
 import {money} from '../../../utils/format'
@@ -20,6 +20,8 @@ function UnitCell({itemId,value,onChange}:{itemId:string;value:string;onChange:(
 export function BomEditor({bom,onClose}:{bom:Bom;onClose:()=>void}){
   const app=useApp(),s=app.state
   const [draft,setDraft]=useState<Bom>(()=>JSON.parse(JSON.stringify(bom)))
+  const saved=useRef(JSON.stringify(bom))
+  useDirtyMarker(JSON.stringify(draft)!==saved.current)
   const [confirmActivate,setConfirmActivate]=useState(false)
   const [error,setError]=useState('')
   const items=[...s.rawMaterials.filter(m=>m.status!=='Arxiv').map(m=>({id:m.id,label:`${m.name} · ${m.sku}`})),...s.products.filter(p=>p.id!==draft.productId&&p.status!=='Arxiv'&&s.boms.some(b=>b.productId===p.id&&b.status==='Faol')).map(p=>({id:p.id,label:`${p.name} · sub-assembly`}))]
@@ -32,7 +34,7 @@ export function BomEditor({bom,onClose}:{bom:Bom;onClose:()=>void}){
   const unitCost=(id:string)=>s.rawMaterials.find(m=>m.id===id)?.standardCost??s.products.find(p=>p.id===id)?.standardCost??0
   // Stock units in one BOM-line unit (the same UoM service saveBom stamps with); an impossible unit costs nothing here.
   const lineFactor=(c:BomComponent)=>{const item=s.rawMaterials.find(m=>m.id===c.materialId)||s.products.find(p=>p.id===c.materialId);const f=item?unitFactor(item,c.unit):{error:''};return 'error' in f?0:f.factor}
-  const save=()=>{setError('');const r=app.saveBom(draft);if(!r.ok)setError(r.message);return r.ok}
+  const save=()=>{setError('');const r=app.saveBom(draft);if(!r.ok)setError(r.message);else saved.current=JSON.stringify(draft);return r.ok}
   return <Modal open onClose={onClose} title={`${draft.code} ${draft.version} — tahrirlash`} eyebrow="Draft" subtitle={`${productName(s,draft.productId)} · faol BOM faqat ECO orqali o‘zgaradi`} size="xl"
     footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Yopish</button><span className="spacer"/><span className="soft-meta">Tannarx ≈ <b>{money(estimate.total/100)}</b>/dona</span><button type="button" className="secondary-glass-btn" onClick={()=>{if(save())onClose()}}><Icon name="check" size={16}/>Saqlash</button>{app.can('products','approve')&&<button type="button" className="primary-glass-btn" onClick={()=>{if(save())setConfirmActivate(true)}}><Icon name="flag" size={16}/>Faollashtirish</button>}</>}>
     <div className="form-stack">

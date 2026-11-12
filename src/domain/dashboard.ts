@@ -1,5 +1,6 @@
 import type {ManufacturingState,ProductionStatus} from '../types'
-import {MATERIAL_STOCK_STATES,awaitsRework,calculateCapacityLoads,capacityConstraints,createMrpPlan,deliveryRisk,downtimeSummary,isDefect,isOpenOrder,materialShortages,materialStockRows,orderCosting,outputByDay,productionOee} from './manufacturingEngine'
+import {MATERIAL_STOCK_STATES,awaitsRework,calculateCapacityLoads,capacityConstraints,deliveryRisk,downtimeSummary,isDefect,isOpenOrder,materialStockRows,orderCosting,outputByDay,productionOee} from './manufacturingEngine'
+import {branchPurchaseNeeds} from './planning'
 import {addDays,periodStart,todayISO} from '../utils/dates'
 
 /**
@@ -39,7 +40,7 @@ export function dashboardSnapshot(s:ManufacturingState,trendDays=7){
   const pipeline=PIPELINE_STATUSES.map(status=>({status,count:countOf(status)}))
 
   // Are we missing materials? Is stock healthy?
-  const shortages=materialShortages(s,createMrpPlan(s))
+  const shortages=branchPurchaseNeeds(s).filter(r=>r.shortage>0)
   const stock=materialStockRows(s)
   const materials={shortages,critical:shortages.filter(r=>r.critical),waiting:open.filter(o=>o.status==='Material kutilmoqda'),
     stock,states:MATERIAL_STOCK_STATES.map(state=>({state,count:stock.filter(r=>r.state===state).length}))}

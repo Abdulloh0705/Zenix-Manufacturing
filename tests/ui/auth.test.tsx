@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import {act} from 'react'
 import {MemoryRouter,useLocation} from 'react-router-dom'
 import App from '../../src/App'
-import {AppProvider} from '../../src/app/providers/AppProvider/AppContext'
+import {AppProvider,useApp} from '../../src/app/providers/AppProvider/AppContext'
 import {createInitialState} from '../../src/data/mockData'
 import {recoveryTicketMessage} from '../../src/domain/auth'
 import type {AuthStore} from '../../src/domain/auth'
@@ -85,7 +85,13 @@ test('registration validates each field, shows the key once, and creates the own
   await type(input('register-name'),'Abdulloh Xoji')
   await type(input('register-company'),'Yangi Zavod')
   await submit()
-  assert.ok(text().includes('Telefon yoki loginni kiriting'))
+  assert.ok(text().includes('Telefon raqamini kiriting'))
+  await type(input('register-phone'),'12')
+  await submit()
+  assert.ok(text().includes('Telefon raqami noto‘g‘ri'))
+  await type(input('register-phone'),'+998 90 111 22 33')
+  await submit()
+  assert.ok(text().includes('Loginni kiriting'))
   await type(input('register-username'),'boss')
   await type(input('register-password'),'qisqa')
   await submit()
@@ -114,22 +120,48 @@ test('registration validates each field, shows the key once, and creates the own
   assert.equal(state.settings.company.name,'Yangi Zavod')
   const owner=state.employees.find((e:{id:string})=>e.id==='em1')
   assert.equal(owner.name,'Abdulloh Xoji')
-  assert.equal(state.roles.find((r:{id:string})=>r.id===owner.roleId).key,'super_admin')
+  assert.equal(state.roles.find((r:{id:string})=>r.id===owner.roleId).key,'business_owner')
 })
 
-test('an existing company opens Login; Register only explains that an administrator opens accounts',async()=>{
+test('an existing company opens Login; Register offers a separate company without changing existing accounts',async()=>{
   await existingCompany()
   const before=localStorage.getItem(AUTH_KEY)
   await open('/')
   assert.equal(path,'/login')
   await click(byText('Ro‘yxatdan o‘tish','a'))
   assert.equal(path,'/register')
-  assert.ok(text().includes('allaqachon ro‘yxatdan o‘tgan'))
-  assert.equal(input('register-username'),null,'there is no form to register into a company')
+  assert.ok(text().includes('Yangi, alohida kompaniya'))
+  assert.ok(input('register-username'),'a separate company can be registered')
   assert.equal(localStorage.getItem(AUTH_KEY),before)
   await click(byText('Kirish','a'))
   assert.equal(path,'/login')
   assert.ok(input('login-password'))
+})
+
+test('second company registration creates an isolated ERP key and owner account',async()=>{
+  await existingCompany()
+  const original=localStorage.getItem(STATE_KEY)
+  await open('/register')
+  await type(input('register-name'),'Ikkinchi Egasi')
+  await type(input('register-company'),'Factory B')
+  await type(input('register-phone'),'+998 93 444 55 66')
+  await type(input('register-username'),'factory.b.owner')
+  await type(input('register-password'),'Ikkinchi2026x')
+  await type(input('register-confirm'),'Ikkinchi2026x')
+  await click(byText('Kompaniyani ro‘yxatdan o‘tkazish'))
+  await until(()=>text().includes('Tiklash kalitini saqlang'))
+  const saas=JSON.parse(localStorage.getItem('zenix-saas-v1')||'{}')
+  const created=saas.tenants.find((t:{name:string})=>t.name==='Factory B')
+  assert.ok(created)
+  const state=JSON.parse(localStorage.getItem(`zenix-erp-${created.id}-state`)||'{}')
+  assert.equal(state.settings.company.name,'Factory B')
+  assert.equal(state.employees.length,1)
+  assert.equal(state.products.length,0)
+  assert.equal(state.productionOrders.length,0)
+  assert.equal(state.activity.length,0)
+  assert.equal(localStorage.getItem(STATE_KEY),original)
+  assert.equal(stored().accounts.length,3)
+  assert.equal(localStorage.getItem(SESSION_KEY),null,'new owner signs in after saving their recovery key')
 })
 
 test('login: empty fields and a wrong password say so; an employee signs in; the session survives a reload',async()=>{
@@ -233,7 +265,7 @@ test('owner ticket: storage tricks and forged tickets fail; a real one restores 
   await attempt(await stranger.ticket('boss',code),'Chipta noto‘g‘ri')
 
   await type(input('forgot-login'),'dilshod.op')
-  await attempt(await owner.ticket('dilshod.op',code),'faqat faol Super Admin')
+  await attempt(await owner.ticket('dilshod.op',code),'faqat faol biznes egasi')
   assert.deepEqual(stored().accounts,before.accounts,'an employee is not recovered this way')
 
   await type(input('forgot-login'),'boss')
@@ -250,12 +282,30 @@ test('owner ticket: storage tricks and forged tickets fail; a real one restores 
   assert.equal(localStorage.getItem(STATE_KEY),data,'business data is untouched')
 })
 
-test('an existing Super Admin, employees and data survive every public page and a refused registration',async()=>{
+test('ZA-005: a signed owner recovery ticket is consumed once across provider calls',async()=>{
+  const owner=await signingKey()
+  await existingCompany()
+  let recover:ReturnType<typeof useApp>['recoverWithTicket']|undefined
+  function RecoveryProbe(){recover=useApp().recoverWithTicket;return null}
+  await render(<AppProvider recoveryPublicKey={owner.publicKey}><RecoveryProbe/></AppProvider>)
+  const ticket=await owner.ticket('boss','single-use-code')
+  let first:Awaited<ReturnType<NonNullable<typeof recover>>>|undefined
+  await act(async()=>{first=await recover?.('boss',ticket,'single-use-code','Fresh2026x')})
+  assert.equal(first?.ok,true,first?.message)
+  const after=stored().accounts[0].hash
+  let replay:Awaited<ReturnType<NonNullable<typeof recover>>>|undefined
+  await act(async()=>{replay=await recover?.('boss',ticket,'single-use-code','Another2026x')})
+  assert.equal(replay?.ok,false)
+  assert.match(replay?.message||'',/allaqachon ishlatilgan/)
+  assert.equal(stored().accounts[0].hash,after)
+})
+
+test('existing employees and data survive every public page including separate company registration',async()=>{
   await existingCompany()
   const auth=localStorage.getItem(AUTH_KEY),data=localStorage.getItem(STATE_KEY)
   for(const at of ['/','/login','/register','/setup','/signup','/forgot-password']){
     const view=await open(at)
-    assert.equal(input('register-username'),null,`${at} offers no registration`)
+    assert.equal(Boolean(input('register-username')),['/register','/setup','/signup'].includes(at),`${at} registration visibility`)
     await view.unmount()
   }
   assert.equal(localStorage.getItem(AUTH_KEY),auth,'accounts are byte for byte the same')
@@ -268,7 +318,7 @@ test('lost accounts next to a company: registration stays closed, so no stranger
   const data=localStorage.getItem(STATE_KEY)
   await open('/')
   assert.equal(path,'/register')
-  assert.ok(text().includes('egasi allaqachon bo‘lgan'))
+  assert.ok(text().includes('egasi aniqlanmadi'))
   assert.equal(input('register-username'),null)
   assert.equal(localStorage.getItem(AUTH_KEY),null)
   assert.equal(localStorage.getItem(STATE_KEY),data)

@@ -9,7 +9,7 @@ import {addDays,isoDate} from '../utils/dates'
 export const TRANSACTION_KEYS=[
   'productionOrders','stockBalances','stockMovements','lots','timeLogs','purchaseOrders','subcontractOrders','salesOrders','returns',
   'qualityChecks','qualityAlerts','maintenanceOrders','maintenanceRequests','repairOrders','downtimeEvents','expenses',
-  'engineeringChanges','forecasts','notifications','activity','receivables','supplierReplacements','receivableReconciliations',
+  'engineeringChanges','forecasts','notifications','activity','receivables','payables','supplierReplacements','receivableReconciliations',
 ] as const satisfies readonly (keyof ManufacturingState)[]
 
 /** Master collections; their records survive a reset (attachments survive only on master records). */

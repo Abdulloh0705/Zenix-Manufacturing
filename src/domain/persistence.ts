@@ -5,6 +5,7 @@
 import type {Bom,ManufacturingState,QuarantinedRecord,SettingsState} from '../types'
 import {migrateSupplierLinks} from './supplierMaterials'
 import {openingEntries} from './receivables'
+import {payableOpenings} from './payables'
 import {stamp} from '../utils/dates'
 import {SCHEMA_VERSION,migrateState} from './migrations'
 import {normalizePrefs} from '../app/theme/preferences'
@@ -128,6 +129,7 @@ export function normalizeLoaded(loaded:Partial<ManufacturingState>,seed:Manufact
   // Saved before the receivables ledger (audit #19): each customer's stored debt becomes its opening entry, so the
   // balance stays the same and from now on changes only through ledger entries.
   if(!Array.isArray(loaded.receivables))merged.receivables=openingEntries(merged.customers,stamp(new Date()))
+  if(!Array.isArray(loaded.payables))merged.payables=payableOpenings(merged.suppliers,stamp(new Date()))
   const s=(isRecord(loaded.settings)?loaded.settings:undefined) as Partial<SettingsState>|undefined
   const part=<T,>(v:T|undefined)=>(isRecord(v)?v:{}) as Partial<T>
   merged.settings={...seed.settings,...(s||{}),notifications:{...seed.settings.notifications,...part(s?.notifications)},ai:{...seed.settings.ai,...part(s?.ai)},company:{...seed.settings.company,...part(s?.company)},policies:{...seed.settings.policies,...part(s?.policies)}}

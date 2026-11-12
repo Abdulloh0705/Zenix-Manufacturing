@@ -1,8 +1,18 @@
 import {defineConfig,devices} from '@playwright/test'
+import {generateKeyPairSync} from 'node:crypto'
 
 // Browser smoke suite (e2e/). Runs against the production build served by `vite preview`, so it exercises what
 // ships. Locally `PW_CHANNEL=chrome` uses an installed Chrome instead of downloading Playwright's Chromium.
-const PORT=4179
+const PORT=Number(process.env.PW_PORT)||4179
+
+// Platform E2E: a throwaway ECDSA P-256 key pair per run. The public key is baked into this test build only; the
+// private JWK stays in this process's environment (inherited by Playwright workers) to sign short-lived tickets.
+if(!process.env.ZENIX_E2E_PLATFORM_JWK){
+  const {publicKey,privateKey}=generateKeyPairSync('ec',{namedCurve:'P-256'})
+  const pub=publicKey.export({format:'jwk'})
+  process.env.ZENIX_E2E_PLATFORM_JWK=JSON.stringify(privateKey.export({format:'jwk'}))
+  process.env.VITE_PLATFORM_PUBLIC_KEY=Buffer.concat([Buffer.from([4]),Buffer.from(pub.x!,'base64url'),Buffer.from(pub.y!,'base64url')]).toString('base64url')
+}
 const channel=process.env.PW_CHANNEL||undefined
 
 export default defineConfig({

@@ -1,11 +1,11 @@
 import {useMemo,useState} from 'react'
 import {useNavigate,useSearchParams} from 'react-router-dom'
 import {useApp} from '../../../app/providers/AppProvider/AppContext'
-import {Card,Checkbox,Confirm,Drawer,Empty,ExportPermission,Field,FilterSelect,Icon,InfoGrid,Input,KPI,Modal,PageHeader,ResourceTable,Select,StatusBadge,Tabs,Textarea,Toggle,required,useForm,useRecordParam,useSearchParamState} from '../../../shared/ui'
+import {Card,Confirm,Drawer,Empty,ExportPermission,Field,FilterSelect,Icon,InfoGrid,Input,KPI,Modal,PageHeader,ResourceTable,Select,StatusBadge,Tabs,Textarea,Toggle,required,useForm,useRecordParam,useSearchParamState} from '../../../shared/ui'
 import type {Employee,Role} from '../../../types'
 import type {Account,AuthEvent,SecurityPolicy} from '../../../domain/auth'
-import {accountManageBlocker,activeSuperAdmins} from '../../../domain/auth'
-import {assignRoleBlocker,employeeRemovalBlocker,isSuperAdminRole,roleManageBlocker,roleOf,superAdminEmployees} from '../../../domain/access'
+import {accountManageBlocker,activeSuperAdmins,findAccount,validatePassword,validateUsername} from '../../../domain/auth'
+import {assignRoleBlocker,employeeBranchIds,homeOf,employeeRemovalBlocker,isSuperAdminRole,roleManageBlocker,roleOf,roleRank} from '../../../domain/access'
 import {SCHEMA_VERSION} from '../../../domain/migrations'
 import {ACTIVITY_LIMIT} from '../../../domain/actions'
 import {AUTH_EVENT_LIMIT} from '../../../domain/auth'
@@ -60,19 +60,19 @@ function AdminDashboard(){
     <div className="inline-note warning"><Icon name="info"/><span><b>Demo autentifikatsiya.</b> Akkauntlar, parol xeshlari va sessiya shu brauzerda saqlanadi. Bu kirishni tartibga soladi, lekin brauzer xotirasini o‘zgartira oladigan odamdan himoya qilmaydi — haqiqiy xavfsizlik uchun backend kerak.</span></div>
     <div className="kpi-grid">
       <KPI label="Foydalanuvchilar" value={app.auth.accounts.length} sub={`${rows.filter(r=>r.state==='active').length} faol · ${rows.filter(r=>r.state==='blocked').length} bloklangan · ${rows.filter(r=>r.state==='none').length} akkauntsiz`} tone="mfg" icon={<Icon name="users"/>} onClick={app.can('users')?()=>navigate('/admin?view=users'):undefined}/>
-      <KPI label="Rollar" value={s.roles.length} sub={`${s.roles.filter(r=>r.system).length} tizim · ${s.roles.filter(r=>!r.system).length} maxsus`} tone="purple" icon={<Icon name="lock"/>} onClick={app.can('roles')?()=>navigate('/admin?view=roles'):undefined}/>
+      <KPI label="Rollar" value={s.roles.filter(r=>!isSuperAdminRole(r)).length} sub={`${s.roles.filter(r=>r.system&&!isSuperAdminRole(r)).length} tizim · ${s.roles.filter(r=>!r.system).length} maxsus`} tone="purple" icon={<Icon name="lock"/>} onClick={app.can('roles')?()=>navigate('/admin?view=roles'):undefined}/>
       <KPI label="Faol session" value={app.auth.signedIn?1:0} sub={`shu brauzer · ${app.auth.account?.username||'—'}`} tone="mint" icon={<Icon name="user"/>}/>
       <KPI label="Xato kirishlar · 24 soat" value={failed} sub={`${rows.filter(r=>r.state==='locked').length} ta akkaunt qulflangan`} tone={failed?'orange':'neutral'} icon={<Icon name="warning"/>} onClick={app.can('audit')?()=>navigate('/admin?view=activity&source=auth'):undefined}/>
     </div>
     <div className="two-col">
       <Card title="Xavfsizlik holati">
         <div className="stack-list">
-          <div className="list-row"><span className="list-row-copy"><b>Faol Super Admin</b><small>{supers.map(a=>a.username).join(', ')||'—'}</small></span><StatusBadge tone={supers.length>1?'success':'warning'}>{supers.length}</StatusBadge></div>
+          <div className="list-row"><span className="list-row-copy"><b>Faol biznes egasi</b><small>{supers.map(a=>a.username).join(', ')||'—'}</small></span><StatusBadge tone={supers.length>1?'success':'warning'}>{supers.length}</StatusBadge></div>
           <div className="list-row"><span className="list-row-copy"><b>Parol siyosati</b><small>kamida {app.auth.policy.minPasswordLength} belgi · {app.auth.policy.maxFailedAttempts} xato → {app.auth.policy.lockMinutes} min qulf</small></span><StatusBadge tone="info">Faol</StatusBadge></div>
           <div className="list-row"><span className="list-row-copy"><b>Session</b><small>{app.auth.policy.idleMinutes} min harakatsizlik · {app.auth.policy.sessionHours} soat · eslab qolish {app.auth.policy.rememberDays} kun</small></span><StatusBadge tone="info">Faol</StatusBadge></div>
           <div className="list-row"><span className="list-row-copy"><b>Vaqtinchalik parol bilan</b><small>keyingi kirishda almashtirishi kerak</small></span><StatusBadge tone={app.auth.accounts.some(a=>a.mustChangePassword)?'warning':'success'}>{app.auth.accounts.filter(a=>a.mustChangePassword).length}</StatusBadge></div>
         </div>
-        {supers.length<2&&<p className="soft-meta">Tavsiya: zaxira uchun ikkinchi Super Admin tayinlang — yagona Super Admin parolini unutsa, tizimni boshqarib bo‘lmaydi.</p>}
+        {supers.length<2&&<p className="soft-meta">Tiklash kalitini saqlang. Yagona biznes egasi parolini unutsa, shu kalit bilan tiklashi mumkin.</p>}
       </Card>
       <Card title="Tizim holati">
         <div className="stack-list">
@@ -103,7 +103,7 @@ function Users(){
     <PageHeader title="Foydalanuvchilar" subtitle="Xodim + akkaunt: kirish, rol, bloklash" actions={app.can('users','create')&&<button type="button" className="primary-glass-btn" onClick={()=>setCreate(true)}><Icon name="plus"/>Foydalanuvchi qo‘shish</button>}/>
     <ResourceTable rows={filtered} query={q} onQuery={setQ} placeholder="Ism, login, rol, bo‘lim..." onRow={r=>setId(r.id)} resetKey={`${role}|${status}`}
       filtersActive={Boolean(role||status)} onResetFilters={()=>{setRole('');setStatus('')}}
-      filters={<><FilterSelect label="Rol" value={role} onChange={setRole} options={s.roles.map(r=>({value:r.id,label:r.name}))}/><FilterSelect label="Holat" value={status} onChange={setStatus} options={(Object.keys(STATE_LABEL) as UserRow['state'][]).map(k=>({value:k,label:STATE_LABEL[k]}))}/></>}
+      filters={<><FilterSelect label="Rol" value={role} onChange={setRole} options={s.roles.filter(r=>!isSuperAdminRole(r)).map(r=>({value:r.id,label:r.name}))}/><FilterSelect label="Holat" value={status} onChange={setStatus} options={(Object.keys(STATE_LABEL) as UserRow['state'][]).map(k=>({value:k,label:STATE_LABEL[k]}))}/></>}
       emptyText="Bu filtrlar bo‘yicha foydalanuvchi yo‘q."
       columns={[
         {key:'name',label:'Xodim',value:r=>r.employee.name,render:r=><div className="person-cell"><span className="avatar sm">{initials(r.employee.name)}</span><div className="cell-main"><b>{r.employee.name}</b><small>{r.employee.department}</small></div></div>},
@@ -128,31 +128,46 @@ function CreateUserModal({onClose,onCreated}:{onClose:()=>void;onCreated:(employ
   const app=useApp(),s=app.state,me=app.currentEmployee
   const free=s.employees.filter(e=>e.status!=='Arxiv'&&!app.auth.accounts.some(a=>a.employeeId===e.id)&&!accountManageBlocker(s,me,e.id))
   const roles=s.roles.filter(r=>!assignRoleBlocker(s,me,undefined,r.id))
+  // Branches this person may staff: every active branch for company-wide roles, otherwise their own delegated branches.
+  const myScope=roleOf(s,me.id)?.scope
+  const activeBranches=s.branches.filter(b=>b.status!=='Arxiv')
+  const branchOptions=myScope==='all'?activeBranches:activeBranches.filter(b=>employeeBranchIds(s,me).includes(b.id))
+  const siteIn=(branchId:string)=>({workCenters:s.workCenters.filter(w=>!branchId||!w.branchId||w.branchId===branchId),warehouses:s.warehouses.filter(w=>w.status==='Faol'&&(!branchId||w.branchId===branchId))})
+  const initialBranch=branchOptions.find(b=>b.id===homeOf(s,me).branchId)?.id||branchOptions[0]?.id||''
   const [mode,setMode]=useState<'existing'|'new'>(free.length?'existing':'new')
   const [busy,setBusy]=useState(false),[error,setError]=useState('')
-  const form=useForm({employeeId:free[0]?.id||'',name:'',department:'Production',roleId:roles.find(r=>r.key==='operator')?.id||roles[0]?.id||'',username:'',email:'',password:tempPassword(),mustChange:true},v=>({
+  const [created,setCreated]=useState<{employeeId:string;username:string;password:string}|null>(null)
+  const [pendingEmployeeId,setPendingEmployeeId]=useState<string|null>(null)
+  const form=useForm({employeeId:free[0]?.id||'',name:'',department:'Production',roleId:roles.find(r=>r.key==='operator')?.id||roles[0]?.id||'',branchId:initialBranch,workCenterId:siteIn(initialBranch).workCenters.find(w=>w.id===me.workCenterId)?.id||siteIn(initialBranch).workCenters[0]?.id||'',warehouseId:siteIn(initialBranch).warehouses.find(w=>w.id===me.warehouseId)?.id||'',username:'',email:'',password:tempPassword()},v=>({
     employeeId:mode==='existing'&&!v.employeeId?'Xodimni tanlang':undefined,
     name:mode==='new'?(required(v.name,'F.I.Sh')||(v.name.trim().split(/\s+/).length<2?'Ism va familiyani kiriting':undefined)):undefined,
     roleId:mode==='new'&&!v.roleId?'Rolni tanlang':undefined,
+    branchId:mode==='new'&&branchOptions.length&&!v.branchId?'Filialni tanlang':undefined,
     username:required(v.username,'Login'),password:required(v.password,'Parol'),
   }))
   const submit=()=>form.submit(v=>{
     if(busy)return false
+    if(!app.can('users','create')||mode==='new'&&!app.can('employees','create')){setError('Xodim va akkaunt yaratish huquqi kerak');return false}
+    const invalid=validateUsername(v.username)||validatePassword(app.auth.policy,v.password)
+    if(invalid){setError(invalid);return false}
+    if(findAccount({version:1,accounts:app.auth.accounts,policy:app.auth.policy,events:[],attempts:{}},v.username)||v.email&&findAccount({version:1,accounts:app.auth.accounts,policy:app.auth.policy,events:[],attempts:{}},v.email)){setError('Bu login yoki e-pochta band');return false}
     void (async()=>{
       setBusy(true);setError('')
       try{
-        let employeeId=v.employeeId
-        if(mode==='new'){
-          const created=app.createEntity('employees',{name:v.name.trim(),department:v.department,roleId:v.roleId,workCenterId:s.workCenters[0]?.id||'',shift:'A',status:'Faol',hourlyCost:0,attendance:100,efficiency:0})
+        let employeeId=mode==='new'?pendingEmployeeId||'':v.employeeId
+        if(mode==='new'&&!employeeId){
+          const created=app.createEntity('employees',{name:v.name.trim(),department:v.department,roleId:v.roleId,...(v.branchId?{branchId:v.branchId}:{}),workCenterId:v.workCenterId,warehouseId:v.warehouseId||undefined,shift:'A',status:'Faol',hourlyCost:0,attendance:100,efficiency:0})
           if(!created.ok||!created.id){setError(created.message);return}
           employeeId=created.id
+          setPendingEmployeeId(employeeId)
         }
-        const r=await app.createUser({employeeId,username:v.username.trim(),email:v.email.trim()||undefined,password:v.password,mustChangePassword:v.mustChange})
-        if(r.ok)onCreated(employeeId);else setError(r.message)
+        const r=await app.createUser({employeeId,username:v.username.trim(),email:v.email.trim()||undefined,password:v.password,mustChangePassword:true})
+        if(r.ok)setCreated({employeeId,username:v.username.trim(),password:v.password});else setError(mode==='new'?`${r.message}. Xodim profili saqlandi; shu oynada qayta urinishingiz mumkin`:r.message)
       }finally{setBusy(false)}
     })()
-    return true
+    return false
   })
+  if(created)return <Modal open onClose={()=>onCreated(created.employeeId)} title="Kirish ma’lumotlari" size="sm" footer={<button type="button" className="primary-glass-btn" onClick={()=>onCreated(created.employeeId)}>Yopish</button>}><div className="form-stack"><p>Bu vaqtinchalik parolni xodimga xavfsiz yo‘l bilan bering. Bu oynadan chiqqach parol qayta ko‘rsatilmaydi.</p><InfoGrid items={[{label:'Login',value:created.username},{label:'Vaqtinchalik parol',value:created.password}]}/></div></Modal>
   return <Modal open onClose={onClose} title="Foydalanuvchi qo‘shish" size="md"
     footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Bekor qilish</button><button type="button" className="primary-glass-btn" disabled={busy} onClick={submit}>{busy?'Saqlanmoqda…':<><Icon name="check" size={16}/>Yaratish</>}</button></>}>
     <div className="form-stack">
@@ -162,13 +177,16 @@ function CreateUserModal({onClose,onCreated}:{onClose:()=>void;onCreated:(employ
           <Field label="F.I.Sh" required error={form.error('name')}><Input {...form.input('name')} autoFocus/></Field>
           <Field label="Bo‘lim"><Select value={form.values.department} onChange={v=>form.set('department',v)}>{['Production','Quality','Maintenance','Warehouse','Procurement','Sales','Management'].map(x=><option key={x} value={x}>{x}</option>)}</Select></Field>
           <Field className="span-2" label="Rol" required error={form.error('roleId')} hint="Faqat o‘zingizdan past darajadagi rollar"><Select value={form.values.roleId} onChange={v=>form.set('roleId',v)}>{roles.map(r=><option key={r.id} value={r.id}>{r.name}</option>)}</Select></Field>
+          <Field label="Filial" required error={form.error('branchId')} hint="Faqat o‘zingiz boshqaradigan filiallar"><Select value={form.values.branchId} onChange={v=>{const site=siteIn(v);form.set('branchId',v);form.set('workCenterId',site.workCenters.find(w=>w.id===form.values.workCenterId)?.id||site.workCenters[0]?.id||'');if(!site.warehouses.some(w=>w.id===form.values.warehouseId))form.set('warehouseId','')}}>{branchOptions.map(b=><option key={b.id} value={b.id}>{b.name}</option>)}</Select></Field>
+          <Field label="Ish markazi" hint={siteIn(form.values.branchId).workCenters.length?'Operator roli uchun majburiy':'Bu filialda ish markazi yo‘q — operator uchun avval Uskunalar bo‘limida yarating'}><Select value={form.values.workCenterId} onChange={v=>form.set('workCenterId',v)}><option value="">Tanlanmagan</option>{siteIn(form.values.branchId).workCenters.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</Select></Field>
+          <Field label="Ish ombori"><Select value={form.values.warehouseId} onChange={v=>form.set('warehouseId',v)}><option value="">Filial bo‘yicha</option>{siteIn(form.values.branchId).warehouses.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</Select></Field>
         </div>}
       <div className="form-grid">
         <Field label="Login" required error={form.error('username')} hint="Telefon (+998…) yoki 3–32 lotin belgi"><Input {...form.input('username')} autoComplete="off" spellCheck={false}/></Field>
         <Field label="E-pochta"><Input type="email" {...form.input('email')} autoComplete="off"/></Field>
         <Field className="span-2" label="Vaqtinchalik parol" required error={form.error('password')} hint={`Kamida ${app.auth.policy.minPasswordLength} belgi. Foydalanuvchiga xavfsiz yo‘l bilan bering.`}><div className="input-affix"><input className="ui-input mono" {...form.input('password')} autoComplete="new-password" spellCheck={false}/><button type="button" className="password-toggle" onClick={()=>form.set('password',tempPassword())} aria-label="Yangi parol yaratish"><Icon name="refresh" size={15}/></button></div></Field>
       </div>
-      <Checkbox checked={form.values.mustChange} onChange={v=>form.set('mustChange',v)} label="Birinchi kirishda parolni almashtirsin" description="Tavsiya etiladi"/>
+      <div className="inline-note"><Icon name="key"/><span>Lokal faollashtirish: vaqtinchalik parolni xodimga o‘zingiz bering. Birinchi kirishda u parolini almashtiradi. E-pochta yoki SMS yuborilmaydi.</span></div>
       {error&&<div className="inline-note danger" role="alert"><Icon name="warning"/><span>{error}</span></div>}
     </div>
   </Modal>
@@ -181,8 +199,8 @@ function UserDrawer({row,onClose}:{row:UserRow;onClose:()=>void}){
   const self=employee.id===me.id
   const manageBlock=row.account?accountManageBlocker(s,me,employee.id):null
   const removeBlock=employeeRemovalBlocker(s,me,employee.id)
-  const assignable=s.roles.filter(r=>r.id===employee.roleId||!assignRoleBlocker(s,me,employee,r.id))
-  const roleBlock=self?'O‘z rolingizni o‘zgartira olmaysiz':!app.can('users','edit')?'Rol berish uchun users.edit kerak':assignable.length<=1?(assignRoleBlocker(s,me,employee,s.roles.find(r=>r.id!==employee.roleId)?.id||'')||'Boshqa rol berib bo‘lmaydi'):null
+  const assignable=s.roles.filter(r=>!isSuperAdminRole(r)&&!assignRoleBlocker(s,me,employee,r.id))
+  const roleBlock=isSuperAdminRole(role)?'Eski rol tayinlovi faqat tarix uchun saqlangan':self?'O‘z rolingizni o‘zgartira olmaysiz':!app.can('users','edit')?'Rol berish uchun users.edit kerak':assignable.length<=1?(assignRoleBlocker(s,me,employee,s.roles.find(r=>r.id!==employee.roleId)?.id||'')||'Boshqa rol berib bo‘lmaydi'):null
   const events=app.auth.events.filter(e=>e.accountId&&e.accountId===row.account?.id)
   return <Drawer open onClose={onClose} title={employee.name} eyebrow="Foydalanuvchi" icon="user" size="lg" subtitle={`${employee.department} · ${role?.name||'rolsiz'}${row.account?` · ${row.account.username}`:''}`} headerExtra={<StatusBadge tone={STATE_TONE[row.state]}>{STATE_LABEL[row.state]}</StatusBadge>}
     actions={<>
@@ -242,10 +260,12 @@ function ResetPasswordModal({account,onClose}:{account:Account;onClose:()=>void}
   </Modal>
 }
 
-function CreateAccountForEmployee({employee,onClose}:{employee:Employee;onClose:()=>void}){
+export function CreateAccountForEmployee({employee,onClose}:{employee:Employee;onClose:()=>void}){
   const app=useApp()
   const [username,setUsername]=useState(''),[email,setEmail]=useState(''),[password,setPassword]=useState(tempPassword()),[busy,setBusy]=useState(false),[error,setError]=useState('')
-  const submit=async()=>{setBusy(true);setError('');try{const r=await app.createUser({employeeId:employee.id,username:username.trim(),email:email.trim()||undefined,password,mustChangePassword:true});if(r.ok)onClose();else setError(r.message)}finally{setBusy(false)}}
+  const [created,setCreated]=useState<{username:string;password:string}|null>(null)
+  const submit=async()=>{setBusy(true);setError('');try{const r=await app.createUser({employeeId:employee.id,username:username.trim(),email:email.trim()||undefined,password,mustChangePassword:true});if(r.ok)setCreated({username:username.trim(),password});else setError(r.message)}finally{setBusy(false)}}
+  if(created)return <Modal open onClose={onClose} title="Kirish ma’lumotlari" subtitle={employee.name} size="sm" footer={<button type="button" className="primary-glass-btn" onClick={onClose}>Yopish</button>}><div className="form-stack"><p>Bu vaqtinchalik parolni xodimga xavfsiz yo‘l bilan bering. Bu oynadan chiqqach parol qayta ko‘rsatilmaydi.</p><InfoGrid items={[{label:'Login',value:created.username},{label:'Vaqtinchalik parol',value:created.password}]}/></div></Modal>
   return <Modal open onClose={onClose} title="Akkaunt ochish" subtitle={employee.name} size="sm" footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Bekor qilish</button><button type="button" className="primary-glass-btn" disabled={busy||!username.trim()} onClick={()=>void submit()}><Icon name="check" size={15}/>Yaratish</button></>}>
     <div className="form-stack">
       <Field label="Login" required><Input value={username} onChange={e=>setUsername(e.target.value)} autoFocus spellCheck={false} autoComplete="off"/></Field>
@@ -257,7 +277,7 @@ function CreateAccountForEmployee({employee,onClose}:{employee:Employee;onClose:
 }
 
 function PermissionSummary({role}:{role:Role}){
-  if(isSuperAdminRole(role))return <div className="inline-note"><Icon name="shield"/><span>Super Admin — barcha modullar va amallar.</span></div>
+  if(isSuperAdminRole(role))return <div className="inline-note"><Icon name="shield"/><span>Eski rol — kompaniya ma’lumotlarini faqat o‘qish uchun. Platforma huquqi yo‘q.</span></div>
   const modules=Object.entries(role.permissions||{}).filter(([,p])=>p.view)
   return modules.length?<div className="badge-row">{modules.map(([m,p])=><StatusBadge key={m} tone={p.edit||p.execute||p.create?'success':'info'}>{m}{p.edit?'':p.execute?' (bajarish)':' (ko‘rish)'}</StatusBadge>)}</div>:<Empty compact title="Ruxsat berilmagan" text="Faqat boshqaruv paneli ochiladi"/>
 }
@@ -266,24 +286,24 @@ function PermissionSummary({role}:{role:Role}){
 
 function Roles(){
   const app=useApp(),s=app.state,me=app.currentEmployee
-  const [roleId,setRoleId]=useSearchParamState('role',s.roles[0]?.id||'')
-  const role=s.roles.find(r=>r.id===roleId)||s.roles[0]
+  const tenantRoles=s.roles.filter(r=>!isSuperAdminRole(r))
+  const [roleId,setRoleId]=useSearchParamState('role',tenantRoles[0]?.id||'')
+  const role=tenantRoles.find(r=>r.id===roleId)||tenantRoles[0]
   const [modal,setModal]=useState<null|'create'|'edit'>(null),[remove,setRemove]=useState(false)
   const members=s.employees.filter(e=>e.roleId===role?.id)
   const manageBlock=role?roleManageBlocker(s,me,role.id):null
   const deleteBlock=!role?null:role.system||role.key?'Tizim rolini o‘chirib bo‘lmaydi':members.length?`${members.length} ta xodimga biriktirilgan`:manageBlock
   if(!role)return <Empty title="Rol yo‘q"/>
   return <div className="page-stack">
-    <PageHeader title="Rollar va ruxsatlar" subtitle="8 ta tizim roli va maxsus rollar · modul × amal matritsasi" actions={app.can('roles','create')&&<button type="button" className="primary-glass-btn" onClick={()=>setModal('create')}><Icon name="plus"/>Rol yaratish</button>}/>
+    <PageHeader title="Rollar va ruxsatlar" subtitle="Kompaniya rollari va maxsus rollar · modul × amal matritsasi" actions={app.can('roles','create')&&<button type="button" className="primary-glass-btn" onClick={()=>setModal('create')}><Icon name="plus"/>Rol yaratish</button>}/>
     <div className="master-detail">
-      <Card className="master-pane"><div className="master-list" role="listbox" aria-label="Rollar">{s.roles.map(r=><button type="button" role="option" aria-selected={r.id===role.id} key={r.id} className={r.id===role.id?'active':''} onClick={()=>setRoleId(r.id)}><span><b>{r.name}</b><small>{s.employees.filter(e=>e.roleId===r.id).length} xodim · {r.system?'tizim':'maxsus'}</small></span>{isSuperAdminRole(r)&&<Icon name="shield" size={14}/>}</button>)}</div></Card>
+      <Card className="master-pane"><div className="master-list" role="listbox" aria-label="Rollar">{tenantRoles.map(r=><button type="button" role="option" aria-selected={r.id===role.id} key={r.id} className={r.id===role.id?'active':''} onClick={()=>setRoleId(r.id)}><span><b>{r.name}</b><small>{s.employees.filter(e=>e.roleId===r.id).length} xodim · {r.system?'tizim':'maxsus'}</small></span></button>)}</div></Card>
       <Card className="detail-pane" title={role.name} subtitle={role.description||(role.system?'Tizim roli':'Maxsus rol')}
         actions={<>
           {app.can('roles','create')&&<button type="button" className="ghost-btn" onClick={()=>{const r=app.duplicateRole(role.id);if(r.ok&&r.id)setRoleId(r.id)}}><Icon name="copy" size={14}/>Nusxa</button>}
           {app.can('roles','edit')&&<button type="button" className="ghost-btn" disabled={Boolean(manageBlock)} title={manageBlock||undefined} onClick={()=>setModal('edit')}><Icon name="edit" size={14}/>Tahrirlash</button>}
           {app.can('roles','delete')&&<button type="button" className="ghost-btn" disabled={Boolean(deleteBlock)} title={deleteBlock||undefined} onClick={()=>setRemove(true)}><Icon name="trash" size={14}/>O‘chirish</button>}
         </>}>
-        {isSuperAdminRole(role)&&<div className="inline-note"><Icon name="shield"/><span>Super Admin barcha huquqlarga ega va tahrirlanmaydi. Faol Super Admin: {superAdminEmployees(s).map(e=>e.name).join(', ')||'—'}.</span></div>}
         {!isSuperAdminRole(role)&&manageBlock&&<div className="inline-note warning"><Icon name="lock"/><span>{manageBlock}</span></div>}
         <PermissionMatrix role={role}/>
         <p className="soft-meta">“Ko‘rish” o‘chsa modulning boshqa amallari ham o‘chadi · faqat o‘zingizda bor huquqni bera olasiz · “Bajarish” — sexdagi ish (operatsiya, natija, scrap, to‘xtash)</p>
@@ -297,12 +317,13 @@ function Roles(){
 
 function RoleModal({role,onClose,onSaved}:{role?:Role;onClose:()=>void;onSaved:(id:string)=>void}){
   const app=useApp()
-  const form=useForm({name:role?.name||'',description:role?.description||'',scope:role?.scope||'all'},v=>({name:required(v.name,'Rol nomi')}))
-  return <Modal open onClose={onClose} title={role?'Rolni tahrirlash':'Yangi rol'} size="sm" footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Bekor qilish</button><button type="button" className="primary-glass-btn" onClick={()=>form.submit(v=>{const input={name:v.name,description:v.description,scope:v.scope as Role['scope']};const r=role?app.updateRole(role.id,input):app.createRole(input);if(r.ok)onSaved(r.id||role?.id||'');return r.ok})}><Icon name="check" size={15}/>Saqlash</button></>}>
+  const form=useForm({name:role?.name||'',description:role?.description||'',scope:role?.scope||app.currentRole.scope,rank:String(roleRank(role))},v=>({name:required(v.name,'Rol nomi')}))
+  return <Modal open onClose={onClose} title={role?'Rolni tahrirlash':'Yangi rol'} size="sm" footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Bekor qilish</button><button type="button" className="primary-glass-btn" onClick={()=>form.submit(v=>{const input={name:v.name,description:v.description,scope:v.scope as Role['scope'],rank:Number(v.rank)};const r=role?app.updateRole(role.id,input):app.createRole(input);if(r.ok)onSaved(r.id||role?.id||'');return r.ok})}><Icon name="check" size={15}/>Saqlash</button></>}>
     <div className="form-stack">
       <Field label="Nomi" required error={form.error('name')}><Input {...form.input('name')} autoFocus/></Field>
       <Field label="Tavsif"><Textarea {...form.input('description')}/></Field>
       <Field label="Qamrov (scope)" hint="Ma’lumot uchun: yozuv darajasidagi cheklov backend’siz to‘liq ta’minlanmaydi"><Select value={form.values.scope} onChange={v=>form.set('scope',v as Role['scope'])}><option value="all">Butun korxona</option><option value="branch">Filial</option><option value="warehouse">Ombor</option><option value="workcenter">Work center</option></Select></Field>
+      {!role?.system&&<Field label="Boshqaruv darajasi" hint="Sizning darajangizdan past bo‘lishi kerak"><Select value={form.values.rank} onChange={v=>form.set('rank',v)}>{Array.from({length:Math.max(1,roleRank(app.currentRole)-1)},(_,i)=><option key={i+1} value={i+1}>{i+1}</option>)}</Select></Field>}
       {!role&&<p className="soft-meta">Yangi rol ruxsatsiz yaratiladi — keyin matritsada belgilang.</p>}
     </div>
   </Modal>

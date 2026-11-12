@@ -1,11 +1,11 @@
 import {useEffect,useRef,useState} from 'react'
 import {useNavigate,useSearchParams} from 'react-router-dom'
 import {useApp} from '../../../app/providers/AppProvider/AppContext'
-import {Card,Checkbox,Confirm,Drawer,Empty,Field,FilterSelect,Icon,InfoGrid,Input,KPI,Modal,MoneyInput,PageHeader,Progress,ResourceTable,Select,StatusBadge,Tabs,nonNegative,required,useForm,useRecordParam,useSearchParamState} from '../../../shared/ui'
-import {siteSafetyStock} from '../../../domain/planning'
+import {Card,Checkbox,Confirm,Drawer,Empty,Field,FilterSelect,Icon,InfoGrid,Input,KPI,Modal,MoneyInput,PageHeader,Progress,ResourceTable,Select,StatusBadge,Tabs,nonNegative,required,useDirtyMarker,useForm,useRecordParam,useSearchParamState} from '../../../shared/ui'
+import {branchPurchaseNeeds,siteSafetyStock} from '../../../domain/planning'
 import {packsProblem} from '../../../domain/uom'
 import type {RawMaterial,SupplierMaterial} from '../../../types'
-import {MATERIAL_STOCK_STATES,createMrpPlan,isOpenOrder,materialShortages,materialStockRows,orderMaterialLines,stockOf} from '../../../domain/manufacturingEngine'
+import {MATERIAL_STOCK_STATES,isOpenOrder,materialStockRows,orderMaterialLines,stockOf} from '../../../domain/manufacturingEngine'
 import {referenceBlocker} from '../../../domain/actions'
 import {findLink,linkBlock,linksOfMaterial,preferredSupplierId} from '../../../domain/supplierMaterials'
 import {LinkTermsTable,PurchasePlanModal,SourcingModal,SupplierMaterialModal} from '../../purchases/components/Sourcing'
@@ -172,6 +172,8 @@ function SiteSafetyModal({material,onClose}:{material:RawMaterial;onClose:()=>vo
   const app=useApp(),s=app.state
   const branches=s.branches.filter(b=>b.status!=='Arxiv')
   const [values,setValues]=useState<Record<string,string>>(()=>Object.fromEntries(branches.map(b=>[b.id,material.siteSafety?.[b.id]!==undefined?String(material.siteSafety[b.id]):''])))
+  const initialValues=useRef(JSON.stringify(values))
+  useDirtyMarker(JSON.stringify(values)!==initialValues.current)
   const bad=branches.find(b=>values[b.id]!==''&&!(Number(values[b.id])>=0))
   const save=()=>{if(bad)return;const siteSafety=Object.fromEntries(Object.entries(values).filter(([,v])=>v!=='').map(([k,v])=>[k,Number(v)]));const r=app.updateEntity('rawMaterials',material.id,{siteSafety:Object.keys(siteSafety).length?siteSafety:undefined});if(r.ok)onClose()}
   return <Modal open onClose={onClose} size="sm" title="Safety stock · filiallar" eyebrow={material.name} subtitle={`Bo‘sh = standart: asosiy filial Min stock (${num(material.minStock)} ${material.unit}), boshqalar 0`}
@@ -194,8 +196,7 @@ function MaterialDrawerBody({m,onClose,onEdit}:{m:RawMaterial;onClose:()=>void;o
   const st=stockOf(s,m.id)
   const links=linksOfMaterial(s,m.id)
   const canLink=app.can('materials','edit')||app.can('purchases','edit')
-  const suggestion=createMrpPlan(s).purchases.find(p=>p.materialId===m.id)
-  const need:SourcingNeed={materialId:m.id,need:suggestion?.suggested||0,needBy:suggestion?.suggested?suggestion.needBy:undefined,source:'Material'}
+  const need:SourcingNeed={materialId:m.id,need:0,source:'Material — omborni tanlang'}
   const whereUsed=s.boms.filter(b=>b.status!=='Arxiv'&&b.components.some(c=>c.materialId===m.id))
   const lots=s.lots.filter(l=>l.itemId===m.id).sort((a,b)=>b.createdAt.localeCompare(a.createdAt))
   const pos=s.purchaseOrders.filter(p=>p.items.some(i=>i.materialId===m.id))
@@ -295,10 +296,10 @@ function Stock({open}:{open:(id:string)=>void}){
 
 function Shortages(){
   const app=useApp(),s=app.state,navigate=useNavigate()
-  const rows=materialShortages(s).map(r=>({...r,order:r.suggested||Math.ceil(Math.max(0,r.m.reorderPoint+r.m.minStock-r.available-r.incoming)/100)*100}))
+  const rows=branchPurchaseNeeds(s).filter(r=>r.shortage>0)
   const canBuy=app.can('purchases','create')
   const [sourcing,setSourcing]=useState<SourcingNeed|null>(null),[plan,setPlan]=useState(false)
-  const needOf=(r:typeof rows[number]):SourcingNeed=>({materialId:r.m.id,need:r.order,needBy:r.needBy,source:'Shortage'})
+  const needOf=(r:typeof rows[number]):SourcingNeed=>({materialId:r.m.id,need:r.order,needBy:r.needBy,warehouseId:r.warehouseId,source:`Shortage ${r.branchId}`})
   const orderable=rows.filter(r=>r.order>0)
   return <div className="page-stack">
     <PageHeader title="Yetishmovchiliklar" subtitle="MRP talabi va reorder’dan past materiallar · tavsiya butun birlikka yuqoriga yaxlitlanadi"
@@ -307,9 +308,9 @@ function Shortages(){
         {orderable.length>0&&canBuy&&<button type="button" className="primary-glass-btn" onClick={()=>setPlan(true)}><Icon name="cart"/>Xarid rejasi ({orderable.length})</button>}
       </>}/>
     {rows.length?<div className="card flush"><div className="table-scroll"><table className="shortage-table"><thead><tr><th>Material</th><th className="align-right">Talab</th><th className="align-right">Available</th><th className="align-right">Yo‘lda</th><th className="align-right">Yetishmaydi</th><th className="align-right">Tavsiya</th><th>Supplier · kerak</th><th className="align-right">Amal</th></tr></thead><tbody>{rows.map(r=><tr key={r.id} className={r.critical?'row-danger':'row-warning'}>
-      <td><div className="cell-main"><b>{r.m.name}</b><small>{r.m.sku} · lead {r.m.leadTime} kun</small></div></td>
+      <td><div className="cell-main"><b>{r.m.name}</b><small>{r.m.sku} · {s.branches.find(b=>b.id===r.branchId)?.name||r.branchId} · lead {r.m.leadTime} kun</small></div></td>
       <td className="align-right">{qty(r.required,r.m.unit)}</td>
-      <td className={`align-right ${r.available<r.m.minStock?'negative':''}`}>{num(r.available)}</td>
+      <td className={`align-right ${r.available<r.safety?'negative':''}`}>{num(r.available)}</td>
       <td className="align-right">{r.incoming?num(r.incoming):<span className="muted">—</span>}</td>
       <td className="align-right">{r.shortage>0?<b className="negative">{num(r.shortage)}</b>:<span className="muted">—</span>}</td>
       <td className="align-right">{r.order?<b>{qty(r.order,r.m.unit)}</b>:<StatusBadge tone="info">Yo‘lda qoplaydi</StatusBadge>}</td>

@@ -14,10 +14,10 @@ let n=0
 const ctx=(s:ManufacturingState):Ctx=>({now:new Date(),user:s.employees.find(e=>e.id==='em1')!,id:p=>`${p}-e2e${++n}`})
 const ok=(o:Outcome)=>{if(!o.result.ok)throw new Error(o.result.message);return o.state}
 
-/** The master data as after first-run set-up: em1 is the Super Admin (auth.setup.ts signs in as em1). */
+/** The master data as after first-run set-up: em1 is the Business Owner (auth.setup.ts signs in as em1). */
 export function adminState():ManufacturingState{
   const s=createInitialState()
-  return {...s,employees:s.employees.map(e=>e.id==='em1'?{...e,roleId:'role0'}:e)}
+  return {...s,employees:s.employees.map(e=>e.id==='em1'?{...e,roleId:'role_owner'}:e)}
 }
 
 /** A confirmed PO of 100 kg steel sheet (rm2), not yet received. */

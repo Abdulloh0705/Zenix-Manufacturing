@@ -70,13 +70,14 @@ function VarianceCell({pct}:{pct:number}){
 function ExpenseModal({expense,onClose}:{expense?:Expense;onClose:()=>void}){
   const app=useApp(),s=app.state
   const sources=[{value:'manual',label:'Umumiy (manual)'},...s.productionLines.map(l=>({value:l.id,label:l.name})),...s.equipment.map(e=>({value:e.id,label:e.name})),...s.branches.map(b=>({value:b.id,label:b.name}))]
-  const form=useForm({date:expense?.date||todayISO(),type:expense?.type||'Electricity',sourceId:expense?.sourceId||'manual',amount:String(expense?.amount??''),note:expense?.note||''},v=>({amount:positive(v.amount,'Summa'),note:required(v.note,'Izoh'),date:v.date>todayISO()?'Kelajak sana':undefined}))
+  const form=useForm({date:expense?.date||todayISO(),type:expense?.type||'Electricity',sourceId:expense?.sourceId||'manual',branchId:expense?.branchId||s.branches.find(b=>b.id===s.settings.defaultBranchId)?.id||s.branches[0]?.id||'',amount:String(expense?.amount??''),note:expense?.note||''},v=>({branchId:v.branchId?undefined:'Filialni tanlang',amount:positive(v.amount,'Summa'),note:required(v.note,'Izoh'),date:v.date>todayISO()?'Kelajak sana':undefined}))
   return <Modal open onClose={onClose} title={expense?'Xarajatni tahrirlash':'Yangi xarajat'} size="md"
     footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Bekor qilish</button><button type="button" className="primary-glass-btn" onClick={()=>form.submit(v=>{const payload={...v,amount:Number(v.amount),note:v.note.trim()};const r=expense?app.updateEntity('expenses',expense.id,payload):app.createEntity('expenses',payload);if(r.ok)onClose();return r.ok})}>Saqlash</button></>}>
     <div className="form-grid">
       <Field label="Sana" error={form.error('date')}><Input type="date" {...form.input('date')}/></Field>
       <Field label="Tur"><Select value={form.values.type} onChange={v=>form.set('type',v as Expense['type'])}>{TYPES.map(t=><option key={t} value={t}>{TYPE_LABEL[t]}</option>)}</Select></Field>
       <Field label="Manba (cost center)"><Select value={form.values.sourceId} onChange={v=>form.set('sourceId',v)}>{sources.map(x=><option key={x.value} value={x.value}>{x.label}</option>)}</Select></Field>
+      <Field label="Filial" required error={form.error('branchId')}><Select value={form.values.branchId} onChange={v=>form.set('branchId',v)}>{s.branches.map(b=><option key={b.id} value={b.id}>{b.name}</option>)}</Select></Field>
       <Field label="Summa" required error={form.error('amount')}><MoneyInput min="0" {...form.money('amount')}/></Field>
       <Field className="span-2" label="Izoh" required error={form.error('note')}><Input {...form.input('note')}/></Field>
     </div>

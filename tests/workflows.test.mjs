@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import * as A from '../.test-dist/actions.mjs'
 import {createSeedState} from '../.test-dist/mockData.mjs'
-import {stockOf,remainingQty,perUnit,isOpenOrder,orderReservations,plannedIssue} from '../.test-dist/manufacturingEngine.mjs'
+import {stockOf,remainingQty,perUnit,isOpenOrder,orderReservations,plannedIssue,buildTraceability,findTraceOrder} from '../.test-dist/manufacturingEngine.mjs'
 
 let counter=0
 const fresh=()=>createSeedState(new Date())
@@ -231,11 +231,12 @@ test('material scan validates the BOM and posts a real material issue',()=>{
 test('PO and SO header edits cannot touch lines, and cancelled records are locked',()=>{
   const s=fresh()
   const po=s.purchaseOrders.find(p=>p.status==='Tasdiqlangan')
-  const r=A.updatePurchaseMeta(s,ctx(s),po.id,{paymentStatus:'To‘langan'})
+  const r=A.updatePurchaseMeta(s,ctx(s),po.id,{invoiceStatus:'Tekshirildi'})
   assert.ok(r.result.ok)
   const updated=r.state.purchaseOrders.find(p=>p.id===po.id)
-  assert.equal(updated.paymentStatus,'To‘langan')
+  assert.equal(updated.invoiceStatus,'Tekshirildi')
   assert.deepEqual(updated.items,po.items)
+  assert.equal(A.updatePurchaseMeta(s,ctx(s),po.id,{paymentStatus:'To‘langan'}).result.ok,false,'payment status follows payable entries')
   const cancelled=A.cancelPurchase(s,ctx(s),po.id)
   assert.equal(A.updatePurchaseMeta(cancelled.state,ctx(cancelled.state),po.id,{paymentStatus:'Qisman'}).result.ok,false)
 })
@@ -769,6 +770,126 @@ test('BUG-05: a rework pass releases only the reworked units of its source order
   assert.equal(start-fgQuarantine(s,a),10,'re-inspecting A releases A’s remaining 6, not B’s units')
   assert.equal(orderOf(s,b).qcHeld,10)
   assertQcHoldsBacked(s)
+})
+
+test('P3-P0-01: scrapped rework units leave finished stock and their source lot',()=>{
+  let {s,a}=twoInFinalQc()
+  s=A.resolveQuality(s,ctx(s,'em4'),pendingFinal(s,a).id,'Failed','defect').state
+  const rw=A.createReworkOrder(s,ctx(s),a,4,'defect');assert.ok(rw.result.ok,rw.result.message);s=rw.state
+  const id=rw.result.id
+  for(const status of ['Tasdiqlangan','Jarayonda'])s=A.transitionProduction(s,ctx(s),id,status).state
+  const before=balanceOf(s,orderOf(s,id).warehouseId,'p1')
+  const sourceLot=s.lots.find(l=>l.sourceId===a&&l.status==='quarantine'&&l.qty>=4)
+  assert.ok(sourceLot)
+  const out=A.reportOutput(s,ctx(s),id,2,2,'rework scrap');assert.ok(out.result.ok,out.result.message);s=out.state
+  const after=balanceOf(s,orderOf(s,id).warehouseId,'p1')
+  assert.equal(after.onHand,before.onHand-2)
+  assert.equal(after.quarantine,before.quarantine-2)
+  assert.equal(s.lots.filter(l=>l.id===sourceLot.id).reduce((n,l)=>n+l.qty,0),sourceLot.qty-4)
+  const reworked=s.lots.find(l=>l.reworkOrderId===id&&l.qty===2)
+  assert.equal(reworked.sourceLotCode,sourceLot.code)
+  assert.notEqual(reworked.code,sourceLot.code)
+  assert.equal(findTraceOrder(s,reworked.code).id,id)
+  assert.ok(buildTraceability(s,id).outputLots.some(l=>l.id===reworked.id))
+  assert.ok(buildTraceability(s,id).upstreamLots.some(l=>l.id===sourceLot.id))
+  assertQcHoldsBacked(s)
+})
+
+test('P3-P0-02: Final Scrap of reworked output removes only its own LOT portion',()=>{
+  let {s,a,b}=twoInFinalQc()
+  s=A.resolveQuality(s,ctx(s,'em4'),pendingFinal(s,a).id,'Failed','defect').state
+  const rw=A.createReworkOrder(s,ctx(s),a,4,'defect');assert.ok(rw.result.ok,rw.result.message);s=rw.state
+  const id=rw.result.id
+  for(const status of ['Tasdiqlangan','Jarayonda'])s=A.transitionProduction(s,ctx(s),id,status).state
+  s=toFinalQc(s,id)
+  const before=balanceOf(s,orderOf(s,id).warehouseId,'p1')
+  const result=A.resolveQuality(s,ctx(s,'em4'),pendingFinal(s,id).id,'Scrap','rework failed');assert.ok(result.result.ok,result.result.message);s=result.state
+  const after=balanceOf(s,orderOf(s,id).warehouseId,'p1')
+  assert.equal(after.onHand,before.onHand-4)
+  assert.equal(after.quarantine,before.quarantine-4)
+  assert.equal(s.lots.filter(l=>l.reworkOrderId===id).reduce((n,l)=>n+l.qty,0),0)
+  assert.equal(orderOf(s,a).qcHeld,6)
+  assert.equal(orderOf(s,b).qcHeld,10)
+  assertQcHoldsBacked(s)
+  s=extraFinalPass(s,a)
+  assert.equal(orderOf(s,b).qcHeld,10)
+  assertQcHoldsBacked(s)
+})
+
+test('P3-P0-03: an all-scrap order closes without an impossible Final check',()=>{
+  let {state:s,id}=startedOrder(fresh(),'p1',4)
+  s=finishOperations(s,id)
+  const out=A.reportOutput(s,ctx(s),id,0,4,'all defective');assert.ok(out.result.ok,out.result.message);s=out.state
+  const qc=A.transitionProduction(s,ctx(s),id,'Sifat nazoratida');assert.ok(qc.result.ok,qc.result.message);s=qc.state
+  assert.equal(pendingFinal(s,id),undefined)
+  for(const check of s.qualityChecks.filter(q=>q.sourceId===id&&q.status==='Pending')){
+    const passed=A.resolveQuality(s,ctx(s,'em4'),check.id,'Passed');assert.ok(passed.result.ok,passed.result.message);s=passed.state
+  }
+  const closed=A.transitionProduction(s,ctx(s),id,'Yakunlangan');assert.ok(closed.result.ok,closed.result.message)
+  assert.equal(orderOf(closed.state,id).status,'Yakunlangan')
+})
+
+test('P3-P0-04: customer-return rework scrap leaves quarantine and the returned LOT',()=>{
+  let {s}=twoInFinalQc()
+  const ret=s.returns.find(r=>r.status==='Inspection')
+  const decided=A.dispositionReturn(s,ctx(s,'em4'),ret.id,'Rework');assert.ok(decided.result.ok,decided.result.message);s=decided.state
+  const id=s.returns.find(r=>r.id===ret.id).reworkOrderId
+  for(const status of ['Tasdiqlangan','Jarayonda'])s=A.transitionProduction(s,ctx(s),id,status).state
+  s=finishOperations(s,id)
+  const before=balanceOf(s,orderOf(s,id).warehouseId,ret.productId)
+  const out=A.reportOutput(s,ctx(s),id,ret.qty-2,2,'returned units defective');assert.ok(out.result.ok,out.result.message);s=out.state
+  const after=balanceOf(s,orderOf(s,id).warehouseId,ret.productId)
+  assert.equal(after.onHand,before.onHand-2)
+  assert.equal(after.quarantine,before.quarantine-2)
+  assert.equal(s.lots.filter(l=>l.sourceType==='return'&&l.sourceId===ret.id).reduce((n,l)=>n+l.qty,0),ret.qty-2)
+  assert.equal(orderOf(s,id).qcHeld,ret.qty-2)
+  assertQcHoldsBacked(s)
+})
+
+test('P3-P0-05: serial rework scrap removes one serial and keeps the good serial trace',()=>{
+  let {state:s,id:a}=startedOrder(fresh(),'p2',2)
+  s=toFinalQc(s,a)
+  const failed=A.resolveQuality(s,ctx(s,'em4'),pendingFinal(s,a).id,'Failed','serial defect');assert.ok(failed.result.ok);s=failed.state
+  const rw=A.createReworkOrder(s,ctx(s),a,2,'serial defect');assert.ok(rw.result.ok,rw.result.message);s=rw.state
+  const id=rw.result.id
+  for(const status of ['Tasdiqlangan','Jarayonda'])s=A.transitionProduction(s,ctx(s),id,status).state
+  const before=balanceOf(s,orderOf(s,id).warehouseId,'p2')
+  const out=A.reportOutput(s,ctx(s),id,1,1,'serial scrap');assert.ok(out.result.ok,out.result.message);s=out.state
+  const after=balanceOf(s,orderOf(s,id).warehouseId,'p2')
+  assert.equal(after.onHand,before.onHand-1)
+  assert.equal(s.lots.filter(l=>l.reworkOrderId===id&&l.kind==='serial'&&l.qty===1).length,1)
+  assert.equal(s.lots.filter(l=>l.sourceId===a&&l.kind==='serial'&&l.qty===0).length,1)
+  assert.ok(s.stockMovements.some(m=>m.source===orderOf(s,id).code&&m.type==='QC Scrap -'&&m.lot?.startsWith('SN-')))
+  assertQcHoldsBacked(s)
+})
+
+test('P3-P0-06: rework cannot take a released source LOT pinned by a sales order',()=>{
+  let {s,a}=twoInFinalQc()
+  s=finalPass(s,a)
+  const source=orderOf(s,a),lot=s.lots.find(l=>l.sourceId===a&&l.qty>=10)
+  assert.ok(lot)
+  s={...s,stockBalances:s.stockBalances.map(b=>b.warehouseId===source.warehouseId&&b.itemId==='p1'?{...b,reserved:b.reserved+10}:b),
+    salesOrders:[{id:'so-pinned',code:'SO-PINNED',customerId:'cu1',status:'Tasdiqlangan',mode:'Make-to-stock',items:[{productId:'p1',qty:10,price:1,delivered:0,reserved:10,warehouseId:source.warehouseId,reservations:[{warehouseId:source.warehouseId,qty:10,lots:[{lot:lot.code,qty:10}]}]}],total:10,paymentStatus:'',deliveryDate:'2026-11-10',createdAt:'2026-11-01'},...s.salesOrders]}
+  const rw=A.createReworkOrder(s,ctx(s),a,4,'new defect');assert.ok(rw.result.ok,rw.result.message);s=rw.state
+  for(const status of ['Tasdiqlangan','Jarayonda'])s=A.transitionProduction(s,ctx(s),rw.result.id,status).state
+  const out=A.reportOutput(s,ctx(s),rw.result.id,4,0)
+  assert.equal(out.result.ok,false)
+  assert.match(out.result.message,/LOT/)
+  assert.equal(out.state,s,'a refused rework must not mutate stock or sales reservations')
+})
+
+test('P3-P0-07: ambiguous legacy rework LOT ownership fails closed at Final release',()=>{
+  let {s,a}=twoInFinalQc()
+  s=A.resolveQuality(s,ctx(s,'em4'),pendingFinal(s,a).id,'Failed','defect').state
+  const rw=A.createReworkOrder(s,ctx(s),a,4,'defect');assert.ok(rw.result.ok);s=rw.state
+  const id=rw.result.id
+  for(const status of ['Tasdiqlangan','Jarayonda'])s=A.transitionProduction(s,ctx(s),id,status).state
+  s=toFinalQc(s,id)
+  s={...s,lots:s.lots.map(l=>{if(l.reworkOrderId!==id)return l;const {reworkOrderId,...old}=l;return old})}
+  const out=A.resolveQuality(s,ctx(s,'em4'),pendingFinal(s,id).id,'Passed')
+  assert.equal(out.result.ok,false)
+  assert.match(out.result.message,/LOT\/serial egaligi/)
+  assert.equal(out.state,s)
 })
 
 test('BUG-05: a customer-return rework releases the returned units, not its source order’s hold',()=>{

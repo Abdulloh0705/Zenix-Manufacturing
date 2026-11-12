@@ -2,9 +2,9 @@ import {useState} from 'react'
 import {useApp} from '../../../app/providers/AppProvider/AppContext'
 import {Checkbox,Confirm,Drawer,RecordUnavailable,Empty,Field,Icon,InfoGrid,Input,Modal,Progress,SectionTitle,Select,StatusBadge,Tabs,Textarea,positive,useForm} from '../../../shared/ui'
 import type {ProductionOrder,ProductionStatus,WorkOrder} from '../../../types'
-import {activeBomFor,buildTraceability,deliveryRisk,finalWorkOrder,jobCard,materialReadiness,operationInput,orderCosting,orderMaterialPlan,perUnit,remainingQty,stockOf,workOrderRemainingMinutes} from '../../../domain/manufacturingEngine'
+import {activeBomFor,buildTraceability,deliveryRisk,finalWorkOrder,jobCard,materialReadiness,operationInput,orderCosting,orderMaterialPlan,orderQcHold,perUnit,remainingQty,stockOf,workOrderRemainingMinutes} from '../../../domain/manufacturingEngine'
 import {operatorScopeBlocker} from '../../../domain/access'
-import {brokenReservations,finishedWarehouseFor,outputWarehouseProblem,productionLineProblem} from '../../../domain/actions'
+import {brokenReservations,finishedWarehouseFor,outputWarehouseProblem,productionLineProblem,reworkOwnershipCandidates} from '../../../domain/actions'
 import {compactMoney,money,num,qty} from '../../../utils/format'
 import {formatMinutes,minutesBetween,stamp,todayISO} from '../../../utils/dates'
 import {employeeName,itemUnitOf,lineName,materialName,productName,useNow,warehouseName,workCenterName} from '../../common/lookups'
@@ -16,6 +16,42 @@ import type {LabelData} from '../../common/Barcode'
 
 export const OPEN_STATUSES:ProductionStatus[]=['Qoralama','Material kutilmoqda','Tasdiqlangan','Jarayonda','Pauzada','Sifat nazoratida']
 export const PRIORITIES:ProductionOrder['priority'][]=['Past','Normal','Yuqori','Kritik']
+
+function ReworkOwnershipModal({order,onClose}:{order:ProductionOrder;onClose:()=>void}){
+  const app=useApp(),s=app.state
+  const source=s.productionOrders.find(o=>o.id===order.reworkOf)
+  const candidates=reworkOwnershipCandidates(s,order.id)
+  const [amounts,setAmounts]=useState<Record<string,string>>({})
+  const [reason,setReason]=useState('')
+  const held=orderQcHold(s,order)
+  const owned=s.lots.filter(l=>l.reworkOrderId===order.id&&l.status==='quarantine').reduce((n,l)=>n+l.qty,0)
+  const remaining=Math.max(0,held-owned)
+  const rows=Object.entries(amounts).filter(([,v])=>Number(v)>0).map(([lotId,v])=>({lotId,qty:Number(v)}))
+  const valid=rows.length>0&&Math.abs(rows.reduce((n,r)=>n+r.qty,0)-remaining)<1e-6&&reason.trim().length>0
+  return <Modal open onClose={onClose} title="Rework LOT egaligini tekshirish" eyebrow={order.code} subtitle={`Manba ${source?.code||'topilmadi'} · ${productName(s,order.productId)} · ${warehouseName(s,order.warehouseId)} · ${num(remaining)} birlik`} size="md"
+    footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Yopish</button><button type="button" className="primary-glass-btn" disabled={!valid} onClick={()=>{const r=app.reconcileReworkOwnership(order.id,rows,reason);if(r.ok)onClose()}}>LOT egaligini qayd etish</button></>}>
+    <div className="inline-note warning">Faqat manba MOning shu ombor va variantdagi karantin LOTlari tanlanadi. Bu amal stockni sotuvga chiqarmaydi; Final QC alohida qaror.</div>
+    {source&&<InfoGrid items={[{label:'Manba MO',value:source.code},{label:'Mahsulot',value:productName(s,source.productId)},{label:'Variant',value:source.variantId||'—'},{label:'Ombor',value:warehouseName(s,source.warehouseId)},{label:'Manba LOT',value:source.lot||'—'},{label:'Rework karantini',value:num(remaining)}]}/>}
+    <SectionTitle title="Mos karantin LOTlar"/>
+    {candidates.length?candidates.map(l=><div className="list-row" key={l.id}><span className="list-row-copy"><b>{l.code}</b><small>{l.location||'Joy belgilanmagan'} · qoldiq {num(l.qty)} · {l.createdAt}</small></span><input className="ui-input cell-input" aria-label={`${l.code} miqdori`} type="number" min="0" max={l.qty} step={l.kind==='serial'?'1':'0.001'} value={amounts[l.id]||''} onChange={e=>setAmounts(v=>({...v,[l.id]:e.target.value}))}/></div>):<div className="inline-note warning">Ishonchli mos LOT yo‘q. Qo‘lda tarixiy hujjatlarni tekshirish kerak; release bloklangan.</div>}
+    <SectionTitle title="QC tarixi"/>
+    {s.qualityChecks.filter(q=>q.sourceType==='production'&&(q.sourceId===order.id||q.sourceId===source?.id)).map(q=><div className="list-row" key={q.id}><span className="list-row-copy"><b>{q.sourceId===order.id?order.code:source?.code} · {q.type} · {q.status}</b><small>{q.date} · {q.reason||'Sabab yo‘q'}</small></span></div>)}
+    <Field label="Tasdiqlash sababi"><Textarea value={reason} onChange={e=>setReason(e.target.value)} placeholder="LOTni tasdiqlovchi hujjat / tekshiruv"/></Field>
+  </Modal>
+}
+
+function MaterialReturnModal({order,issueId,onClose}:{order:ProductionOrder;issueId:string;onClose:()=>void}){
+  const app=useApp(),s=app.state,issue=order.consumed.find(c=>c.id===issueId)
+  const [amount,setAmount]=useState(''),[reason,setReason]=useState(''),[key]=useState(()=>`material-return:${order.id}:${issueId}:${Date.now()}`)
+  if(!issue)return null
+  const open=issue.qty-(order.materialReturns||[]).filter(r=>r.issueId===issueId).reduce((n,r)=>n+r.qty,0)
+  return <Modal open onClose={onClose} title="Ishlatilmagan materialni qaytarish" eyebrow={order.code} subtitle={`${materialName(s,issue.materialId)} · ${issue.lot||'LOTsiz'} · ${warehouseName(s,issue.warehouseId||'')}`} size="sm"
+    footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Yopish</button><button type="button" className="primary-glass-btn" disabled={!Number.isFinite(Number(amount))||Number(amount)<=0||Number(amount)>open||!reason.trim()} onClick={()=>{const r=app.returnUnusedMaterial(order.id,issueId,Number(amount),reason,key);if(r.ok)onClose()}}>Qaytarishni qayd etish</button></>}>
+    <div className="inline-note">Faqat ushbu chiqimdan keyin ishlab chiqarish yoki operatsiya bajarilmagan miqdor qaytariladi. Asl LOT, ombor va tannarx saqlanadi.</div>
+    <Field label={`Miqdor (eng ko‘pi ${num(open)})`}><Input type="number" min="0" max={open} step="0.001" value={amount} onChange={e=>setAmount(e.target.value)}/></Field>
+    <Field label="Sabab"><Textarea value={reason} onChange={e=>setReason(e.target.value)}/></Field>
+  </Modal>
+}
 /** Why an open order cannot move on (engine `orderBlocker`). */
 export const BLOCKER_LABEL={quality:'QC to‘sig‘i',machine:'Uskuna to‘xtagan'} as const
 
@@ -244,8 +280,9 @@ export function OrderDrawer({orderId,onClose}:{orderId:string|null;onClose:()=>v
 function OrderDrawerBody({order,onClose}:{order:ProductionOrder;onClose:()=>void}){
   const app=useApp(),s=app.state
   const [tab,setTab]=useState('overview')
-  const [modal,setModal]=useState<'edit'|'output'|'scrap'|'extra'|'complete'|'cancel'|null>(null)
+  const [modal,setModal]=useState<'edit'|'output'|'scrap'|'extra'|'complete'|'cancel'|'reconcile'|null>(null)
   const [check,setCheck]=useState<string|null>(null)
+  const [returnIssue,setReturnIssue]=useState<string|null>(null)
   const [label,setLabel]=useState<LabelData|null>(null)
   const product=s.products.find(p=>p.id===order.productId)
   const unit=product?.unit||'dona'
@@ -254,6 +291,7 @@ function OrderDrawerBody({order,onClose}:{order:ProductionOrder;onClose:()=>void
   const costing=orderCosting(s,order)
   const checks=s.qualityChecks.filter(q=>q.sourceType==='production'&&q.sourceId===order.id)
   const pendingFinal=checks.find(q=>q.type==='Final'&&q.status==='Pending')
+  const unresolvedRework=Boolean(order.reworkOf&&!s.returns.some(r=>r.reworkOrderId===order.id)&&product?.tracking!=='none'&&orderQcHold(s,order)>s.lots.filter(l=>l.reworkOrderId===order.id&&l.status==='quarantine').reduce((n,l)=>n+l.qty,0)+1e-6)
   const closed=['Yakunlangan','Bekor qilingan'].includes(order.status)
   const canEdit=app.can('production','edit')
   const t=(status:ProductionStatus)=>app.transitionProduction(order.id,status)
@@ -279,6 +317,7 @@ function OrderDrawerBody({order,onClose}:{order:ProductionOrder;onClose:()=>void
       {(order.lot||order.serialRange)&&<button type="button" className="secondary-glass-btn" onClick={()=>setLabel({title:product?.name||order.code,code:order.lot||order.serialRange!.split('…')[0],lines:[['SKU',product?.sku||''],['MO',order.code],[order.lot?'Lot':'Serial',order.lot||order.serialRange||''],['Miqdor',`${num(order.completed)} ${unit}`]]})}><Icon name="printer" size={15}/>Label</button>}
       {['Jarayonda','Pauzada'].includes(order.status)&&canEdit&&<button type="button" className="warning-glass-btn" onClick={()=>setModal('scrap')}><Icon name="trash" size={15}/>Scrap</button>}
       {['Jarayonda','Pauzada'].includes(order.status)&&canEdit&&<button type="button" className="ghost-btn" onClick={()=>setModal('extra')}><Icon name="plus" size={15}/>Qo‘shimcha material</button>}
+      {unresolvedRework&&app.can('quality','edit')&&canEdit&&<button type="button" className="warning-glass-btn" onClick={()=>setModal('reconcile')}>Rework LOTni muvofiqlashtirish</button>}
       <span className="spacer"/>
       {canEdit&&primary.map(a=><button type="button" key={a.label} className={a.tone==='secondary'?'secondary-glass-btn':'primary-glass-btn'} disabled={Boolean(a.disabled)} title={a.disabled} onClick={a.run}><Icon name={a.icon} size={16}/>{a.label}</button>)}
       {!canEdit&&!closed&&<span className="soft-meta">Faqat ko‘rish ruxsati</span>}
@@ -290,12 +329,13 @@ function OrderDrawerBody({order,onClose}:{order:ProductionOrder;onClose:()=>void
         <InfoGrid columns={3} items={[{label:'Material',value:order.materialReserved?'Rezerv qilingan':`${ready}% tayyor`,tone:order.materialReserved||ready>=100?'success':'warning'},{label:'Final QC',value:order.qualityStatus,tone:order.qualityStatus==='Passed'?'success':['Failed','Scrap'].includes(order.qualityStatus)?'danger':undefined},{label:'Due',value:order.due,tone:risk?'danger':undefined}]}/>
       </div>
       {order.status==='Sifat nazoratida'&&completeBlock&&<div className="inline-note warning"><Icon name="shield"/><span>{completeBlock}{pendingFinal&&app.can('quality','edit')&&<> — <button type="button" className="link-btn" onClick={()=>setCheck(pendingFinal.id)}>natijani hozir kiritish</button></>}</span></div>}
+      {unresolvedRework&&<div className="inline-note warning" role="alert"><Icon name="warning"/><span>Rework LOT egaligi aniqlanmagan. Final QC release bloklangan. Manba LOT va QC tarixini tekshirib, muvofiqlashtiring.</span></div>}
       {brokenLots.length>0&&<div className="inline-note warning" role="alert"><Icon name="warning"/><span>Rezerv qilingan LOT endi yaroqsiz (muddati o‘tgan yoki bloklangan): <b>{brokenLots.join(', ')}</b> — natija va material chiqimi bloklanadi.{canEdit&&<> <button type="button" className="link-btn" onClick={()=>app.refreshMaterialReservation(order.id)}>Rezervni yangilash</button></>}</span></div>}
       <OrderMaterialNote order={order} onOpenMaterials={()=>setTab('materials')}/>
       <InfoGrid items={[{label:'Mahsulot',value:product?.name},{label:'BOM snapshot',value:`${order.bomSnapshot.code} · ${order.bomVersion}`},{label:'Liniya',value:lineName(s,order.lineId)},{label:'Ombor',value:warehouseName(s,order.warehouseId)},{label:'Mas’ul',value:employeeName(s,order.responsibleId)},{label:'Boshlanish',value:order.start},{label:order.lot?'Lot':'Serial',value:order.lot||order.serialRange},{label:'Yaratilgan',value:order.createdAt}]}/>
     </>}
     {tab==='operations'&&<WorkOrderList order={order}/>}
-    {tab==='materials'&&<OrderMaterialsPanel order={order}/>}
+    {tab==='materials'&&<><OrderMaterialsPanel order={order}/>{app.can('production','edit')&&order.consumed.filter(c=>c.issueKind==='manual'&&c.id).map(c=>{const open=c.qty-(order.materialReturns||[]).filter(r=>r.issueId===c.id).reduce((n,r)=>n+r.qty,0);return open>1e-9?<div className="list-row" key={c.id}><span className="list-row-copy"><b>{materialName(s,c.materialId)} · {c.lot||'LOTsiz'}</b><small>{warehouseName(s,c.warehouseId||'')} · berilgan {num(c.qty)} · qaytarilmagan {num(open)}</small></span><button type="button" className="secondary-glass-btn compact" onClick={()=>setReturnIssue(c.id!)}>Ishlatilmaganni qaytarish</button></div>:null})}</>}
     {tab==='quality'&&<div className="stack-list">
       {checks.length?checks.map(q=><button type="button" className="list-row is-clickable" key={q.id} onClick={()=>setCheck(q.id)}><span className="list-row-copy"><b>{q.type} inspection</b><small>{q.date}{q.reason?` · ${q.reason}`:''}{q.measured?` · ${q.measured}`:''}</small></span><span className="list-row-meta"><StatusBadge>{q.status}</StatusBadge></span><Icon name="chevron" size={13} className="list-row-chevron"/></button>):<Empty compact icon="shield" title="Tekshiruv yo‘q" text="Final tekshiruv sifatga yuborilganda yaratiladi"/>}
       {!closed&&<div className="row-actions"><button type="button" className="secondary-glass-btn compact" disabled={!app.can('quality','create')&&!canEdit} onClick={()=>app.createQualityCheck({sourceType:'production',sourceId:order.id,itemId:order.productId,type:'Jarayon',lot:order.lot})}><Icon name="plus" size={14}/>In-process tekshiruv</button></div>}
@@ -322,6 +362,8 @@ function OrderDrawerBody({order,onClose}:{order:ProductionOrder;onClose:()=>void
     {modal==='output'&&<OutputModal order={order} onClose={()=>setModal(null)}/>}
     {modal==='scrap'&&<ScrapModal order={order} onClose={()=>setModal(null)}/>}
     {modal==='extra'&&<ExtraIssueModal order={order} onClose={()=>setModal(null)}/>}
+    {modal==='reconcile'&&<ReworkOwnershipModal order={order} onClose={()=>setModal(null)}/>}
+    {returnIssue&&<MaterialReturnModal order={order} issueId={returnIssue} onClose={()=>setReturnIssue(null)}/>}
     {modal==='complete'&&<CompleteOrderModal order={order} onClose={()=>setModal(null)} onOutput={()=>setModal('output')}/>}
     <Confirm open={modal==='cancel'} onClose={()=>setModal(null)} onConfirm={()=>t('Bekor qilingan')} danger title={`${order.code} bekor qilinsinmi?`} text={`Qolgan miqdor uchun material rezervi qaytariladi.${order.completed?` Allaqachon qabul qilingan ${order.completed} ${unit} omborda qoladi.`:''}`} confirmText="Buyurtmani bekor qilish"/>
     <QualityResolveModal checkId={check} onClose={()=>setCheck(null)}/>

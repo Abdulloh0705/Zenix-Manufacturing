@@ -247,6 +247,21 @@ test('N-06: rework is limited to units that exist and are not already being rewo
   refused(A.createReworkOrder(s,ctx(s),id,5,'x'),/oshmasligi/)
 })
 
+test('P3-P1-04: an incoming QC Hold can be re-inspected and released once',()=>{
+  let {s,poId,check}=quarantinedReceipt(fresh(),5,'HOLD-RECHECK')
+  const held=A.resolveQuality(s,ctx(s,'em4'),check.id,'Hold','Awaiting certificate');assert.ok(held.result.ok,held.result.message);s=held.state
+  const receipt=s.purchaseOrders.find(p=>p.id===poId).receipts.find(r=>r.id===check.receiptId)
+  const before=s.stockBalances.find(b=>b.warehouseId===receipt.warehouseId&&b.itemId==='rm1').quarantine
+  const partlyReturned=ok(A.returnPurchaseToSupplier(s,ctx(s),check.id,2))
+  refused(A.createQualityCheck(partlyReturned,ctx(partlyReturned,'em4'),{sourceType:'purchase',sourceId:poId,receiptId:receipt.id,itemId:'rm1',type:'Kirish',lot:receipt.lot}),/qisman/)
+  const repeated=A.createQualityCheck(s,ctx(s,'em4'),{sourceType:'purchase',sourceId:poId,receiptId:receipt.id,itemId:'rm1',type:'Kirish',lot:receipt.lot})
+  assert.ok(repeated.result.ok,repeated.result.message);s=repeated.state
+  const passed=A.resolveQuality(s,ctx(s,'em4'),repeated.result.id,'Passed');assert.ok(passed.result.ok,passed.result.message);s=passed.state
+  assert.equal(s.purchaseOrders.find(p=>p.id===poId).receipts.find(r=>r.id===receipt.id).accepted,5)
+  assert.equal(s.stockBalances.find(b=>b.warehouseId===receipt.warehouseId&&b.itemId==='rm1').quarantine,before-5)
+  refused(A.resolveQuality(s,ctx(s,'em4'),repeated.result.id,'Passed'),/allaqachon/)
+})
+
 test('N-08: switching Final QC off mid-run releases the held output at completion',()=>{
   let {s,id}=started(fresh(),'p1',10)
   s=inQc(s,id,10)

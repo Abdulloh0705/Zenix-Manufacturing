@@ -23,6 +23,8 @@ const Reports=lazy(()=>import('./features/reports/pages/Reports'))
 const Settings=lazy(()=>import('./features/settings/pages/Settings'))
 const AI=lazy(()=>import('./features/ai/pages/AI'))
 const Admin=lazy(()=>import('./features/admin/pages/Admin'))
+const Subscription=lazy(()=>import('./features/subscription/pages/Subscription'))
+const Platform=lazy(()=>import('./features/platform/PlatformPage'))
 
 function StateCard({icon,title,text,action}:{icon:string;title:string;text:string;action:ReactNode}){
   return <div className="permission-state card"><span className="state-icon"><Icon name={icon} size={26}/></span><h1>{title}</h1><p>{text}</p>{action}</div>
@@ -35,7 +37,8 @@ function StateCard({icon,title,text,action}:{icon:string;title:string;text:strin
 function RequireAuth({children}:{children:ReactNode}){
   const app=useApp(),location=useLocation()
   if(app.auth.needsSetup)return <Navigate to="/register" replace/>
-  if(!app.auth.signedIn)return <Navigate to={`/login?next=${encodeURIComponent(location.pathname+location.search)}`} replace/>
+  // Expiry or idle keeps the page to return to; a deliberate sign-out does not hand it to whoever signs in next.
+  if(!app.auth.signedIn)return <Navigate to={app.auth.signedOut?'/login':`/login?next=${encodeURIComponent(location.pathname+location.search)}`} replace/>
   if(app.auth.account?.mustChangePassword)return <ForcePasswordChange/>
   return children
 }
@@ -73,6 +76,9 @@ function Page({module,children}:{module?:string;children:ReactNode}){
 
 export default function App(){
   const app=useApp()
+  const location=useLocation()
+  // The platform workspace is its own product area: no tenant shell, guard or session is involved.
+  if(location.pathname==='/platform'||location.pathname.startsWith('/platform/'))return <Suspense fallback={<RouteLoading/>}><Platform/></Suspense>
   // Unreadable stored data: nothing else opens until the user has chosen how to recover (saving is suspended).
   if(app.recovery)return <RecoveryScreen/>
   return <><AppRoutes/><Toasts/></>
@@ -80,14 +86,20 @@ export default function App(){
 
 const PUBLIC_PATHS=['/login','/register','/forgot-password']
 
+function AuthRedirect({to}:{to:string}){
+  const {search,hash}=useLocation()
+  return <Navigate to={{pathname:to,search,hash}} replace/>
+}
+
 function AppRoutes(){
   return <Routes>
+    <Route path="/platform/*" element={<Platform/>}/>
     <Route path="/login" element={<LoginPage/>}/>
     <Route path="/register" element={<RegisterPage/>}/>
     <Route path="/forgot-password" element={<ForgotPasswordPage/>}/>
     <Route path="/setup" element={<Navigate to="/register" replace/>}/>
     {/* Old sign-in addresses lead to these pages without first asking to sign in. */}
-    {Object.entries(legacyRedirects).filter(([,to])=>PUBLIC_PATHS.includes(to)).map(([from,to])=><Route key={from} path={from} element={<Navigate to={to} replace/>}/>)}
+    {Object.entries(legacyRedirects).filter(([,to])=>PUBLIC_PATHS.includes(to)).map(([from,to])=><Route key={from} path={from} element={<AuthRedirect to={to}/>}/>)}
     <Route element={<RequireAuth><AppLayout/></RequireAuth>}>
     <Route path="/" element={<Page><Dashboard/></Page>}/>
     <Route path="/production" element={<Page module="production"><Production/></Page>}/>
@@ -104,6 +116,7 @@ function AppRoutes(){
     <Route path="/settings" element={<Page module="settings"><Settings/></Page>}/>
     <Route path="/ai" element={<Page module="ai"><AI/></Page>}/>
     <Route path="/admin" element={<Page module="users|roles|audit|settings"><Admin/></Page>}/>
+    <Route path="/subscription" element={<Page module="subscription"><Subscription/></Page>}/>
     {Object.entries(legacyRedirects).filter(([from,to])=>from!=='/ai'&&!PUBLIC_PATHS.includes(to)).map(([from,to])=><Route key={from} path={from} element={<Navigate to={to} replace/>}/>)}
     <Route path="/help" element={<Navigate to="/settings?view=system" replace/>}/>
     <Route path="*" element={<NotFound/>}/>

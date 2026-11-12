@@ -2,13 +2,15 @@ import {useRef,useState} from 'react'
 import type {CSSProperties} from 'react'
 import {useNavigate,useSearchParams} from 'react-router-dom'
 import {useApp} from '../../../app/providers/AppProvider/AppContext'
-import {Card,Checkbox,Confirm,Drawer,RecordUnavailable,Empty,Field,FilterSelect,Icon,InfoGrid,Input,KPI,Modal,MoneyInput,PageHeader,Progress,ResourceTable,Select,StatusBadge,Tabs,Textarea,required,useForm,useRecordParam,useSearchParamState} from '../../../shared/ui'
+import {Card,Checkbox,Confirm,Drawer,RecordUnavailable,Empty,Field,FilterSelect,Icon,InfoGrid,Input,KPI,Modal,MoneyInput,PageHeader,Progress,ResourceTable,Select,StatusBadge,Tabs,Textarea,required,useDirtyMarker,useForm,useRecordParam,useSearchParamState} from '../../../shared/ui'
 import type {CurrencyCode,PurchaseOrder,SubcontractOrder,Supplier,SupplierMaterial} from '../../../types'
-import {activeBomFor,createMrpPlan,perUnit,stockOf} from '../../../domain/manufacturingEngine'
+import {activeBomFor,perUnit,stockOf} from '../../../domain/manufacturingEngine'
+import {branchPurchaseNeeds} from '../../../domain/planning'
 import {needsSecondApprover,referenceBlocker} from '../../../domain/actions'
 import {convertQty,unitOptions} from '../../../domain/uom'
 import {SUPPLY_CURRENCIES,linkBlock,linksOfSupplier,receiptQuantities,rejectedOpen,replaceableQty,replacementView,supplierPerformance,supplierPurchaseHistory} from '../../../domain/supplierMaterials'
 import {parseSerials} from '../../../domain/serials'
+import {payableLedger,purchaseBalance,purchasePaymentStatus,supplierBalance} from '../../../domain/payables'
 import {QualityResolveModal} from '../../common/QualityResolveModal'
 import {CURRENCIES,quoteMoney} from '../../../utils/format'
 import {LinkTermsTable,PurchasePlanModal,SourcingModal,SupplierMaterialModal,conversionText,quoteText} from '../components/Sourcing'
@@ -38,14 +40,14 @@ function Overview(){
   const app=useApp(),s=app.state,navigate=useNavigate()
   const open=s.purchaseOrders.filter(p=>OPEN_PO.includes(p.status))
   const late=open.filter(p=>p.expectedDate<todayISO()&&p.status!=='Qoralama')
-  const plan=createMrpPlan(s)
+  const needs=branchPurchaseNeeds(s)
   return <div className="page-stack">
     <PageHeader title="Xaridlar" subtitle="Yetishmovchilik → PO → qabul → zaxira"/>
     <div className="kpi-grid">
       <KPI label="Ochiq PO" value={open.length} sub={compactMoney(open.reduce((a,p)=>a+p.items.reduce((x,i)=>x+(i.qty-i.received)*i.price,0),0))} icon={<Icon name="cart"/>} onClick={()=>navigate('/purchases?view=orders')}/>
       <KPI label="Kechikkan" value={late.length} sub="Sana o‘tgan" tone="pink" icon={<Icon name="clock"/>} onClick={()=>navigate('/purchases?view=orders&late=1')}/>
-      <KPI label="Xarid tavsiyalari" value={plan.purchases.filter(p=>p.suggested>0).length} sub="MRP" tone="orange" icon={<Icon name="warning"/>} onClick={()=>navigate('/purchases?view=requests')}/>
-      <KPI label="Supplier qarzi" value={compactMoney(s.suppliers.reduce((a,b)=>a+b.debt,0))} tone="purple" icon={<Icon name="wallet"/>} onClick={()=>navigate('/purchases?view=suppliers')}/>
+      <KPI label="Xarid tavsiyalari" value={needs.filter(p=>p.suggested>0).length} sub="filial bo‘yicha MRP" tone="orange" icon={<Icon name="warning"/>} onClick={()=>navigate('/purchases?view=requests')}/>
+      <KPI label="Supplier qarzi (ledger)" value={compactMoney(s.suppliers.reduce((a,b)=>a+Math.max(0,supplierBalance(s,b.id)),0))} tone="purple" icon={<Icon name="wallet"/>} onClick={()=>navigate('/purchases?view=suppliers')}/>
     </div>
     <div className="two-col">
       <Card title="Kutilayotgan qabullar" subtitle="Sana bo‘yicha" actions={<button type="button" className="ghost-btn" onClick={()=>navigate('/purchases?view=receiving')}>Qabul <Icon name="chevron" size={13}/></button>}>
@@ -60,18 +62,18 @@ function Overview(){
 
 function Requests(){
   const app=useApp(),s=app.state
-  const plan=createMrpPlan(s)
+  const plan=branchPurchaseNeeds(s)
   const [selected,setSelected]=useState<string[]>([])
   const [sourcing,setSourcing]=useState<SourcingNeed|null>(null),[planned,setPlanned]=useState<SourcingNeed[]|null>(null)
-  const rows=plan.purchases.filter(p=>p.suggested>0)
-  const needOf=(p:typeof rows[number]):SourcingNeed=>({materialId:p.materialId,need:p.suggested,needBy:p.needBy,source:'Purchase request'})
+  const rows=plan.filter(p=>p.suggested>0)
+  const needOf=(p:typeof rows[number]):SourcingNeed=>({materialId:p.materialId,need:p.suggested,needBy:p.needBy,warehouseId:p.warehouseId,source:`Purchase request ${p.branchId}`})
   const canBuy=app.can('purchases','create')
   return <div className="page-stack">
     <PageHeader title="Purchase Requests" subtitle="MRP netting · supplier tanlang · bir supplierga bitta PO"
-      actions={<button type="button" className="primary-glass-btn" disabled={!selected.length||!canBuy} onClick={()=>setPlanned(rows.filter(r=>selected.includes(r.materialId)).map(needOf))}><Icon name="cart"/>Tanlanganlardan PO ({selected.length})</button>}/>
-    {rows.length?<Card className="flush"><div className="table-scroll"><table><thead><tr><th><span className="sr-only">Tanlash</span></th><th>Material</th><th className="align-right">Talab</th><th className="align-right">Available</th><th className="align-right">Yo‘lda</th><th className="align-right">Tavsiya</th><th>Supplier</th><th>Kerak sana</th><th/></tr></thead><tbody>{rows.map(p=>{const m=s.rawMaterials.find(x=>x.id===p.materialId)!;return <tr key={p.materialId}>
-      <td><Checkbox checked={selected.includes(p.materialId)} onChange={v=>setSelected(x=>v?[...x,p.materialId]:x.filter(i=>i!==p.materialId))} label={<span className="sr-only">{m.name}</span>}/></td>
-      <td><div className="cell-main"><b>{m.name}</b><small>{m.sku}</small></div></td><td className="align-right">{qty(p.required,m.unit)}</td><td className="align-right">{num(p.available)}</td><td className="align-right">{num(p.incoming)}</td><td className="align-right"><b>{qty(p.suggested,m.unit)}</b></td>
+      actions={<button type="button" className="primary-glass-btn" disabled={!selected.length||!canBuy} onClick={()=>setPlanned(rows.filter(r=>selected.includes(r.id)).map(needOf))}><Icon name="cart"/>Tanlanganlardan PO ({selected.length})</button>}/>
+    {rows.length?<Card className="flush"><div className="table-scroll"><table><thead><tr><th><span className="sr-only">Tanlash</span></th><th>Material · filial</th><th className="align-right">Talab</th><th className="align-right">Available</th><th className="align-right">Yo‘lda</th><th className="align-right">Tavsiya</th><th>Supplier</th><th>Kerak sana</th><th/></tr></thead><tbody>{rows.map(p=>{const m=p.m;return <tr key={p.id}>
+      <td><Checkbox checked={selected.includes(p.id)} onChange={v=>setSelected(x=>v?[...x,p.id]:x.filter(i=>i!==p.id))} label={<span className="sr-only">{m.name}</span>}/></td>
+      <td><div className="cell-main"><b>{m.name}</b><small>{m.sku} · {s.branches.find(b=>b.id===p.branchId)?.name||p.branchId}</small></div></td><td className="align-right">{qty(p.required,m.unit)}</td><td className="align-right">{num(p.available)}</td><td className="align-right">{num(p.incoming)}</td><td className="align-right"><b>{qty(p.suggested,m.unit)}</b></td>
       <td>{p.supplierId?supplierName(s,p.supplierId):p.supplierCount>1?<span className="warning-text">{p.supplierCount} ta — tanlang</span>:<span className="negative">Supplier yo‘q</span>}</td><td>{p.needBy}</td>
       <td className="align-right"><button type="button" className="soft-glass-btn compact" disabled={!canBuy} onClick={()=>setSourcing(needOf(p))}><Icon name="truck" size={14}/>Supplier</button></td>
     </tr>})}</tbody></table></div></Card>:<Card><Empty icon="check" title="Xarid talab qilinmaydi" text="Talab qoplangan"/></Card>}
@@ -87,7 +89,7 @@ function Orders(){
   const [create,setCreate]=useState(false)
   const rows=s.purchaseOrders.filter(p=>(!status||p.status===status)&&(!supplier||p.supplierId===supplier)&&(late!=='1'||(OPEN_PO.includes(p.status)&&p.status!=='Qoralama'&&p.expectedDate<todayISO())))
   return <div className="page-stack">
-    <PageHeader title="Purchase Orders" subtitle="Qoralama → tasdiqlangan → yo‘lda → qabul"
+    <PageHeader title="Xarid buyurtmalari" subtitle="Qoralama → tasdiqlangan → yo‘lda → qabul"
       actions={<button type="button" className="primary-glass-btn" disabled={!app.can('purchases','create')} onClick={()=>setCreate(true)}><Icon name="plus"/>Yangi PO</button>}/>
     <ResourceTable rows={rows} query={q} onQuery={setQ} placeholder="PO, supplier, material..." onRow={p=>setId(p.id)} exportName="purchase-orders" resetKey={`${status}|${supplier}|${late}`}
       filtersActive={Boolean(status||supplier||late)} onResetFilters={()=>{setStatus('');setSupplier('');setLate('')}}
@@ -100,7 +102,7 @@ function Orders(){
         {key:'received',label:'Qabul',align:'right',value:p=>p.items.reduce((a,i)=>a+i.received,0)/Math.max(1,p.items.reduce((a,i)=>a+i.qty,0))*100,render:p=>{const pct=p.items.reduce((a,i)=>a+i.received,0)/Math.max(1,p.items.reduce((a,i)=>a+i.qty,0))*100;return <div className="progress-cell"><Progress value={pct}/><small>{Math.round(pct)}%</small></div>}},
         {key:'status',label:'Status',value:p=>p.status,render:p=><StatusBadge>{p.status}</StatusBadge>},
         {key:'total',label:'Summa',align:'right',value:p=>p.total,render:p=>money(p.total)},
-        {key:'payment',label:'To‘lov',value:p=>p.paymentStatus,render:p=><StatusBadge>{p.paymentStatus}</StatusBadge>,priority:'low'},
+        {key:'payment',label:'To‘lov',value:p=>purchasePaymentStatus(s,p),render:p=><StatusBadge>{purchasePaymentStatus(s,p)}</StatusBadge>,priority:'low'},
         {key:'expected',label:'Expected',value:p=>p.expectedDate},
       ]}/>
     {create&&<PurchaseFormModal onClose={()=>setCreate(false)} onCreated={v=>setId(v)}/>}
@@ -128,6 +130,8 @@ function PurchaseFormModal({onClose,onCreated,supplierId,po}:{onClose:()=>void;o
   const [expectedDate,setExpectedDate]=useState(()=>po?.expectedDate||addDays(todayISO(),lead(lines)||s.suppliers.find(x=>x.id===sid)?.leadTime||4))
   const [warehouseId,setWarehouseId]=useState(()=>po?.warehouseId||rawStores(s).find(w=>w.id===s.settings.defaultWarehouseId)?.id||rawStores(s)[0]?.id||'')
   const [draft,setDraft]=useState(false),[belowMoq,setBelowMoq]=useState(false),[submitted,setSubmitted]=useState(false)
+  const firstDraft=useRef(JSON.stringify({sid,lines,expectedDate,warehouseId,draft,belowMoq}))
+  useDirtyMarker(JSON.stringify({sid,lines,expectedDate,warehouseId,draft,belowMoq})!==firstDraft.current)
   const changeSupplier=(v:string)=>{setSid(v);const first=orderable(v)[0];const next=first?[lineFor(first)]:[];setLines(next);setExpectedDate(addDays(todayISO(),lead(next)||s.suppliers.find(x=>x.id===v)?.leadTime||4))}
   const rows=lines.map(l=>{
     const link=s.supplierMaterials.find(x=>x.id===l.linkId),m=s.rawMaterials.find(x=>x.id===link?.materialId)
@@ -209,15 +213,37 @@ function CloseRestModal({po,onClose}:{po:PurchaseOrder;onClose:()=>void}){
   </Modal>
 }
 
+function SupplierPaymentModal({po,supplierId,onClose}:{po?:PurchaseOrder;supplierId?:string;onClose:()=>void}){
+  const app=useApp(),id=po?.supplierId||supplierId||'',open=po?purchaseBalance(app.state,po.id):supplierBalance(app.state,id)
+  const [amount,setAmount]=useState(''),[reason,setReason]=useState(''),[key]=useState(()=>`supplier-payment:${po?.id||supplierId}:${Date.now()}`)
+  return <Modal open onClose={onClose} title="Supplier to‘lovi" eyebrow={po?.code||app.state.suppliers.find(x=>x.id===id)?.name} subtitle={`Ochiq payable ${money(open)} UZS`} size="sm"
+    footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Yopish</button><button type="button" className="primary-glass-btn" disabled={!Number.isFinite(Number(amount))||Number(amount)<=0||Number(amount)>open||!reason.trim()} onClick={()=>{const r=app.recordSupplierPayment({supplierId:id,purchaseOrderId:po?.id,amount:Number(amount),key,reason});if(r.ok)onClose()}}>To‘lovni yozish</button></>}>
+    <div className="inline-note">Bu demo ledger yozuvi. Bankda to‘lov amalga oshganini tasdiqlamaydi.</div>
+    <Field label="Miqdor (UZS)"><MoneyInput min="0" value={amount} onValue={setAmount}/></Field>
+    <Field label="Hujjat / sabab"><Textarea value={reason} onChange={e=>setReason(e.target.value)}/></Field>
+  </Modal>
+}
+
+function SupplierAdjustmentModal({supplier,onClose}:{supplier:Supplier;onClose:()=>void}){
+  const app=useApp()
+  const [amount,setAmount]=useState(''),[reason,setReason]=useState(''),[key]=useState(()=>`supplier-adjustment:${supplier.id}:${Date.now()}`)
+  return <Modal open onClose={onClose} title="Supplier qarzini tuzatish" eyebrow={supplier.name} subtitle={`Joriy qoldiq ${money(supplierBalance(app.state,supplier.id))}`} size="sm"
+    footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Yopish</button><button type="button" className="primary-glass-btn" disabled={!Number.isFinite(Number(amount))||Math.abs(Number(amount))<0.005||!reason.trim()} onClick={()=>{const r=app.adjustSupplierBalance({supplierId:supplier.id,amount:Number(amount),key,reason});if(r.ok)onClose()}}>Tuzatishni yozish</button></>}>
+    <div className="inline-note">Musbat summa qarzni oshiradi; manfiy summa kredit sifatida kamaytiradi. Sabab audit tarixida qoladi.</div>
+    <Field label="Tuzatish (UZS)"><Input type="number" step="0.01" value={amount} onChange={e=>setAmount(e.target.value)}/></Field>
+    <Field label="Sabab"><Textarea value={reason} onChange={e=>setReason(e.target.value)}/></Field>
+  </Modal>
+}
+
 function PurchaseDrawerBody({po,onClose}:{po:PurchaseOrder;onClose:()=>void}){
   const app=useApp(),s=app.state,navigate=useNavigate()
-  const [tab,setTab]=useState('lines'),[cancel,setCancel]=useState(false),[closeRest,setCloseRest]=useState(false),[edit,setEdit]=useState(false),[check,setCheck]=useState<string|null>(null)
+  const [tab,setTab]=useState('lines'),[cancel,setCancel]=useState(false),[closeRest,setCloseRest]=useState(false),[edit,setEdit]=useState(false),[pay,setPay]=useState(false),[check,setCheck]=useState<string|null>(null)
   const canEdit=app.can('purchases','edit')
   const receivable=['Tasdiqlangan','Yo‘lda','Qisman qabul'].includes(po.status)
   const checks=s.qualityChecks.filter(q=>q.sourceType==='purchase'&&q.sourceId===po.id)
   const late=OPEN_PO.includes(po.status)&&po.status!=='Qoralama'&&po.expectedDate<todayISO()
   return <Drawer open onClose={onClose} title={po.code} eyebrow="Purchase order" icon="cart" size="lg" subtitle={`${supplierName(s,po.supplierId)} · ${warehouseName(s,po.warehouseId)} · expected ${po.expectedDate}`}
-    headerExtra={<><StatusBadge>{po.status}</StatusBadge>{late&&<StatusBadge tone="danger">Kechikmoqda</StatusBadge>}<StatusBadge>{po.paymentStatus}</StatusBadge>{po.source&&<span className="chip">{po.source}</span>}</>}
+    headerExtra={<><StatusBadge>{po.status}</StatusBadge>{late&&<StatusBadge tone="danger">Kechikmoqda</StatusBadge>}<StatusBadge>{purchasePaymentStatus(s,po)}</StatusBadge>{po.source&&<span className="chip">{po.source}</span>}</>}
     actions={<>
       {canEdit&&!['Bekor','Qabul qilindi'].includes(po.status)&&!po.items.some(i=>i.received>0)&&<button type="button" className="ghost-btn" onClick={()=>setCancel(true)}><Icon name="x" size={15}/>Bekor qilish</button>}
       {canEdit&&receivable&&po.items.some(i=>i.received>0)&&<button type="button" className="ghost-btn" onClick={()=>setCloseRest(true)}><Icon name="x" size={15}/>Qoldiqni yopish</button>}
@@ -244,14 +270,18 @@ function PurchaseDrawerBody({po,onClose}:{po:PurchaseOrder;onClose:()=>void}){
       </tr>})}</tbody></table></div>:<Empty compact title="Hali qabul qilinmagan"/>)}
     {tab==='finance'&&<div className="form-grid">
       <Field label="Invoice holati"><Select value={po.invoiceStatus} disabled={!canEdit} onChange={v=>app.updatePurchaseMeta(po.id,{invoiceStatus:v})}>{['Kutilmoqda','Qabul qilindi','Tekshirildi','Yo‘q'].map(x=><option key={x} value={x}>{x}</option>)}</Select></Field>
-      <Field label="To‘lov holati"><Select value={po.paymentStatus} disabled={!canEdit} onChange={v=>app.updatePurchaseMeta(po.id,{paymentStatus:v})}>{['To‘lanmagan','Qisman','To‘langan'].map(x=><option key={x} value={x}>{x}</option>)}</Select></Field>
-      <InfoGrid items={[{label:'PO summasi',value:money(po.total)},{label:'Qabul qilingan qiymat',value:money(po.items.reduce((a,i)=>a+i.received*i.price,0))},{label:'Supplier qarzi',value:money(s.suppliers.find(x=>x.id===po.supplierId)?.debt||0)}]}/>
+      <Field label="To‘lov holati"><Select value={purchasePaymentStatus(s,po)} disabled onChange={()=>{}}>{['To‘lanmagan','Qisman','To‘langan'].map(x=><option key={x} value={x}>{x}</option>)}</Select></Field>
+      <InfoGrid items={[{label:'PO summasi',value:money(po.total)},{label:'Qabul qilingan qiymat',value:money(po.items.reduce((a,i)=>a+i.received*i.price,0))},{label:'PO ochiq payable',value:money(purchaseBalance(s,po.id))},{label:'Supplier qarzi (ledger)',value:money(supplierBalance(s,po.supplierId))}]}/>
+      {purchaseBalance(s,po.id)>0.005&&(app.can('purchases','approve')||app.can('costs','edit'))&&<button type="button" className="primary-glass-btn compact" onClick={()=>setPay(true)}>Supplier to‘lovini qayd etish</button>}
+      {payableLedger(s).filter(e=>e.purchaseOrderId===po.id).map(e=><div className="list-row" key={e.id}><span className="list-row-copy"><b>{e.kind} · {money(e.amount)}</b><small>{e.date} · {e.reason||'—'} · {e.by}</small></span></div>)}
+      {po.receipts.length>0&&!payableLedger(s).some(e=>e.purchaseOrderId===po.id)&&<div className="inline-note warning">Bu PO qabullari payable ledgerdan oldin yozilgan; tarixiy to‘lov va qarz taqsimoti noma’lum. Supplier boshlang‘ich qoldig‘ini tekshiring.</div>}
     </div>}
     {tab==='quality'&&(checks.length?<div className="stack-list">{checks.map(q=><button type="button" className="list-row is-clickable" key={q.id} onClick={()=>setCheck(q.id)}><span className="list-row-copy"><b>{materialName(s,q.itemId)}{q.lot?` · ${q.lot}`:''}</b><small>{q.date}{q.acceptedQty!==undefined?` · ${num(q.acceptedQty,3)} qabul / ${num(q.rejectedQty||0,3)} rad`:''}{q.reason?` · ${q.reason}`:''}</small></span><StatusBadge>{q.status}</StatusBadge></button>)}</div>:<Empty compact title="Incoming tekshiruv yo‘q"/>)}
     {tab==='docs'&&<AttachmentsPanel entityType="purchase" entityId={po.id} canEdit={canEdit}/>}
     {tab==='history'&&<ActivityPanel sources={[po.code]}/>}
     {closeRest&&<CloseRestModal po={po} onClose={()=>setCloseRest(false)}/>}
     {edit&&<PurchaseFormModal po={po} onClose={()=>setEdit(false)}/>}
+    {pay&&<SupplierPaymentModal po={po} onClose={()=>setPay(false)}/>}
     <QualityResolveModal checkId={check} onClose={()=>setCheck(null)}/>
     <Confirm open={cancel} onClose={()=>setCancel(false)} onConfirm={()=>app.cancelPurchase(po.id)} danger title={`${po.code} bekor qilinsinmi?`} text="Incoming miqdor zaxiradan olib tashlanadi." confirmText="PO’ni bekor qilish"/>
   </Drawer>
@@ -289,7 +319,7 @@ function Suppliers(){
         {key:'quality',label:'Sifat',align:'right',value:x=>supplierPerformance(s,x.id).qualityPct??-1,render:x=>{const v=supplierPerformance(s,x.id).qualityPct;return v===null?'—':`${v}%`},priority:'low'},
         {key:'lead',label:'Lead time',align:'right',value:x=>x.leadTime,render:x=>`${x.leadTime} kun`,priority:'low'},
         {key:'spend',label:'Xarid hajmi',align:'right',value:x=>supplierPerformance(s,x.id).spend,render:x=>compactMoney(supplierPerformance(s,x.id).spend),priority:'low'},
-        {key:'debt',label:'Qarz',align:'right',value:x=>x.debt,render:x=>money(x.debt)},
+        {key:'debt',label:'Qarz',align:'right',value:x=>supplierBalance(s,x.id),render:x=>money(supplierBalance(s,x.id))},
       ]}/>
     {returnTo&&!edit&&<div className="inline-note"><Icon name="info"/><span>Xomashyo formasidan keldingiz.</span><button type="button" className="link-btn" onClick={()=>navigate(returnTo,{replace:true})}>Formaga qaytish</button></div>}
     {edit&&<SupplierModal supplier={edit==='new'?undefined:edit} subtitle={edit==='new'&&returnTo?'Saqlangach xomashyo formasiga qaytasiz va supplier tanlangan bo‘ladi':undefined} onClose={closeEdit} onSaved={v=>{if(edit!=='new')return;created.current=v;if(!returnTo&&!createParam)setId(v)}}/>}
@@ -304,6 +334,8 @@ function SupplierModal({supplier,subtitle,onClose,onSaved}:{supplier?:Supplier;s
   const app=useApp(),s=app.state
   const form=useForm({name:supplier?.name||'',phone:supplier?.phone||'+998 ',email:supplier?.email||'',leadTime:String(supplier?.leadTime??3),rating:String(supplier?.rating??5),status:supplier?.status||'Faol'},v=>({name:required(v.name,'Nomi')||(s.suppliers.some(x=>x.id!==supplier?.id&&x.name.toLowerCase()===v.name.trim().toLowerCase())?'Bu nom band':undefined),phone:/\d{7,}/.test(v.phone.replace(/\D/g,''))?undefined:'Telefon raqamini to‘liq kiriting',email:v.email&&!/^\S+@\S+\.\S+$/.test(v.email)?'Email noto‘g‘ri':undefined,leadTime:Number(v.leadTime)>=0?undefined:'Lead time noto‘g‘ri'}))
   const [links,setLinks]=useState<LinkRow[]>(()=>supplier?linksOfSupplier(s,supplier.id).map(l=>({id:l.id,materialId:l.materialId,supplierSku:l.supplierSku,price:String(l.price),currency:l.currency,purchaseUnit:l.purchaseUnit,unitFactor:String(l.unitFactor),moq:String(l.moq),leadTime:String(l.leadTime),active:l.active})):[])
+  const firstLinks=useRef(JSON.stringify(links))
+  useDirtyMarker(JSON.stringify(links)!==firstLinks.current)
   const [submitted,setSubmitted]=useState(false)
   const unitOf=(mid:string)=>s.rawMaterials.find(m=>m.id===mid)?.unit||''
   const free=s.rawMaterials.filter(m=>m.status!=='Arxiv'&&!links.some(l=>l.materialId===m.id))
@@ -353,7 +385,7 @@ function SupplierModal({supplier,subtitle,onClose,onSaved}:{supplier?:Supplier;s
 
 function SupplierDrawer({supplier,onClose,onEdit}:{supplier:Supplier;onClose:()=>void;onEdit:()=>void}){
   const app=useApp(),s=app.state,navigate=useNavigate()
-  const [tab,setTab]=useState('materials'),[remove,setRemove]=useState(false),[po,setPo]=useState(false)
+  const [tab,setTab]=useState('materials'),[remove,setRemove]=useState(false),[po,setPo]=useState(false),[pay,setPay]=useState(false),[adjust,setAdjust]=useState(false)
   const [linkEdit,setLinkEdit]=useState<SupplierMaterial|'new'|null>(null),[unlink,setUnlink]=useState<SupplierMaterial|null>(null),[buy,setBuy]=useState<SourcingNeed|null>(null)
   const perf=supplierPerformance(s,supplier.id)
   const pos=s.purchaseOrders.filter(p=>p.supplierId===supplier.id)
@@ -362,7 +394,7 @@ function SupplierDrawer({supplier,onClose,onEdit}:{supplier:Supplier;onClose:()=
   const canLink=app.can('purchases','edit')||app.can('materials','edit')
   return <Drawer open onClose={onClose} title={supplier.name} eyebrow="Yetkazib beruvchi" icon="truck" subtitle={`${supplier.phone}${supplier.email?` · ${supplier.email}`:''}`} size="xl" headerExtra={<StatusBadge>{supplier.status}</StatusBadge>}
     actions={<>{app.can('purchases','delete')&&<button type="button" className="ghost-btn" onClick={()=>setRemove(true)}><Icon name="trash" size={15}/>O‘chirish</button>}<span className="spacer"/>{app.can('purchases','create')&&supplier.status==='Faol'&&<button type="button" className="secondary-glass-btn" onClick={()=>setPo(true)}><Icon name="cart" size={15}/>Yangi PO</button>}{app.can('purchases','edit')&&<button type="button" className="primary-glass-btn" onClick={onEdit}><Icon name="edit" size={16}/>Tahrirlash</button>}</>}>
-    <Tabs items={[{value:'materials',label:'Materiallar',count:links.length},{value:'orders',label:'Purchase Orders',count:pos.length},{value:'history',label:'Xarid tarixi'},{value:'overview',label:'Ko‘rsatkichlar'},{value:'docs',label:'Hujjatlar'}]} active={tab} onChange={setTab}/>
+    <Tabs items={[{value:'materials',label:'Materiallar',count:links.length},{value:'orders',label:'Xarid buyurtmalari',count:pos.length},{value:'ledger',label:'Kreditorlik',count:payableLedger(s).filter(e=>e.supplierId===supplier.id).length},{value:'history',label:'Xarid tarixi'},{value:'overview',label:'Ko‘rsatkichlar'},{value:'docs',label:'Hujjatlar'}]} active={tab} onChange={setTab}/>
     {tab==='materials'&&<div className="stack-list">
       {supplier.status!=='Faol'&&<div className="inline-note warning"><Icon name="warning"/>Supplier nofaol — uning materiallari xarid tavsiyalarida va yangi PO’da qatnashmaydi.</div>}
       {links.length?<LinkTermsTable links={links} side="supplier" onEdit={canLink?l=>setLinkEdit(l):undefined} onRemove={canLink?l=>setUnlink(l):undefined} onBuy={app.can('purchases','create')?l=>setBuy({materialId:l.materialId,need:0,source:supplier.name}):undefined}/>:<Empty compact icon="layers" title="Material biriktirilmagan" text="Biriktirilgan materiallar MO yetishmovchiligida shu supplierni taklif qiladi."/>}
@@ -375,14 +407,17 @@ function SupplierDrawer({supplier,onClose,onEdit}:{supplier:Supplier;onClose:()=
         {label:'Rad etish ulushi',value:perf.rejectionPct===null?'Ma’lumot yo‘q':`${perf.rejectionPct}% · ${num(perf.rejectedQty,1)} / ${num(perf.inspectedQty,1)}`,tone:perf.rejectionPct!==null&&perf.rejectionPct>5?'danger':undefined},
         {label:'Narx farqi (standartga)',value:perf.priceVariancePct===null?'Ma’lumot yo‘q':`${perf.priceVariancePct>0?'+':''}${perf.priceVariancePct}%`,tone:perf.priceVariancePct!==null&&perf.priceVariancePct>5?'warning':undefined},
         {label:'Bajarilish darajasi',value:perf.fulfillmentPct===null?'Ma’lumot yo‘q':`${perf.fulfillmentPct}%`,tone:perf.fulfillmentPct!==null&&perf.fulfillmentPct<95?'warning':undefined},
-        {label:'Xarid hajmi',value:money(perf.spend)},{label:'Ochiq PO qiymati',value:money(perf.openValue)},{label:'Qarz',value:money(supplier.debt)},{label:'Faol materiallar',value:`${links.filter(l=>!linkBlock(s,l)).length} / ${links.length}`}]}/>
+        {label:'Xarid hajmi',value:money(perf.spend)},{label:'Ochiq PO qiymati',value:money(perf.openValue)},{label:'Qarz (ledger)',value:money(supplierBalance(s,supplier.id))},{label:'Faol materiallar',value:`${links.filter(l=>!linkBlock(s,l)).length} / ${links.length}`}]}/>
       {perf.missing.length>0&&<div className="inline-note"><Icon name="info"/><span>{perf.missing.join(' · ')}</span></div>}
       <p className="soft-meta">Ko‘rsatkichlar faqat qayd etilgan PO, qabul va kirish tekshiruvlaridan hisoblanadi; reja lead time: {supplier.leadTime} kun.</p>
     </>}
     {tab==='history'&&<SupplierHistory supplierId={supplier.id}/>}
+    {tab==='ledger'&&<><InfoGrid items={[{label:'Supplier qoldig‘i',value:money(supplierBalance(s,supplier.id))},{label:'Ledger yozuvlari',value:payableLedger(s).filter(e=>e.supplierId===supplier.id).length}]}/><div className="row-actions">{supplierBalance(s,supplier.id)>0.005&&(app.can('purchases','approve')||app.can('costs','edit'))&&<button type="button" className="primary-glass-btn compact" onClick={()=>setPay(true)}>To‘lov qayd etish</button>}{(app.can('purchases','approve')||app.can('costs','edit'))&&<button type="button" className="secondary-glass-btn compact" onClick={()=>setAdjust(true)}>Kredit / tuzatish</button>}</div>{payableLedger(s).filter(e=>e.supplierId===supplier.id).map(e=><div className="list-row" key={e.id}><span className="list-row-copy"><b>{e.kind} · {money(e.amount)}</b><small>{e.date} · {e.purchaseOrderId?s.purchaseOrders.find(p=>p.id===e.purchaseOrderId)?.code:'Boshlang‘ich / umumiy'} · {e.reason||'—'} · {e.by}</small></span></div>)}<p className="soft-meta">Eski qarz boshlang‘ich qoldiq sifatida saqlangan. Ledgerdan oldingi PO to‘lovlari tafsiloti noma’lum.</p></>}
     {tab==='orders'&&(pos.length?<div className="stack-list">{pos.map(p=><button type="button" className="list-row is-clickable" key={p.id} onClick={()=>navigate(`/purchases?view=orders&id=${p.id}`)}><span className="list-row-copy"><b>{p.code}</b><small>{p.items.map(i=>`${materialName(s,i.materialId)} ${num(i.qty)}`).join(', ')} · {p.createdAt} → {p.expectedDate}{p.receivedAt?` · qabul ${p.receivedAt.slice(0,10)}`:''}</small></span><span className="list-row-meta"><b>{money(p.total)}</b><StatusBadge>{p.status}</StatusBadge></span></button>)}</div>:<Empty compact title="PO yo‘q"/>)}
     {tab==='docs'&&<AttachmentsPanel entityType="supplier" entityId={supplier.id} canEdit={app.can('purchases','edit')}/>}
     {po&&<PurchaseFormModal supplierId={supplier.id} onClose={()=>setPo(false)}/>}
+    {pay&&<SupplierPaymentModal supplierId={supplier.id} onClose={()=>setPay(false)}/>}
+    {adjust&&<SupplierAdjustmentModal supplier={supplier} onClose={()=>setAdjust(false)}/>}
     {linkEdit&&<SupplierMaterialModal link={linkEdit==='new'?undefined:linkEdit} supplierId={supplier.id} onClose={()=>setLinkEdit(null)}/>}
     {buy&&<SourcingModal need={buy} onClose={()=>setBuy(null)}/>}
     <Confirm open={Boolean(unlink)} onClose={()=>setUnlink(null)} onConfirm={()=>{if(unlink)app.removeSupplierMaterial(unlink.id)}} danger title="Material aloqasi o‘chirilsinmi?" text={unlink?`${supplier.name} → ${materialName(s,unlink.materialId)}. Ochiq PO bo‘lsa o‘chirilmaydi — nofaol qiling. PO tarixi saqlanadi.`:''} confirmText="Aloqani o‘chirish"/>
@@ -432,6 +467,8 @@ function ReceiveLine({po,item}:{po:PurchaseOrder;item:PurchaseOrder['items'][num
   const [key]=useState(()=>`${po.id}-${item.materialId}-${item.received}-${Date.now().toString(36)}`)
   // Typed in the stock unit, a unit of the same dimension, a pack unit or the PO line's purchase unit (audit #24).
   const [unit,setUnit]=useState(m?.unit||'')
+  const firstReceipt=useRef(JSON.stringify({amount,lot,supplierLot,location,expiry,warehouseId,serials,unit}))
+  useDirtyMarker(JSON.stringify({amount,lot,supplierLot,location,expiry,warehouseId,serials,unit})!==firstReceipt.current)
   const units=m?[...new Set([...unitOptions(m),...(item.purchaseUnit&&item.unitFactor?[item.purchaseUnit]:[])])]:[]
   const converted=m?convertQty({...m,packs:[...(m.packs||[]),...(item.purchaseUnit&&item.unitFactor&&item.purchaseUnit!==m.unit&&!(m.packs||[]).some(p=>p.unit===item.purchaseUnit)?[{unit:item.purchaseUnit,factor:item.unitFactor}]:[])]},Number(amount),unit||m.unit):{error:''}
   const value='error' in converted?Number.NaN:converted.value
@@ -545,37 +582,69 @@ function CloseReplacementModal({id,onClose}:{id:string;onClose:()=>void}){
 function Subcontracting(){
   const app=useApp(),s=app.state
   const [create,setCreate]=useState(false)
+  const [receiving,setReceiving]=useState<SubcontractOrder|null>(null)
+  const [costEdit,setCostEdit]=useState<SubcontractOrder|null>(null),[cancel,setCancel]=useState<SubcontractOrder|null>(null)
   const next:Record<string,string>={'Draft':'Materialni yuborish','Material yuborildi':'Ishlab chiqarishda','Ishlab chiqarishda':'Qabul qilish'}
   return <div className="page-stack">
     <PageHeader title="Subcontracting" subtitle="Komponent yuborish → tashqi ishlab chiqarish → qabul"
       actions={<button type="button" className="primary-glass-btn" disabled={!app.can('purchases','create')} onClick={()=>setCreate(true)}><Icon name="plus"/>Subcontract order</button>}/>
-    {s.subcontractOrders.length?<div className="card flush"><div className="table-scroll"><table className="sub-table"><thead><tr><th>Buyurtma</th><th>Mahsulot</th><th className="align-right">Miqdor</th><th>Komponentlar</th><th className="align-right">Xizmat</th><th>Expected</th><th>Status</th><th className="align-right">Keyingi qadam</th></tr></thead><tbody>
+    {s.subcontractOrders.length?<div className="card flush"><div className="table-scroll"><table className="sub-table"><thead><tr><th>Buyurtma</th><th>Mahsulot</th><th className="align-right">Miqdor</th><th>Komponentlar</th><th className="align-right">Xizmat</th><th>Expected</th><th>Status</th><th className="align-right">Keyingi qadam</th><th>Tuzatish</th></tr></thead><tbody>
       {s.subcontractOrders.map(o=>{const bom=activeBomFor(s,o.productId);return <tr key={o.id}>
         <td><div className="cell-main"><b>{o.code}</b><small>{supplierName(s,o.supplierId)}</small></div></td>
         <td>{productName(s,o.productId)}</td>
         <td className="align-right"><b>{num(o.qty)}</b></td>
         <td className="wrap"><span className="badge-row">{(bom?.components||[]).map(c=>{const need=perUnit(c)*o.qty,ok=stockOf(s,c.materialId).available>=need;return <span key={c.id} className={`chip ${ok?'':'chip-danger'}`} title={`available ${num(stockOf(s,c.materialId).available)}`}>{materialName(s,c.materialId)} · {qty(need,c.unit)}</span>})}</span></td>
-        <td className="align-right">{compactMoney(o.cost)}</td>
+        <td className="align-right">{num(o.cost)} {o.currency||'UZS'}</td>
         <td>{o.expectedDate}</td>
         <td><StatusBadge>{o.status}</StatusBadge></td>
-        <td className="align-right">{next[o.status]?<button type="button" className="soft-glass-btn compact" disabled={!app.can('purchases','edit')} onClick={()=>app.advanceSubcontract(o.id)}>{next[o.status]}</button>:<StatusBadge tone="success">Yopilgan</StatusBadge>}</td>
+        <td className="align-right">{next[o.status]||o.status==='Qisman qabul'?<button type="button" className="soft-glass-btn compact" disabled={!app.can('purchases','edit')} onClick={()=>o.status==='Ishlab chiqarishda'||o.status==='Qisman qabul'?setReceiving(o):app.advanceSubcontract(o.id)}>{o.status==='Qisman qabul'?'Qolganini qabul qilish':next[o.status]}</button>:<StatusBadge tone="success">Yopilgan</StatusBadge>}</td>
+        <td>{o.status==='Draft'?<button type="button" className="ghost-btn" disabled={!app.can('purchases','edit')} onClick={()=>setCancel(o)}>Bekor</button>:['Material yuborildi','Ishlab chiqarishda'].includes(o.status)&&!o.receipts?.length?<button type="button" className="ghost-btn" disabled={!app.can('purchases','edit')} onClick={()=>setCostEdit(o)}>Xizmatni tuzatish</button>:null}</td>
       </tr>})}
     </tbody></table></div></div>:<Card><Empty title="Subcontract order yo‘q" action={<button type="button" className="primary-glass-btn compact" onClick={()=>setCreate(true)}>Yaratish</button>}/></Card>}
     {create&&<SubcontractModal onClose={()=>setCreate(false)}/>}
+    {receiving&&<SubcontractReceiveModal order={receiving} onClose={()=>setReceiving(null)}/>}
+    {costEdit&&<SubcontractCostModal order={costEdit} onClose={()=>setCostEdit(null)}/>}
+    {cancel&&<SubcontractCancelModal order={cancel} onClose={()=>setCancel(null)}/>}
   </div>
+}
+
+function SubcontractReceiveModal({order,onClose}:{order:SubcontractOrder;onClose:()=>void}){
+  const app=useApp(),remaining=order.qty-(order.receipts||[]).reduce((n,r)=>n+r.qty,0)
+  const [amount,setAmount]=useState(String(Math.round(remaining*1000)/1000)),[busy,setBusy]=useState(false),[error,setError]=useState('')
+  const key=useRef(`subreceipt-${crypto.randomUUID()}`)
+  return <Modal open onClose={onClose} title={`${order.code} · qabul`} subtitle={`Qolgan miqdor: ${num(remaining)} · xizmat va material qiymati proporsional ajratiladi`} size="sm" footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Yopish</button><button type="button" className="primary-glass-btn" disabled={busy} onClick={()=>{const qty=Number(amount);if(!Number.isFinite(qty)||qty<=0||qty>remaining){setError('Miqdor 0 dan katta va qolgan miqdordan oshmasin');return}setBusy(true);const r=app.advanceSubcontract(order.id,qty,key.current);if(r.ok)onClose();else{setError(r.message);setBusy(false)}}}>Qabul qilish</button></>}>
+    <Field label="Qabul miqdori" required error={error}><Input type="number" min="0.001" step="0.001" max={remaining} value={amount} onChange={e=>setAmount(e.target.value)}/></Field>
+  </Modal>
+}
+
+function SubcontractCostModal({order,onClose}:{order:SubcontractOrder;onClose:()=>void}){
+  const app=useApp(),[cost,setCost]=useState(String(order.cost)),[rate,setRate]=useState(String(order.exchangeRate||1)),[reason,setReason]=useState(''),[error,setError]=useState('')
+  return <Modal open onClose={onClose} title={`${order.code} · xizmat tuzatishi`} subtitle="Faqat birinchi qabulgacha; keyin LOT qiymati muzlatiladi" size="sm" footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Yopish</button><button type="button" className="primary-glass-btn" onClick={()=>{const r=app.correctSubcontractServiceCost(order.id,Number(cost),Number(rate),reason);if(r.ok)onClose();else setError(r.message)}}>Saqlash</button></>}>
+    <div className="form-stack"><Field label={`Jami xizmat (${order.currency||'UZS'})`}><Input type="number" min="0" step="any" value={cost} onChange={e=>setCost(e.target.value)}/></Field>{order.currency&&order.currency!=='UZS'&&<Field label="UZS kursi"><Input type="number" min="0.0001" step="any" value={rate} onChange={e=>setRate(e.target.value)}/></Field>}<Field label="Sabab" required error={error}><Input value={reason} onChange={e=>setReason(e.target.value)}/></Field></div>
+  </Modal>
+}
+
+function SubcontractCancelModal({order,onClose}:{order:SubcontractOrder;onClose:()=>void}){
+  const app=useApp(),[reason,setReason]=useState(''),[error,setError]=useState('')
+  return <Modal open onClose={onClose} title={`${order.code} · bekor qilish`} subtitle="Faqat material yuborilmagan Draft bekor qilinadi; tarix saqlanadi" size="sm" footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Yopish</button><button type="button" className="primary-glass-btn" onClick={()=>{const r=app.cancelSubcontract(order.id,reason);if(r.ok)onClose();else setError(r.message)}}>Bekor qilish</button></>}><Field label="Sabab" required error={error}><Input value={reason} onChange={e=>setReason(e.target.value)}/></Field></Modal>
 }
 
 function SubcontractModal({onClose}:{onClose:()=>void}){
   const app=useApp(),s=app.state
   const products=s.products.filter(p=>activeBomFor(s,p.id))
-  const form=useForm({supplierId:s.suppliers[0]?.id||'',productId:products[0]?.id||'',qty:'50',cost:'45000',expectedDate:addDays(todayISO(),5)},v=>({qty:Number(v.qty)>0?undefined:'Miqdor > 0',cost:Number(v.cost)>=0?undefined:'Narx noto‘g‘ri'}))
+  const defaultBranch=s.productionLines.find(l=>l.id===s.settings.defaultLineId)?.branchId
+  const defaultFinished=s.warehouses.find(w=>w.branchId===defaultBranch&&w.status==='Faol'&&(w.type==='Finished'||w.type==='Mixed'))?.id||''
+  const form=useForm({supplierId:s.suppliers[0]?.id||'',productId:products[0]?.id||'',warehouseId:defaultFinished,qty:'50',cost:'45000',currency:'UZS' as 'UZS'|'USD'|'EUR',exchangeRate:'1',expectedDate:addDays(todayISO(),5)},v=>({warehouseId:v.warehouseId?undefined:'Qabul omborini tanlang',qty:Number(v.qty)>0?undefined:'Miqdor > 0',cost:Number(v.cost)>=0?undefined:'Narx noto‘g‘ri',exchangeRate:v.currency==='UZS'||Number(v.exchangeRate)>0?undefined:'Musbat kursni kiriting'}))
   return <Modal open onClose={onClose} title="Subcontract order" subtitle="Draft · komponentlar “Materialni yuborish”da chiqim qilinadi" size="md"
-    footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Bekor qilish</button><button type="button" className="primary-glass-btn" onClick={()=>form.submit(v=>{const bom=activeBomFor(s,v.productId);const r=app.createEntity('subcontractOrders',{code:`SUB-${Date.now().toString().slice(-6)}`,supplierId:v.supplierId,productId:v.productId,qty:Number(v.qty),status:'Draft',materialIds:(bom?.components||[]).map(c=>c.materialId),expectedDate:v.expectedDate,cost:Number(v.qty)*Number(v.cost)} satisfies Omit<SubcontractOrder,'id'>);if(r.ok)onClose();return r.ok})}>Yaratish</button></>}>
+    footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Bekor qilish</button><button type="button" className="primary-glass-btn" onClick={()=>form.submit(v=>{const bom=activeBomFor(s,v.productId);const r=app.createEntity('subcontractOrders',{code:`SUB-${Date.now().toString().slice(-6)}`,supplierId:v.supplierId,productId:v.productId,warehouseId:v.warehouseId,qty:Number(v.qty),status:'Draft',materialIds:(bom?.components||[]).map(c=>c.materialId),expectedDate:v.expectedDate,cost:Number(v.qty)*Number(v.cost),currency:v.currency,exchangeRate:v.currency==='UZS'?1:Number(v.exchangeRate)} satisfies Omit<SubcontractOrder,'id'>);if(r.ok)onClose();return r.ok})}>Yaratish</button></>}>
     <div className="form-grid">
       <Field label="Supplier"><Select value={form.values.supplierId} onChange={v=>form.set('supplierId',v)}>{s.suppliers.map(x=><option key={x.id} value={x.id}>{x.name}</option>)}</Select></Field>
       <Field label="Mahsulot"><Select value={form.values.productId} onChange={v=>form.set('productId',v)}>{products.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</Select></Field>
+      <Field label="Qabul ombori" required error={form.error('warehouseId')}><Select value={form.values.warehouseId} onChange={v=>form.set('warehouseId',v)}>{s.warehouses.filter(w=>w.status==='Faol'&&(w.type==='Finished'||w.type==='Mixed')).map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</Select></Field>
       <Field label="Miqdor" required error={form.error('qty')}><Input type="number" min="1" {...form.input('qty')}/></Field>
       <Field label="Xizmat narxi / dona" error={form.error('cost')}><MoneyInput min="0" {...form.money('cost')}/></Field>
+      <Field label="Valyuta"><Select value={form.values.currency} onChange={v=>form.set('currency',v as 'UZS'|'USD'|'EUR')}>{(['UZS','USD','EUR'] as const).map(c=><option key={c} value={c}>{c}</option>)}</Select></Field>
+      {form.values.currency!=='UZS'&&<Field label="UZS kursi (yuborishda muzlatiladi)" error={form.error('exchangeRate')}><Input type="number" min="0.0001" step="any" {...form.input('exchangeRate')}/></Field>}
       <Field label="Expected date"><Input type="date" {...form.input('expectedDate')}/></Field>
     </div>
   </Modal>

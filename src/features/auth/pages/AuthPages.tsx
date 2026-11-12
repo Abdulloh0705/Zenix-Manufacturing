@@ -1,7 +1,7 @@
 import {useState} from 'react'
 import type {FormEvent,ReactNode} from 'react'
 import {Link,Navigate,useLocation,useNavigate,useSearchParams} from 'react-router-dom'
-import {useApp} from '../../../app/providers/AppProvider/AppContext'
+import {REGISTRATION_CLOSED,useApp} from '../../../app/providers/AppProvider/AppContext'
 import {normalizeLogin,registrationProblem,validatePassword} from '../../../domain/auth'
 import type {RegistrationField,SecurityPolicy} from '../../../domain/auth'
 import {randomSalt} from '../../../shared/lib/crypto'
@@ -128,7 +128,11 @@ export function LoginPage(){
       else{setErrors({form:r.message});setPassword('')}
     }finally{setBusy(false)}
   }
-  return <AuthShell title="Tizimga kirish" subtitle="Telefon raqami, login yoki e-pochta bilan kiring" top={<AuthTabs active="login"/>}>
+  const registration=app.auth.registration
+  return <AuthShell title="Tizimga kirish" subtitle="Telefon raqami, login yoki e-pochta bilan kiring" top={registration.open?<AuthTabs active="login"/>:undefined}
+    footer={registration.open
+      ?<div className="auth-register-cta"><span>Kompaniyangiz hali ZENIX’da yo‘qmi?</span><Link className="secondary-glass-btn" to="/register"><Icon name="factory" size={16}/>Yangi biznes yaratish</Link></div>
+      :<div className="inline-note" role="note"><Icon name="info"/><span>Yangi biznes ro‘yxati hozircha platforma tomonidan yopilgan. Kompaniyangiz xodimi bo‘lsangiz, akkauntni Biznes egasidan oling.</span></div>}>
     {app.auth.setupBlocked&&<div className="inline-note danger" role="alert"><Icon name="warning"/><span>{app.auth.setupBlocked}</span></div>}
     {app.auth.needsSetup&&!app.auth.setupBlocked&&<div className="inline-note" role="status"><Icon name="info"/><span>Bu brauzerda hali kompaniya ro‘yxatdan o‘tmagan. Akkauntingiz boshqa brauzerda yoki manzilda bo‘lsa, o‘sha yerda kiring: ma’lumotlar brauzerlar o‘rtasida almashmaydi.</span></div>}
     {notice&&<div className="inline-note warning" role="status"><Icon name="info"/><span>{notice}</span></div>}
@@ -143,22 +147,23 @@ export function LoginPage(){
 }
 
 /**
- * The first registration of this browser: the existing first-run bootstrap, which works only while no account
- * exists. Afterwards the page only explains who opens accounts: there is no way to register into a company.
+ * Public registration creates an independent company and owner. A missing legacy owner is never inferred.
  */
 export function RegisterPage(){
   const app=useApp(),navigate=useNavigate(),s=app.state
   const people=s.employees.filter(e=>e.status!=='Arxiv')
   const owner=people.find(e=>e.department==='Management')||people[0]
-  const [form,setForm]=useState({name:owner?.name||'',company:s.settings.company.name,username:'',email:'',password:'',confirm:''})
+  const [form,setForm]=useState({name:'',company:'',phone:'',username:'',email:'',password:'',confirm:''})
   const [errors,setErrors]=useState<Partial<Record<RegistrationField|'form',string>>>({}),[busy,setBusy]=useState(false),[issued,setIssued]=useState('')
   if(issued)return <IssuedKeyScreen value={issued} onDone={()=>navigate('/',{replace:true})}/>
   // Signing up signs in before the key arrives: while busy this page stays, or the only copy of the key would be lost.
   if(!busy&&app.auth.signedIn)return <Navigate to="/" replace/>
-  if(!busy&&(!app.auth.needsSetup||app.auth.setupBlocked))return <AuthShell title="Ro‘yxatdan o‘tish" subtitle="Bu brauzerda kompaniya allaqachon ro‘yxatdan o‘tgan." top={<AuthTabs active="register"/>}>
-    {app.auth.setupBlocked
-      ?<div className="inline-note danger" role="alert"><Icon name="warning"/><span>{app.auth.setupBlocked}</span></div>
-      :<div className="inline-note" role="status"><Icon name="info"/><span>Xodim akkauntini faqat administrator ochadi: Admin Panel → Foydalanuvchilar. Login va vaqtinchalik parolni administratoringizdan oling.</span></div>}
+  if(!busy&&app.auth.setupBlocked&&app.auth.needsSetup)return <AuthShell title="Ro‘yxatdan o‘tish" subtitle="Eski kompaniya egasi tasdiqlanmadi." top={<AuthTabs active="register"/>}>
+    <div className="inline-note danger" role="alert"><Icon name="warning"/><span>{app.auth.setupBlocked}</span></div>
+    <Link className="primary-glass-btn auth-submit" to="/login"><Icon name="arrow-right" size={16}/>Kirish sahifasiga o‘tish</Link>
+  </AuthShell>
+  if(!busy&&!app.auth.registration.open)return <AuthShell title="Yangi biznes yaratish" subtitle="Ro‘yxat vaqtincha yopiq." top={<AuthTabs active="register"/>}>
+    <div className="inline-note warning" role="alert"><Icon name="info"/><span>{REGISTRATION_CLOSED}</span></div>
     <Link className="primary-glass-btn auth-submit" to="/login"><Icon name="arrow-right" size={16}/>Kirish sahifasiga o‘tish</Link>
   </AuthShell>
   const set=(field:RegistrationField)=>(value:string)=>{setForm(f=>({...f,[field]:value}));setErrors({})}
@@ -170,19 +175,21 @@ export function RegisterPage(){
     if(!owner){setErrors({form:'Faol xodim topilmadi'});return}
     setBusy(true);setErrors({})
     try{
-      const r=await app.setupSuperAdmin({employeeId:owner.id,name:form.name,company:form.company,username:form.username.trim(),email:form.email.trim()||undefined,password:form.password})
+      const r=await app.setupSuperAdmin({employeeId:owner.id,name:form.name,company:form.company,phone:form.phone.trim(),username:form.username.trim(),email:form.email.trim()||undefined,password:form.password})
       if(r.ok&&r.recoveryKey)setIssued(r.recoveryKey)
       else setErrors({form:r.message})
     }finally{setBusy(false)}
   }
-  return <AuthShell title="Ro‘yxatdan o‘tish" subtitle="Kompaniyani oching: birinchi akkaunt Super Admin bo‘ladi. Tizimda standart parol yo‘q." top={<AuthTabs active="register"/>}>
+  return <AuthShell title="Yangi biznes yaratish" subtitle={`Yangi, alohida kompaniya oching: birinchi akkaunt Biznes egasi bo‘ladi. ${app.auth.registration.trialDays} kunlik demo sinov avtomatik boshlanadi; to‘lov olinmaydi.`} top={<AuthTabs active="register"/>}>
     <form className="form-stack" onSubmit={submit} noValidate aria-busy={busy}>
-      <Field label="Ism-familiya" required error={errors.name} hint="Mavjud rahbar xodim profili shu nom bilan Super Admin bo‘ladi"><Input id="register-name" value={form.name} onChange={e=>set('name')(e.target.value)} autoComplete="name"/></Field>
+      <Field label="Ism-familiya" required error={errors.name} hint="Yangi kompaniyada Biznes egasi profili ochiladi"><Input id="register-name" value={form.name} onChange={e=>set('name')(e.target.value)} autoComplete="name"/></Field>
       <Field label="Kompaniya" required error={errors.company}><Input id="register-company" value={form.company} onChange={e=>set('company')(e.target.value)} autoComplete="organization"/></Field>
-      <Field label="Telefon yoki login" required error={errors.username} hint="Telefon (+998…) yoki 3–32 lotin belgi"><Input id="register-username" value={form.username} placeholder="+998 90 123 45 67" onChange={e=>set('username')(e.target.value)} autoComplete="username" spellCheck={false} autoFocus/></Field>
+      <Field label="Telefon raqami" required error={errors.phone} hint="Kirish uchun ham ishlatiladi"><Input id="register-phone" type="tel" inputMode="tel" value={form.phone} placeholder="+998 90 123 45 67" onChange={e=>set('phone')(e.target.value)} autoComplete="tel"/></Field>
+      <Field label="Login" required error={errors.username} hint="3–32 lotin harf, raqam, nuqta yoki chiziqcha"><Input id="register-username" value={form.username} placeholder="masalan, aziz.karimov" onChange={e=>set('username')(e.target.value)} autoComplete="username" spellCheck={false}/></Field>
       <Field label="E-pochta" error={errors.email} hint="Ixtiyoriy"><Input id="register-email" type="email" value={form.email} onChange={e=>set('email')(e.target.value)} autoComplete="email"/></Field>
       <PasswordField id="register-password" label="Parol" value={form.password} onChange={set('password')} autoComplete="new-password" error={errors.password} hint={passwordHint(app.auth.policy)}/>
       <PasswordField id="register-confirm" label="Parolni takrorlang" value={form.confirm} onChange={set('confirm')} autoComplete="new-password" error={errors.confirm}/>
+      <p className="soft-meta auth-help"><Icon name="users" size={13}/>Rol tanlanmaydi: bu akkaunt doim Biznes egasi. Xodimlarni keyin Admin panelda qo‘shib, rol va filial berasiz.</p>
       {errors.form&&<div className="inline-note danger" role="alert"><Icon name="warning"/><span>{errors.form}</span></div>}
       <button type="submit" className="primary-glass-btn auth-submit" disabled={busy}>{busy?<><span className="btn-spinner" aria-hidden="true"/>Yaratilmoqda…</>:<><Icon name="shield" size={16}/>Kompaniyani ro‘yxatdan o‘tkazish</>}</button>
     </form>

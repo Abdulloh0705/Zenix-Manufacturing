@@ -10,7 +10,7 @@ import {actualOrderCost,estimateOrderCost} from './manufacturingEngine'
  * received without numbers, replacement receipts counted as PO receipts, returns credited without a decision) —
  * so v5 data is marked, and a v4 build that knows the newer-version lock opens it read-only.
  */
-export const SCHEMA_VERSION=5
+export const SCHEMA_VERSION=7
 
 /** Role names and permissions the app shipped before system roles existed (schema ≤ 3). */
 const LEGACY_MODULES=['dashboard','production','products','materials','warehouse','purchases','sales','quality','equipment','employees','costs','reports','settings','ai']
@@ -72,11 +72,11 @@ export function migrateState(s:ManufacturingState):MigrationResult{
   const from=s.schemaVersion??3
   // The version number alone is not trusted: data marked v4 whose roles were never upgraded (an interrupted
   // save, a hand-edited backup) is upgraded too. Each step is idempotent, so re-running it is safe.
-  const rolesUpgraded=(s.roles||[]).some(r=>r.key==='super_admin')
+  const rolesUpgraded=(s.roles||[]).some(r=>r.key==='business_owner')&&(from>=SCHEMA_VERSION||(s.roles||[]).some(r=>r.key==='super_admin'))
   if(from>=SCHEMA_VERSION&&rolesUpgraded)return {state:s,applied:[]}
   let next=s
   const applied:string[]=[]
-  if(from<4||!rolesUpgraded){
+  if(from<4||from<6&&!(s.roles||[]).some(r=>r.key==='super_admin')){
     next={...next,roles:migrateRoles(next.roles||[])}
     next=freezeCompletedCosts(next)
     applied.push('v4: 8 ta tizim roli, execute huquqi, admin modullari, yakunlangan MO tannarxi muzlatildi')
@@ -84,6 +84,14 @@ export function migrateState(s:ManufacturingState):MigrationResult{
   // v5 adds no stored shape to repair: lists it introduced start empty (normalizeLoaded), serial ranges saved before
   // unit tracking stay readable as they are. Only the version mark changes, after a backup of the v4 data.
   if(from<5)applied.push('v5: serial birliklar, supplier almashtirishi, kalitli bildirishnomalar, zona tarixi — mavjud yozuvlar o‘zgarmadi')
+  if(from<6||!next.roles.some(r=>r.key==='business_owner')){
+    const roles=migrateRoles(next.roles)
+    // Preserve historical assignments. A legacy tenant role is read-only and cannot become a platform
+    // identity or a company owner without an explicit, separately authorized recovery procedure.
+    next={...next,roles}
+    applied.push('v6: biznes egasi roli qo‘shildi; eski Super Admin tayinlovlari o‘zgarmadi va platform huquqi berilmadi')
+  }
+  if(from<7)applied.push('v7: supplier payable ledger; eski qarz faqat boshlang‘ich qoldiq sifatida saqlandi')
   return {state:{...next,schemaVersion:SCHEMA_VERSION},applied}
 }
 

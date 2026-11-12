@@ -322,7 +322,7 @@ test('P1-2: scoped roles read only their own location; unscoped roles read every
   const b1=X.scopedView(s,em('em2'))
   assert.ok(b1.stockBalances.length&&b1.stockBalances.every(b=>['w1','w2','w3'].includes(b.warehouseId)))
   assert.ok(b1.stockMovements.every(m=>m.warehouseId!=='w4'))
-  assert.equal(b1.warehouses.length,s.warehouses.length,'master data stays complete for names')
+  assert.ok(b1.warehouses.every(w=>w.branchId==='b1'),'foreign site names are excluded from the branch projection')
   const op=X.scopedView(s,em('em7'))
   assert.ok(op.stockBalances.every(b=>b.warehouseId==='w4'))
   assert.ok(op.productionOrders.every(o=>o.workOrders.some(w=>w.workCenterId==='wc4')||o.workCenterId==='wc4'))

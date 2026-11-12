@@ -30,12 +30,12 @@ function v4Saved(){
   return s
 }
 
-test('Pre-merge 1: v4 data loads as v5 without changing any stored record; a second load migrates nothing',()=>{
-  assert.equal(SCHEMA_VERSION,5)
+test('Pre-merge 1: v4 data loads as v7 without changing operational records; a second load migrates nothing',()=>{
+  assert.equal(SCHEMA_VERSION,7)
   const saved=v4Saved()
   const {state,report}=PS.prepareStored(clone(saved),createInitialState(T0))
-  assert.equal(state.schemaVersion,5)
-  assert.deepEqual(report.migrations.map(m=>m.split(':')[0]),['v5'],'the v5 mark is a migration: the app keeps a v4 backup first')
+  assert.equal(state.schemaVersion,7)
+  assert.deepEqual(report.migrations.map(m=>m.split(':')[0]),['v5','v6','v7'],'the app keeps a v4 backup first')
   assert.deepEqual([state.supplierReplacements,state.receivableReconciliations],[[],[]])
   for(const key of ['lots','stockBalances','stockMovements','notifications','purchaseOrders','salesOrders','customers','receivables','roles'])assert.deepEqual(state[key],saved[key],`${key} unchanged`)
   assert.deepEqual(state.settings.company,saved.settings.company,'no zone history is invented')

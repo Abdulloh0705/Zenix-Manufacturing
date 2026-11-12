@@ -50,7 +50,7 @@ test('first run: no default account; set-up makes the chosen employee Super Admi
   assert.equal(empty.accounts.length,0,'no built-in admin password exists')
   const {store,s}=setUp()
   assert.equal(store.accounts.length,1)
-  assert.equal(s.roles.find(r=>r.id===s.employees.find(e=>e.id==='em1').roleId).key,'super_admin')
+  assert.equal(s.roles.find(r=>r.id===s.employees.find(e=>e.id==='em1').roleId).key,'business_owner')
   assert.equal(JSON.stringify(store).includes('Zenix'),false)
   assert.match(Auth.setupFirstAdmin(store,s,ctx(s),{employeeId:'em2',username:'x2',credential:cred}).error,/allaqachon/)
   assert.equal(store.events[0].type,'setup')
@@ -109,8 +109,11 @@ test('account administration follows rank: the admin manages lower roles only, n
   assert.match(Auth.createAccount(store,s,ctx(s,'em1'),{employeeId:'em4',username:'a b',credential:cred}).error,/Login/)
   const mgr=ok(Auth.createAccount(store,s,ctx(s,'em1'),{employeeId:'em2',username:'manager',credential:cred}));store=mgr.store
   const boss=store.accounts.find(a=>a.username==='boss'),op=store.accounts.find(a=>a.username==='operator1')
-  assert.match(Auth.setAccountStatus(store,s,ctx(s,'em2'),boss.id,'blocked').error,/Super Admin|darajangizda/)
-  assert.match(Auth.setAccountStatus(store,s,ctx(s,'em2'),op.id,'blocked').error,/darajangizda/,'same rank: no')
+  assert.match(Auth.setAccountStatus(store,s,ctx(s,'em2'),boss.id,'blocked').error,/users.edit/)
+  assert.match(Auth.setAccountStatus(store,s,ctx(s,'em2'),op.id,'blocked').error,/users.edit/,'manager needs explicit delegation')
+  const delegated={...s,roles:s.roles.map(r=>r.key==='production_manager'?{...r,permissions:{...r.permissions,users:{view:true,create:true,edit:true}}}:r)}
+  assert.equal(Auth.setAccountStatus(store,delegated,ctx(delegated,'em2'),op.id,'blocked').error,undefined,'delegated manager may disable a subordinate')
+  assert.match(Auth.setAccountStatus(store,delegated,ctx(delegated,'em2'),boss.id,'blocked').error,/darajangizda/,'owner remains outside manager authority')
   assert.match(Auth.setAccountStatus(store,s,ctx(s,'em1'),boss.id,'blocked').error,/O‘z akkauntingiz/)
   const blocked=ok(Auth.setAccountStatus(store,s,ctx(s,'em1'),op.id,'blocked'))
   assert.equal(blocked.store.accounts.find(a=>a.id===op.id).status,'blocked')
@@ -124,14 +127,14 @@ test('the last active Super Admin account can never be blocked or deleted',()=>{
   let {store,s}=setUp()
   const boss=store.accounts[0]
   // A second Super Admin acts on the first.
-  s={...s,employees:s.employees.map(e=>e.id==='em2'?{...e,roleId:'role0'}:e)}
+  s={...s,employees:s.employees.map(e=>e.id==='em2'?{...e,roleId:'role_owner'}:e)}
   store=ok(Auth.createAccount(store,s,ctx(s,'em1'),{employeeId:'em2',username:'deputy',credential:cred})).store
   const deputy=store.accounts.find(a=>a.username==='deputy')
   assert.equal(Auth.activeSuperAdmins(store,s).length,2)
   const one=ok(Auth.setAccountStatus(store,s,ctx(s,'em2'),boss.id,'blocked')).store
   assert.equal(Auth.activeSuperAdmins(one,s).length,1)
-  assert.match(Auth.deleteAccount(one,s,ctx(s,'em1'),deputy.id).error,/Oxirgi faol Super Admin/,'even another Super Admin cannot remove the last active one')
-  assert.match(Auth.setAccountStatus(one,s,ctx(s,'em1'),deputy.id,'blocked').error,/Oxirgi faol Super Admin/)
+  assert.match(Auth.deleteAccount(one,s,ctx(s,'em1'),deputy.id).error,/Oxirgi faol biznes egasi/,'even another owner cannot remove the last active one')
+  assert.match(Auth.setAccountStatus(one,s,ctx(s,'em1'),deputy.id,'blocked').error,/Oxirgi faol biznes egasi/)
   assert.equal(Auth.superAdminInvariant(one,s),true)
   assert.equal(Auth.superAdminInvariant(one,{...s,employees:s.employees.map(e=>e.id==='em2'?{...e,status:'Arxiv'}:e)}),false,'archiving the deputy would leave nobody: the app refuses such a change')
 })
@@ -153,10 +156,12 @@ test('an older or damaged auth store is read with defaults instead of failing',(
 })
 
 test('registration: each field is checked in the order shown',()=>{
-  const p=Auth.DEFAULT_POLICY,good={name:'Abdulloh',company:'Zavod',username:'boss',email:'',password:'Zenix2026',confirm:'Zenix2026'}
+  const p=Auth.DEFAULT_POLICY,good={name:'Abdulloh',company:'Zavod',phone:'+998 90 123 45 67',username:'boss',email:'',password:'Zenix2026',confirm:'Zenix2026'}
   assert.equal(Auth.registrationProblem(p,good),null)
   assert.equal(Auth.registrationProblem(p,{...good,name:' '}).field,'name')
   assert.equal(Auth.registrationProblem(p,{...good,company:''}).field,'company')
+  assert.equal(Auth.registrationProblem(p,{...good,phone:''}).field,'phone')
+  assert.equal(Auth.registrationProblem(p,{...good,phone:'12ab'}).field,'phone')
   assert.equal(Auth.registrationProblem(p,{...good,username:'a b'}).field,'username')
   assert.equal(Auth.registrationProblem(p,{...good,email:'x'}).field,'email')
   assert.equal(Auth.registrationProblem(p,{...good,password:'Ab1',confirm:'Ab1'}).field,'password')
@@ -189,10 +194,10 @@ test('owner recovery: only an active Super Admin, whether or not a key exists',(
   const boss=store.accounts[0]
   assert.equal(Auth.ownerRecoveryBlocker(store,s,boss),null)
   const two=ok(Auth.createAccount(store,s,ctx(s,'em1'),{employeeId:'em3',username:'dilshod',credential:cred})).store
-  assert.match(Auth.ownerRecoveryBlocker(two,s,two.accounts[1]),/faqat faol Super Admin/,'an employee asks an administrator')
-  assert.match(Auth.ownerRecoveryBlocker(store,s,undefined),/faqat faol Super Admin/)
+  assert.match(Auth.ownerRecoveryBlocker(two,s,two.accounts[1]),/faqat faol biznes egasi/,'an employee asks an administrator')
+  assert.match(Auth.ownerRecoveryBlocker(store,s,undefined),/faqat faol biznes egasi/)
   const blocked={...store,accounts:[{...boss,status:'blocked'}]}
-  assert.match(Auth.ownerRecoveryBlocker(blocked,s,blocked.accounts[0]),/faqat faol Super Admin/)
+  assert.match(Auth.ownerRecoveryBlocker(blocked,s,blocked.accounts[0]),/faqat faol biznes egasi/)
   const keyed=ok(Auth.setRecoveryKey(store,s,ctx(s,'em1'),boss.id,cred)).store
   assert.equal(Auth.ownerRecoveryBlocker(keyed,s,keyed.accounts[0]),null,'a lost key does not lock the owner out')
 })
@@ -244,6 +249,12 @@ test('first setup runs only without a company owner: an existing, lost or damage
   assert.equal(Auth.authStorageDamaged(JSON.stringify(store)),false)
 })
 
+test('stored ERP data with no account is never assigned to a new public signup',()=>{
+  const s=createSeedState(at(T0))
+  assert.match(Auth.bootstrapBlocker(Auth.emptyAuthStore(),s,null,true),/egasi aniqlanmadi/)
+  assert.equal(Auth.bootstrapBlocker(Auth.emptyAuthStore(),s,null,false),null)
+})
+
 test('an account saved before recovery keys keeps working unchanged',()=>{
   const {store,s}=setUp()
   const {recovery:_,...legacy}=store.accounts[0]
@@ -289,6 +300,6 @@ test('a recovery attempt counts apart from sign-ins and locks only recovery',()=
 test('a recovery key is made only by a Super Admin account',()=>{
   const {store,s}=setUp()
   const two=ok(Auth.createAccount(store,s,ctx(s,'em1'),{employeeId:'em3',username:'dilshod',credential:cred})).store
-  assert.match(Auth.setRecoveryKey(two,s,ctx(s,'em3'),two.accounts[1].id,cred).error,/faqat Super Admin/)
+  assert.match(Auth.setRecoveryKey(two,s,ctx(s,'em3'),two.accounts[1].id,cred).error,/faqat biznes egasi/)
   assert.equal(ok(Auth.setRecoveryKey(two,s,ctx(s,'em1'),two.accounts[0].id,cred)).store.events[0].type,'recovery_key_created')
 })

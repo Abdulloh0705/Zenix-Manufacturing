@@ -4,7 +4,8 @@ import * as A from '../.test-dist/actions.mjs'
 import {createSeedState} from '../.test-dist/mockData.mjs'
 import {dashboardSnapshot} from '../.test-dist/dashboard.mjs'
 import {CONTROL_ACTIVITY_MODULES,CONTROL_PERIODS as P,COST_VARIANCE_ALERT,QUEUE_FILTERS,productionControl} from '../.test-dist/productionControl.mjs'
-import {ORDER_URGENCY,calculateCapacityLoads,capacityConstraints,createMpsRows,createMrpPlan,deliveryRisk,equipmentActivity,isOpenOrder,materialShortages,operationQueues,orderBlocker,orderCosting,orderMaterialLines,scrapEvents} from '../.test-dist/manufacturingEngine.mjs'
+import {ORDER_URGENCY,calculateCapacityLoads,capacityConstraints,createMpsRows,deliveryRisk,equipmentActivity,isOpenOrder,operationQueues,orderBlocker,orderCosting,orderMaterialLines,scrapEvents} from '../.test-dist/manufacturingEngine.mjs'
+import {branchPurchaseNeeds} from '../.test-dist/planning.mjs'
 import {addDays,periodStart,todayISO} from '../.test-dist/dates.mjs'
 
 let counter=0
@@ -45,22 +46,22 @@ test('order queue lists every open order, most urgent first, and its quick filte
 })
 
 test('material status is the MRP netting and the waiting orders of the Orders page',()=>{
-  const s=fresh(),c=productionControl(s),plan=createMrpPlan(s)
+  const s=fresh(),c=productionControl(s),plan=branchPurchaseNeeds(s)
   // Shortage figure → MRP ?short=1 (Buy table rows with "Yetishmaydi")
-  assert.equal(c.materials.short.length,plan.purchases.filter(p=>p.shortage>0).length)
+  assert.equal(c.materials.short.length,plan.filter(p=>p.shortage>0).length)
   for(const r of c.materials.rows){
-    const p=plan.purchases.find(x=>x.materialId===r.id),st=s.stockBalances.filter(b=>b.itemId===r.id)
+    const p=plan.find(x=>x.id===r.id)
     assert.ok(close(r.available,p.available)&&close(r.incoming,p.incoming)&&close(r.shortage,p.shortage),r.m.name)
-    assert.ok(close(r.reserved,st.reduce((a,b)=>a+b.reserved,0)),`${r.m.name} reserved`)
+    assert.ok(close(r.reserved,p.reserved),`${r.m.name} reserved`)
   }
   // KPI + "Diqqat" → Xomashyo → Yetishmovchiliklar (MRP shortage or below the reorder point) — the dashboard's figure
-  const act=materialShortages(s,plan)
+  const act=plan.filter(r=>r.shortage>0)
   assert.deepEqual(c.materials.shortages.map(r=>r.id),act.map(r=>r.id))
   assert.deepEqual(c.materials.shortages.map(r=>r.id),dashboardSnapshot(s).materials.shortages.map(r=>r.id))
   assert.deepEqual(c.materials.critical.map(r=>r.id),act.filter(r=>r.critical).map(r=>r.id))
   assert.ok(c.materials.short.every(r=>c.materials.shortages.some(x=>x.id===r.id)),'every MRP shortage is a material to act on')
   // Row colour follows the same levels: critical / below reorder / ok
-  for(const r of c.materials.rows)assert.equal(r.level,act.find(x=>x.id===r.id)?.critical?'critical':act.some(x=>x.id===r.id)?'low':'ok',r.m.name)
+  for(const r of c.materials.rows)assert.equal(r.level,r.shortage>0||r.available<r.safety?'critical':r.branchId===s.settings.defaultBranchId&&r.available<r.m.reorderPoint?'low':'ok',r.m.name)
   assert.deepEqual(c.materials.waiting.map(w=>w.order.id),s.productionOrders.filter(o=>o.status==='Material kutilmoqda').map(o=>o.id))
   for(const w of c.materials.waiting)assert.deepEqual(w.missing.map(l=>l.component.materialId),orderMaterialLines(s,w.order).filter(l=>l.shortage>0).map(l=>l.component.materialId))
 })
