@@ -1,0 +1,158 @@
+{
+  "supplierInvoices": [
+    {
+      "id": "sinv-mwoy5hzr-lyps2",
+      "code": "SINV-261120-001",
+      "number": "P4-INV-38407e97",
+      "supplierId": "su-mwoxq1sy-9ydup",
+      "purchaseOrderId": "po-mwoxq2ep-xknx1",
+      "date": "2026-11-20",
+      "dueDate": "2026-12-20",
+      "lines": [
+        {
+          "materialId": "ra-mwoxq13d-b1h8k",
+          "qty": 100,
+          "price": 10000
+        }
+      ],
+      "total": 1000000,
+      "status": "Tasdiqlangan",
+      "createdAt": "2026-11-20 17:19",
+      "createdBy": "em1",
+      "history": [
+        {
+          "at": "2026-11-20 17:19",
+          "by": "em1",
+          "action": "Kiritildi"
+        },
+        {
+          "at": "2026-11-20 17:19",
+          "by": "em1",
+          "action": "Tasdiqlandi"
+        }
+      ],
+      "key": "sinv-po-mwoxq2ep-xknx1-mwoy5hr5",
+      "approvedBy": "em1",
+      "approvedAt": "2026-11-20 17:19",
+      "variance": 0
+    }
+  ],
+  "stockTransfers": [
+    {
+      "id": "tr-mwoy5k92-5wti1",
+      "ref": "TR-261120-001",
+      "itemId": "ra-mwoxq13d-b1h8k",
+      "itemType": "raw",
+      "from": "w1",
+      "to": "wa-mwoy5jc9-dov3t",
+      "qty": 25,
+      "status": "Qabul qilindi",
+      "lines": [
+        {
+          "lot": "LOT-P4-RM-38407E97-261120-2",
+          "qty": 25,
+          "received": 25,
+          "returned": 0,
+          "record": {
+            "kind": "lot",
+            "itemId": "ra-mwoxq13d-b1h8k",
+            "itemType": "raw",
+            "sourceType": "purchase",
+            "sourceId": "po-mwoxq2ep-xknx1",
+            "sourceCode": "PO-261120-001",
+            "code": "LOT-P4-RM-38407E97-261120-2"
+          }
+        }
+      ],
+      "receipts": [
+        {
+          "id": "trr-mwoy5kqn-m8p38",
+          "at": "2026-11-20 17:20",
+          "by": "em1",
+          "qty": 25,
+          "kind": "receipt",
+          "lots": [
+            {
+              "lot": "LOT-P4-RM-38407E97-261120-2",
+              "qty": 25
+            }
+          ],
+          "key": "trr-mwoy5kjo-w3b9wb"
+        }
+      ],
+      "createdAt": "2026-11-20 17:19",
+      "createdBy": "em1",
+      "key": "tr-mwoy5jp5-pnfmdu",
+      "closedAt": "2026-11-20 17:20"
+    }
+  ],
+  "payables": [
+    {
+      "key": "payment:supplier-payment:po-mwoxq2ep-xknx1:1795177197291",
+      "supplierId": "su-mwoxq1sy-9ydup",
+      "kind": "payment",
+      "amount": -200000,
+      "purchaseOrderId": "po-mwoxq2ep-xknx1",
+      "invoiceId": "sinv-mwoy5hzr-lyps2",
+      "reason": "Phase4 local test bank payment",
+      "method": "Boshqa",
+      "id": "ap-mwoy5iqg-rhw58",
+      "date": "2026-11-20 17:19",
+      "by": "em1",
+      "currency": "UZS"
+    },
+    {
+      "key": "receipt:rc-mwoxq2yl-9ip5a",
+      "supplierId": "su-mwoxq1sy-9ydup",
+      "kind": "receipt",
+      "amount": 600000,
+      "purchaseOrderId": "po-mwoxq2ep-xknx1",
+      "receiptId": "rc-mwoxq2yl-9ip5a",
+      "materialId": "ra-mwoxq13d-b1h8k",
+      "reason": "Qabul PO-261120-001",
+      "id": "ap-mwoxq2yl-yjvf2",
+      "date": "2026-11-20 17:07",
+      "by": "em1",
+      "currency": "UZS"
+    },
+    {
+      "key": "receipt:rc-mwoxq2uk-clh86",
+      "supplierId": "su-mwoxq1sy-9ydup",
+      "kind": "receipt",
+      "amount": 400000,
+      "purchaseOrderId": "po-mwoxq2ep-xknx1",
+      "receiptId": "rc-mwoxq2uk-clh86",
+      "materialId": "ra-mwoxq13d-b1h8k",
+      "reason": "Qabul PO-261120-001",
+      "id": "ap-mwoxq2uk-25xkt",
+      "date": "2026-11-20 17:07",
+      "by": "em1",
+      "currency": "UZS"
+    }
+  ],
+  "stockBalances": [
+    {
+      "id": "st-mwoxq2ep-kz5l9",
+      "warehouseId": "w1",
+      "itemId": "ra-mwoxq13d-b1h8k",
+      "itemType": "raw",
+      "onHand": 75,
+      "reserved": 0,
+      "incoming": 0,
+      "quarantine": 0,
+      "unit": "kg",
+      "lot": "LOT-P4-RM-38407E97-261120-2"
+    },
+    {
+      "id": "st-mwoy5k92-ip4xw",
+      "warehouseId": "wa-mwoy5jc9-dov3t",
+      "itemId": "ra-mwoxq13d-b1h8k",
+      "itemType": "raw",
+      "onHand": 25,
+      "reserved": 0,
+      "incoming": 0,
+      "quarantine": 0,
+      "unit": "kg"
+    }
+  ]
+}

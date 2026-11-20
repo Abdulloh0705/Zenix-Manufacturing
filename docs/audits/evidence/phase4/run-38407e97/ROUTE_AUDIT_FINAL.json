@@ -1,0 +1,226 @@
+[
+  {
+    "route": "/",
+    "device": "desktop",
+    "heading": "Boshqaruv paneli",
+    "overflow": false,
+    "error": []
+  },
+  {
+    "route": "/production",
+    "device": "desktop",
+    "heading": "Ishlab chiqarish",
+    "overflow": false,
+    "error": []
+  },
+  {
+    "route": "/products",
+    "device": "desktop",
+    "heading": "Mahsulotlar",
+    "overflow": false,
+    "error": []
+  },
+  {
+    "route": "/materials",
+    "device": "desktop",
+    "heading": "Xomashyo",
+    "overflow": false,
+    "error": []
+  },
+  {
+    "route": "/warehouse",
+    "device": "desktop",
+    "heading": "Ombor qoldiqlari",
+    "overflow": false,
+    "error": []
+  },
+  {
+    "route": "/purchases",
+    "device": "desktop",
+    "heading": "Xaridlar",
+    "overflow": false,
+    "error": []
+  },
+  {
+    "route": "/sales",
+    "device": "desktop",
+    "heading": "Sotuv",
+    "overflow": false,
+    "error": []
+  },
+  {
+    "route": "/quality",
+    "device": "desktop",
+    "heading": "Sifat nazorati",
+    "overflow": false,
+    "error": []
+  },
+  {
+    "route": "/equipment",
+    "device": "desktop",
+    "heading": "Uskunalar",
+    "overflow": false,
+    "error": []
+  },
+  {
+    "route": "/employees",
+    "device": "desktop",
+    "heading": "Xodimlar",
+    "overflow": false,
+    "error": []
+  },
+  {
+    "route": "/costs",
+    "device": "desktop",
+    "heading": "Xarajatlar va tannarx",
+    "overflow": false,
+    "error": []
+  },
+  {
+    "route": "/reports",
+    "device": "desktop",
+    "heading": "Hisobotlar",
+    "overflow": false,
+    "error": []
+  },
+  {
+    "route": "/settings",
+    "device": "desktop",
+    "heading": "Biznes",
+    "overflow": false,
+    "error": []
+  },
+  {
+    "route": "/ai",
+    "device": "desktop",
+    "heading": "ZENIX AI",
+    "overflow": false,
+    "error": []
+  },
+  {
+    "route": "/admin",
+    "device": "desktop",
+    "heading": "Admin Panel",
+    "overflow": false,
+    "error": []
+  },
+  {
+    "route": "/subscription",
+    "device": "desktop",
+    "heading": "Obuna va limitlar",
+    "overflow": false,
+    "error": []
+  },
+  {
+    "route": "/",
+    "device": "mobile",
+    "heading": "Boshqaruv paneli",
+    "overflow": false,
+    "error": []
+  },
+  {
+    "route": "/production",
+    "device": "mobile",
+    "heading": "Ishlab chiqarish",
+    "overflow": false,
+    "error": []
+  },
+  {
+    "route": "/products",
+    "device": "mobile",
+    "heading": "Mahsulotlar",
+    "overflow": false,
+    "error": []
+  },
+  {
+    "route": "/materials",
+    "device": "mobile",
+    "heading": "Xomashyo",
+    "overflow": false,
+    "error": []
+  },
+  {
+    "route": "/warehouse",
+    "device": "mobile",
+    "heading": "Ombor qoldiqlari",
+    "overflow": false,
+    "error": []
+  },
+  {
+    "route": "/purchases",
+    "device": "mobile",
+    "heading": "Xaridlar",
+    "overflow": false,
+    "error": []
+  },
+  {
+    "route": "/sales",
+    "device": "mobile",
+    "heading": "Sotuv",
+    "overflow": false,
+    "error": []
+  },
+  {
+    "route": "/quality",
+    "device": "mobile",
+    "heading": "Sifat nazorati",
+    "overflow": false,
+    "error": []
+  },
+  {
+    "route": "/equipment",
+    "device": "mobile",
+    "heading": "Uskunalar",
+    "overflow": false,
+    "error": []
+  },
+  {
+    "route": "/employees",
+    "device": "mobile",
+    "heading": "Xodimlar",
+    "overflow": false,
+    "error": []
+  },
+  {
+    "route": "/costs",
+    "device": "mobile",
+    "heading": "Xarajatlar va tannarx",
+    "overflow": false,
+    "error": []
+  },
+  {
+    "route": "/reports",
+    "device": "mobile",
+    "heading": "Hisobotlar",
+    "overflow": false,
+    "error": []
+  },
+  {
+    "route": "/settings",
+    "device": "mobile",
+    "heading": "Biznes",
+    "overflow": false,
+    "error": []
+  },
+  {
+    "route": "/ai",
+    "device": "mobile",
+    "heading": "ZENIX AI",
+    "overflow": false,
+    "error": []
+  },
+  {
+    "route": "/admin",
+    "device": "mobile",
+    "heading": "Admin Panel",
+    "overflow": false,
+    "error": []
+  },
+  {
+    "route": "/subscription",
+    "device": "mobile",
+    "heading": "Obuna va limitlar",
+    "overflow": false,
+    "error": []
+  }
+]

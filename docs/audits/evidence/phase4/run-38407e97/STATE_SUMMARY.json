@@ -1,0 +1,37 @@
+{
+  "company": "ZENIX Phase4 Factory 38407e97",
+  "tenantId": "tenant-legacy-v3",
+  "recordIds": {
+    "branches": [
+      "b1"
+    ],
+    "productionLines": [],
+    "workCenters": [],
+    "rawMaterials": [
+      "ra-mwoxq13d-b1h8k"
+    ],
+    "suppliers": [
+      "su-mwoxq1sy-9ydup"
+    ],
+    "purchaseOrders": [
+      "po-mwoxq2ep-xknx1"
+    ],
+    "stockMovements": [
+      "mv-mwoxq2yl-j05oi",
+      "mv-mwoxq2uk-dty63"
+    ],
+    "qualityChecks": [],
+    "productionOrders": [],
+    "employees": [
+      "em-mwoxqus2-z7b05",
+      "em-mwoxqr3n-xybuo",
+      "em-mwoxqndg-vjh7c",
+      "em-mwoxqjec-ow21k",
+      "em-mwoxqff8-8n3fk",
+      "em-mwoxqbol-x6lsn",
+      "em-mwoxq7xe-ie33m",
+      "em-mwoxq468-fa7np",
+      "em1"
+    ]
+  }
+}
