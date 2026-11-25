@@ -1,4 +1,4 @@
-import type {Bom,BomComponent,LotRecord,ManufacturingState,MaterialConsumption,MaterialReservation,ProductionOrder,SalesOrder,WorkCenter,WorkOrder} from '../types'
+import type {Bom,BomComponent,LotRecord,ManufacturingState,MaterialConsumption,MaterialReservation,ProductionOrder,SalesOrder,StockBalance,WorkCenter,WorkOrder} from '../types'
 import {addDays,dayOfWeek,daysBetween,isoDate,minutesBetween,parseDate,periodStart,stamp,todayISO,weekStart,weekdayShort} from '../utils/dates'
 import {SUPPLYING_PO,orderableLinks,preferredSupplierId} from './supplierMaterials'
 import {maintenanceWindow} from './maintenance'
@@ -702,8 +702,11 @@ export function workCenterOee(state:ManufacturingState,workCenterId:string,windo
   const plannedMinutes=runMinutes+downtimeMinutes>0?Math.max(days.size*shift,runMinutes+downtimeMinutes):0
   const idleMinutes=Math.max(0,plannedMinutes-runMinutes-downtimeMinutes)
   // Output per operation run here: its job-card quantities when reported, else the order's reported output.
+  // Order scrap that no job card holds (the shop-floor SCRAP button) consumes a whole BOM unit like a unit lost at
+  // the end of the routing, so it is made — and scrapped — on the final operation (P4-Q-01).
   const runs=orders.flatMap(o=>o.workOrders.filter(w=>w.workCenterId===workCenterId&&w.actualMin>0).map(w=>{
-    const good=tracksQty(w)?w.goodQty||0:o.completed,scrap=tracksQty(w)?w.scrapQty||0:o.scrap
+    const unassigned=finalWorkOrder(o)?.id===w.id?Math.max(0,o.scrap-o.workOrders.reduce((n,x)=>n+(x.scrapQty||0),0)):0
+    const good=tracksQty(w)?w.goodQty||0:o.completed,scrap=tracksQty(w)?(w.scrapQty||0)+unassigned:o.scrap
     return {good,total:good+scrap,ideal:(o.bomSnapshot.operations.find(op=>op.id===w.operationId)?.runMin??0)*(good+scrap)}
   }))
   const totalCount=runs.reduce((a,r)=>a+r.total,0)
@@ -770,6 +773,38 @@ export function issueUnitCost(state:ManufacturingState,itemId:string,lot?:string
 
 /** Value of consumption rows: the cost frozen at issue, else (older rows) today's standard cost. */
 export const consumptionValue=(state:ManufacturingState,rows:MaterialConsumption[])=>rows.reduce((a,c)=>a+c.qty*(c.unitCost??componentCost(state,c.materialId)),0)
+
+/** Stock value of the same quantity on two bases, and their difference (P4-I-01). */
+export type StockValuation={standard:number;actual:number;variance:number;lotQty:number;untrackedQty:number}
+const r2v=(n:number)=>Math.round(n*100)/100
+/**
+ * Inventory valuation (P4-I-01, business decision 2026-11-20: STANDARD). The book value of stock on every inventory
+ * screen is on hand × standard cost. Beside it, the same quantity at actual lot cost: each lot still in the store at
+ * the cost an issue would charge production (`issueUnitCost`: PO line price / production actual), stock no lot
+ * accounts for at standard. variance = actual − standard (negative: bought below standard). It is shown, not posted:
+ * there is no ledger account for a purchase price variance yet.
+ */
+export function stockValuation(state:ManufacturingState,balance:Pick<StockBalance,'warehouseId'|'itemId'|'variantId'|'onHand'>,lots?:LotRecord[]):StockValuation{
+  const std=componentCost(state,balance.itemId),onHand=Math.max(0,balance.onHand)
+  const key=keyOf(balance)
+  const here=(lots||state.lots).filter(l=>l.warehouseId===balance.warehouseId&&keyOf(l)===key&&l.qty>1e-9)
+  const lotQty=here.reduce((a,l)=>a+l.qty,0)
+  // Lots never value more than the balance holds (a lot/balance mismatch is an integrity issue reported elsewhere).
+  const scale=lotQty>onHand+1e-9&&lotQty>0?onHand/lotQty:1
+  const lotValue=here.reduce((a,l)=>a+l.qty*issueUnitCost(state,l.itemId,l.code),0)*scale
+  const untracked=Math.max(0,onHand-lotQty)
+  // Keep line precision until totals are aggregated. Rounding each warehouse line first can change the
+  // standard book value (for example two 0.1 kg balances at 123.45/kg become 24.70 instead of 24.69).
+  const standard=onHand*std,actual=lotValue+untracked*std
+  return {standard,actual,variance:actual-standard,lotQty:Math.round(Math.min(lotQty,onHand)*1000)/1000,untrackedQty:Math.round(untracked*1000)/1000}
+}
+/** Totals of `stockValuation` over balances (default: all of them). */
+export function inventoryValuation(state:ManufacturingState,balances:Pick<StockBalance,'warehouseId'|'itemId'|'variantId'|'onHand'>[]=state.stockBalances):StockValuation{
+  const byStore=new Map<string,LotRecord[]>()
+  for(const l of state.lots){if(l.qty<=1e-9)continue;const list=byStore.get(l.warehouseId)||[];list.push(l);byStore.set(l.warehouseId,list)}
+  const t=balances.reduce((a,b)=>{const v=stockValuation(state,b,byStore.get(b.warehouseId)||[]);return {standard:a.standard+v.standard,actual:a.actual+v.actual,lotQty:a.lotQty+v.lotQty,untrackedQty:a.untrackedQty+v.untrackedQty}},{standard:0,actual:0,lotQty:0,untrackedQty:0})
+  return {standard:r2v(t.standard),actual:r2v(t.actual),variance:r2v(t.actual-t.standard),lotQty:Math.round(t.lotQty*1000)/1000,untrackedQty:Math.round(t.untrackedQty*1000)/1000}
+}
 
 const machineRateOf=(state:ManufacturingState,workCenterId:string)=>state.workCenters.find(c=>c.id===workCenterId)?.costPerHour??state.settings?.policies?.machineRatePerHour??0
 const energyRateOf=(state:ManufacturingState,workCenterId:string)=>state.workCenters.find(c=>c.id===workCenterId)?.energyCostPerHour??0

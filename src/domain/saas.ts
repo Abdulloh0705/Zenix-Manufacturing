@@ -109,6 +109,14 @@ export function setTenantStatus(store:SaaSStore,tenantId:string,status:Tenant['s
   return {...store,tenants:store.tenants.map(t=>t.id===tenantId?{...t,status,suspensionReason:status==='suspended'?reason.trim():undefined}:t),events:[{id:`saas-event-${crypto.randomUUID()}`,tenantId,action:status==='suspended'?'tenant.suspend':'tenant.reactivate',targetId:tenantId,actorAccountId:actor,at,result:'success' as const,reason:reason.trim()},...store.events].slice(0,SAAS_EVENT_LIMIT)}
 }
 
+/** Platform display name of a company. The tenant's own ERP company profile (settings.company.name) is not touched. */
+export function renameTenant(store:SaaSStore,tenantId:string,name:string,actor:string,reason:string,now:Date):SaaSStore|null{
+  const tenant=store.tenants.find(t=>t.id===tenantId),clean=name.trim()
+  if(!tenant||!clean||clean===tenant.name||!actor.trim()||reason.trim().length<5)return null
+  const at=now.toISOString()
+  return {...store,tenants:store.tenants.map(t=>t.id===tenantId?{...t,name:clean}:t),events:[{id:`saas-event-${crypto.randomUUID()}`,tenantId,action:'tenant.rename',targetId:tenantId,actorAccountId:actor,at,result:'success' as const,reason:reason.trim()},...store.events].slice(0,SAAS_EVENT_LIMIT)}
+}
+
 /** Grace always carries an end date (`endsAt`), otherwise it would never lapse. */
 export function platformOverridePlan(store:SaaSStore,tenantId:string,planId:PlanId,status:Subscription['status'],actor:string,reason:string,now:Date,endsAt?:string):SaaSStore|null{
   if(!store.tenants.some(t=>t.id===tenantId)||!PLAN_CATALOG[planId]||!['active','grace','expired','suspended'].includes(status)||!actor.trim()||reason.trim().length<5)return null

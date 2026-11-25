@@ -1,0 +1,55 @@
+import {test,expect,type Page} from '@playwright/test'
+import {adminState,openWith,partlyReceivedPurchase,settle,stored,watchErrors} from './fixtures'
+
+// Procurement completion: supplier invoice matched to PO and goods receipt, paid in part; purchase request form.
+let errors:ReturnType<typeof watchErrors>
+test.beforeEach(({page})=>{errors=watchErrors(page)})
+test.afterEach(()=>errors.assertClean())
+const noPageOverflow=(page:Page)=>page.evaluate(()=>document.documentElement.scrollWidth<=document.documentElement.clientWidth+1)
+
+test('invoice is matched three ways, approved and paid in part without touching stock',async({page})=>{
+  const {state,poId,poCode}=partlyReceivedPurchase()
+  const stockBefore=state.stockBalances.filter(b=>b.itemId==='rm2').reduce((a,b)=>a+b.onHand,0)
+  await openWith(page,state,`/purchases?view=orders&id=${poId}`)
+  const drawer=page.getByRole('dialog').filter({hasText:poCode}).first()
+  await drawer.getByRole('tab',{name:/Invoice \/ to‘lov/}).click()
+  await drawer.getByRole('button',{name:'Invoice kiritish'}).click()
+  const modal=page.getByRole('dialog',{name:'Supplier invoice'})
+  await expect(modal.getByLabel('Po‘lat list 1.5mm invoice miqdori')).toHaveValue('60')
+  await modal.getByPlaceholder('Supplier hujjat raqami').fill('INV-77')
+  await expect(modal).toContainText('PO narxi va qabul qilingan miqdor bilan mos')
+  expect(await noPageOverflow(page)).toBe(true)
+  await modal.getByRole('button',{name:'Kiritish'}).click()
+  const invoice=page.getByRole('dialog').filter({hasText:'INV-77'}).last()
+  await invoice.getByRole('button',{name:'Tasdiqlash'}).click()
+  await page.getByRole('dialog',{name:'Invoice’ni tasdiqlash'}).getByRole('button',{name:'Tasdiqlash'}).click()
+  await expect(invoice).toContainText('Tasdiqlangan')
+  await page.keyboard.press('Escape');await settle(page)
+  await drawer.getByRole('button',{name:'Supplier to‘lovini qayd etish'}).click()
+  const pay=page.getByRole('dialog',{name:'Supplier to‘lovi'})
+  await expect(pay).toContainText('Invoice qoldig‘i')
+  await pay.locator('input').first().fill('20000')
+  await pay.locator('textarea').fill('Bank o‘tkazmasi 1')
+  await pay.getByRole('button',{name:'To‘lovni yozish'}).click()
+  await expect(pay).toBeHidden()
+  const s=await stored(page)
+  const inv=s.supplierInvoices!.find(x=>x.number==='INV-77')!
+  expect(inv.status).toBe('Tasdiqlangan')
+  expect(s.payables!.filter(e=>e.invoiceId===inv.id&&e.kind==='payment').map(e=>e.amount)).toEqual([-20000])
+  expect(s.stockBalances.filter(b=>b.itemId==='rm2').reduce((a,b)=>a+b.onHand,0)).toBe(stockBefore)
+  await page.setViewportSize({width:820,height:1180})
+  expect(await noPageOverflow(page)).toBe(true)
+})
+
+test('purchase request form fits the screen and submits for approval',async({page})=>{
+  await openWith(page,adminState(),'/purchases?view=requests')
+  await page.getByRole('button',{name:'Yangi so‘rov'}).click()
+  const form=page.getByRole('dialog',{name:'Yangi xarid so‘rovi'})
+  await form.getByLabel('Miqdor 1').fill('40')
+  expect(await noPageOverflow(page)).toBe(true)
+  await form.getByRole('button',{name:'Tasdiqlashga yuborish'}).click()
+  await expect(form).toBeHidden()
+  await expect(page.getByRole('dialog').filter({hasText:'Xarid so‘rovi'})).toContainText('Yuborilgan')
+  const s=await stored(page)
+  expect(s.purchaseRequests![0].status).toBe('Yuborilgan')
+})

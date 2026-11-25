@@ -6,6 +6,14 @@ import {byText,cleanup,click,flush,type} from './helpers'
 
 afterEach(cleanup)
 
+async function selectOperatorCenter(dialog:Element){
+  const field=[...dialog.querySelectorAll('.field')].find(row=>row.querySelector('label')?.textContent?.includes('Ish markazi'))!
+  await click(field.querySelector('[role="combobox"]'))
+  const option=[...document.querySelectorAll('[role="option"]')].find(o=>o.textContent?.trim()==='Extrusion Press')
+  assert.ok(option)
+  await click(option)
+}
+
 test('tenant role lists exclude the historical Super Admin role',async()=>{
   await mountApp('/admin?view=roles')
   const adminRoles=document.querySelector('[role="listbox"][aria-label="Rollar"]')
@@ -25,6 +33,7 @@ test('owner creates a scoped Operator account in company user management with fo
   const dialog=document.querySelector('[role="dialog"]')!
   const field=(label:string)=>[...dialog.querySelectorAll('.field')].find(row=>row.querySelector('label')?.textContent?.includes(label))!
   await type(field('F.I.Sh').querySelector('input'),'Yangi Operator')
+  await selectOperatorCenter(dialog)
   await type(field('Login').querySelector('input'),'operator33')
   assert.ok(dialog.textContent?.includes('E-pochta yoki SMS yuborilmaydi'))
   await click(byText('Yaratish','button',dialog))
@@ -51,6 +60,7 @@ test('retrying a failed login creation reuses the employee profile',async()=>{
   const dialog=document.querySelector('[role="dialog"]')!
   const field=(label:string)=>[...dialog.querySelectorAll('.field')].find(row=>row.querySelector('label')?.textContent?.includes(label))!
   await type(field('F.I.Sh').querySelector('input'),'Takror Operator')
+  await selectOperatorCenter(dialog)
   await type(field('Login').querySelector('input'),'retry.operator')
   await type(field('E-pochta').querySelector('input'),'invalid-email')
   await click(byText('Yaratish','button',dialog))

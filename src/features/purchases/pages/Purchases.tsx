@@ -2,11 +2,12 @@ import {useRef,useState} from 'react'
 import type {CSSProperties} from 'react'
 import {useNavigate,useSearchParams} from 'react-router-dom'
 import {useApp} from '../../../app/providers/AppProvider/AppContext'
-import {Card,Checkbox,Confirm,Drawer,RecordUnavailable,Empty,Field,FilterSelect,Icon,InfoGrid,Input,KPI,Modal,MoneyInput,PageHeader,Progress,ResourceTable,Select,StatusBadge,Tabs,Textarea,required,useDirtyMarker,useForm,useRecordParam,useSearchParamState} from '../../../shared/ui'
+import {Card,Checkbox,Confirm,Drawer,RecordUnavailable,Empty,Field,FilterSelect,Icon,InfoGrid,Input,KPI,Modal,MoneyInput,PageHeader,Progress,ResourceTable,SectionTitle,Segmented,Select,StatusBadge,Tabs,Textarea,required,useDirtyMarker,useForm,useRecordParam,useSearchParamState} from '../../../shared/ui'
 import type {CurrencyCode,PurchaseOrder,SubcontractOrder,Supplier,SupplierMaterial} from '../../../types'
 import {activeBomFor,perUnit,stockOf} from '../../../domain/manufacturingEngine'
 import {branchPurchaseNeeds} from '../../../domain/planning'
-import {needsSecondApprover,referenceBlocker} from '../../../domain/actions'
+import {invoiceOpen,needsSecondApprover,purchaseInvoiceStatus,referenceBlocker} from '../../../domain/actions'
+import {PurchaseInvoices,PurchaseRequestsSection} from '../components/Procurement'
 import {convertQty,unitOptions} from '../../../domain/uom'
 import {SUPPLY_CURRENCIES,linkBlock,linksOfSupplier,receiptQuantities,rejectedOpen,replaceableQty,replacementView,supplierPerformance,supplierPurchaseHistory} from '../../../domain/supplierMaterials'
 import {parseSerials} from '../../../domain/serials'
@@ -61,6 +62,15 @@ function Overview(){
 }
 
 function Requests(){
+  const [tab,setTab]=useSearchParamState('tab','manual')
+  return <div className="page-stack">
+    <PageHeader title="Purchase Requests" subtitle="Xarid so‘rovi: qoralama → yuborilgan → tasdiqlangan → PO · MRP tavsiyalari alohida"/>
+    <Segmented ariaLabel="So‘rov turi" value={tab} onChange={setTab} items={[{value:'manual',label:'Xarid so‘rovlari'},{value:'mrp',label:'MRP tavsiyalari'}]}/>
+    {tab==='mrp'?<MrpRequests/>:<PurchaseRequestsSection/>}
+  </div>
+}
+
+function MrpRequests(){
   const app=useApp(),s=app.state
   const plan=branchPurchaseNeeds(s)
   const [selected,setSelected]=useState<string[]>([])
@@ -69,7 +79,7 @@ function Requests(){
   const needOf=(p:typeof rows[number]):SourcingNeed=>({materialId:p.materialId,need:p.suggested,needBy:p.needBy,warehouseId:p.warehouseId,source:`Purchase request ${p.branchId}`})
   const canBuy=app.can('purchases','create')
   return <div className="page-stack">
-    <PageHeader title="Purchase Requests" subtitle="MRP netting · supplier tanlang · bir supplierga bitta PO"
+    <SectionTitle title="MRP tavsiyalari" subtitle="MRP netting · supplier tanlang · bir supplierga bitta PO"
       actions={<button type="button" className="primary-glass-btn" disabled={!selected.length||!canBuy} onClick={()=>setPlanned(rows.filter(r=>selected.includes(r.id)).map(needOf))}><Icon name="cart"/>Tanlanganlardan PO ({selected.length})</button>}/>
     {rows.length?<Card className="flush"><div className="table-scroll"><table><thead><tr><th><span className="sr-only">Tanlash</span></th><th>Material · filial</th><th className="align-right">Talab</th><th className="align-right">Available</th><th className="align-right">Yo‘lda</th><th className="align-right">Tavsiya</th><th>Supplier</th><th>Kerak sana</th><th/></tr></thead><tbody>{rows.map(p=>{const m=p.m;return <tr key={p.id}>
       <td><Checkbox checked={selected.includes(p.id)} onChange={v=>setSelected(x=>v?[...x,p.id]:x.filter(i=>i!==p.id))} label={<span className="sr-only">{m.name}</span>}/></td>
@@ -214,11 +224,17 @@ function CloseRestModal({po,onClose}:{po:PurchaseOrder;onClose:()=>void}){
 }
 
 function SupplierPaymentModal({po,supplierId,onClose}:{po?:PurchaseOrder;supplierId?:string;onClose:()=>void}){
-  const app=useApp(),id=po?.supplierId||supplierId||'',open=po?purchaseBalance(app.state,po.id):supplierBalance(app.state,id)
+  const app=useApp(),id=po?.supplierId||supplierId||'',poOpen=po?purchaseBalance(app.state,po.id):supplierBalance(app.state,id)
   const [amount,setAmount]=useState(''),[reason,setReason]=useState(''),[key]=useState(()=>`supplier-payment:${po?.id||supplierId}:${Date.now()}`)
+  const invoices=po?(app.state.supplierInvoices||[]).filter(x=>x.purchaseOrderId===po.id&&x.status==='Tasdiqlangan'&&invoiceOpen(app.state,x)>0.005):[]
+  const [invoiceId,setInvoiceId]=useState(invoices[0]?.id||'')
+  const inv=invoices.find(x=>x.id===invoiceId)
+  const open=inv?Math.min(poOpen,invoiceOpen(app.state,inv)):poOpen
   return <Modal open onClose={onClose} title="Supplier to‘lovi" eyebrow={po?.code||app.state.suppliers.find(x=>x.id===id)?.name} subtitle={`Ochiq payable ${money(open)} UZS`} size="sm"
-    footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Yopish</button><button type="button" className="primary-glass-btn" disabled={!Number.isFinite(Number(amount))||Number(amount)<=0||Number(amount)>open||!reason.trim()} onClick={()=>{const r=app.recordSupplierPayment({supplierId:id,purchaseOrderId:po?.id,amount:Number(amount),key,reason});if(r.ok)onClose()}}>To‘lovni yozish</button></>}>
+    footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Yopish</button><button type="button" className="primary-glass-btn" disabled={!Number.isFinite(Number(amount))||Number(amount)<=0||Number(amount)>open||!reason.trim()} onClick={()=>{const r=app.recordSupplierPayment({supplierId:id,purchaseOrderId:po?.id,invoiceId:inv?.id,amount:Number(amount),key,reason});if(r.ok)onClose()}}>To‘lovni yozish</button></>}>
     <div className="inline-note">Bu demo ledger yozuvi. Bankda to‘lov amalga oshganini tasdiqlamaydi.</div>
+    {invoices.length>0&&<Field label="Invoice" hint={inv?`Invoice qoldig‘i ${money(invoiceOpen(app.state,inv))} UZS`:'PO bo‘yicha umumiy to‘lov'}><Select value={invoiceId} onChange={setInvoiceId}><option value="">Invoice’siz (PO bo‘yicha)</option>{invoices.map(x=><option key={x.id} value={x.id}>{x.code} · №{x.number} · {money(invoiceOpen(app.state,x))}</option>)}</Select></Field>}
+    {Number(amount)>open+0.005&&<div className="inline-note warning" role="alert">To‘lov ochiq qoldiqdan ({money(open)}) oshmasin</div>}
     <Field label="Miqdor (UZS)"><MoneyInput min="0" value={amount} onValue={setAmount}/></Field>
     <Field label="Hujjat / sabab"><Textarea value={reason} onChange={e=>setReason(e.target.value)}/></Field>
   </Modal>
@@ -243,12 +259,14 @@ function PurchaseDrawerBody({po,onClose}:{po:PurchaseOrder;onClose:()=>void}){
   const checks=s.qualityChecks.filter(q=>q.sourceType==='purchase'&&q.sourceId===po.id)
   const late=OPEN_PO.includes(po.status)&&po.status!=='Qoralama'&&po.expectedDate<todayISO()
   return <Drawer open onClose={onClose} title={po.code} eyebrow="Purchase order" icon="cart" size="lg" subtitle={`${supplierName(s,po.supplierId)} · ${warehouseName(s,po.warehouseId)} · expected ${po.expectedDate}`}
-    headerExtra={<><StatusBadge>{po.status}</StatusBadge>{late&&<StatusBadge tone="danger">Kechikmoqda</StatusBadge>}<StatusBadge>{purchasePaymentStatus(s,po)}</StatusBadge>{po.source&&<span className="chip">{po.source}</span>}</>}
+    headerExtra={<><StatusBadge>{po.status}</StatusBadge>{po.status==='Qoralama'&&po.approvalRequestedAt&&<StatusBadge tone="warning">Tasdiq kutilmoqda</StatusBadge>}{po.sentAt&&<StatusBadge tone="info">Supplierga yuborilgan</StatusBadge>}{late&&<StatusBadge tone="danger">Kechikmoqda</StatusBadge>}<StatusBadge>{purchasePaymentStatus(s,po)}</StatusBadge>{po.source&&<span className="chip">{po.source}</span>}</>}
     actions={<>
       {canEdit&&!['Bekor','Qabul qilindi'].includes(po.status)&&!po.items.some(i=>i.received>0)&&<button type="button" className="ghost-btn" onClick={()=>setCancel(true)}><Icon name="x" size={15}/>Bekor qilish</button>}
       {canEdit&&receivable&&po.items.some(i=>i.received>0)&&<button type="button" className="ghost-btn" onClick={()=>setCloseRest(true)}><Icon name="x" size={15}/>Qoldiqni yopish</button>}
       <span className="spacer"/>
       {po.status==='Qoralama'&&canEdit&&<button type="button" className="secondary-glass-btn" onClick={()=>setEdit(true)}><Icon name="edit" size={15}/>Tahrirlash</button>}
+      {po.status==='Qoralama'&&canEdit&&!po.approvalRequestedAt&&<button type="button" className="secondary-glass-btn" onClick={()=>app.requestPurchaseApproval(po.id)}><Icon name="shield" size={15}/>Tasdiqlashga yuborish</button>}
+      {['Tasdiqlangan','Yo‘lda'].includes(po.status)&&canEdit&&!po.sentAt&&<button type="button" className="secondary-glass-btn" onClick={()=>app.markPurchaseSent(po.id)}><Icon name="arrow-right" size={15}/>Supplierga yuborildi</button>}
       {po.status==='Qoralama'&&app.can('purchases','approve')&&<button type="button" className="primary-glass-btn" disabled={po.createdBy===app.currentEmployee.id&&needsSecondApprover(app.state,po.total)} title={po.createdBy===app.currentEmployee.id&&needsSecondApprover(app.state,po.total)?'Ikki kishilik tasdiq: o‘zingiz yaratgan PO’ni boshqa xodim tasdiqlaydi':undefined} onClick={()=>app.confirmPurchase(po.id)}><Icon name="check" size={16}/>Tasdiqlash</button>}
       {po.status==='Tasdiqlangan'&&canEdit&&<button type="button" className="secondary-glass-btn" onClick={()=>app.markPurchaseInTransit(po.id)}><Icon name="truck" size={16}/>Yo‘lda</button>}
       {receivable&&(canEdit||app.can('warehouse','edit'))&&<button type="button" className="primary-glass-btn" onClick={()=>navigate(`/purchases?view=receiving&po=${po.id}`)}><Icon name="download" size={16}/>Qabul qilish</button>}
@@ -269,11 +287,13 @@ function PurchaseDrawerBody({po,onClose}:{po:PurchaseOrder;onClose:()=>void}){
         <td className="align-right"><span className="badge-row">{q.check&&<button type="button" className="ghost-btn" onClick={()=>setCheck(q.check!.id)}>{q.check.status==='Pending'?'Tekshirish':'QC'}</button>}{r.lot&&<button type="button" className="ghost-btn" onClick={()=>navigate(`/reports?view=traceability&q=${encodeURIComponent(r.lot)}`)}>Trace</button>}</span></td>
       </tr>})}</tbody></table></div>:<Empty compact title="Hali qabul qilinmagan"/>)}
     {tab==='finance'&&<div className="form-grid">
-      <Field label="Invoice holati"><Select value={po.invoiceStatus} disabled={!canEdit} onChange={v=>app.updatePurchaseMeta(po.id,{invoiceStatus:v})}>{['Kutilmoqda','Qabul qilindi','Tekshirildi','Yo‘q'].map(x=><option key={x} value={x}>{x}</option>)}</Select></Field>
+      {(s.supplierInvoices||[]).some(x=>x.purchaseOrderId===po.id)?<Field label="Invoice holati" hint="Invoice’lardan hisoblanadi"><Input readOnly value={purchaseInvoiceStatus(s,po)}/></Field>
+        :<Field label="Invoice holati" hint="Invoice kiritilgach avtomatik hisoblanadi"><Select value={po.invoiceStatus} disabled={!canEdit} onChange={v=>app.updatePurchaseMeta(po.id,{invoiceStatus:v})}>{['Kutilmoqda','Qabul qilindi','Tekshirildi','Yo‘q'].map(x=><option key={x} value={x}>{x}</option>)}</Select></Field>}
       <Field label="To‘lov holati"><Select value={purchasePaymentStatus(s,po)} disabled onChange={()=>{}}>{['To‘lanmagan','Qisman','To‘langan'].map(x=><option key={x} value={x}>{x}</option>)}</Select></Field>
       <InfoGrid items={[{label:'PO summasi',value:money(po.total)},{label:'Qabul qilingan qiymat',value:money(po.items.reduce((a,i)=>a+i.received*i.price,0))},{label:'PO ochiq payable',value:money(purchaseBalance(s,po.id))},{label:'Supplier qarzi (ledger)',value:money(supplierBalance(s,po.supplierId))}]}/>
       {purchaseBalance(s,po.id)>0.005&&(app.can('purchases','approve')||app.can('costs','edit'))&&<button type="button" className="primary-glass-btn compact" onClick={()=>setPay(true)}>Supplier to‘lovini qayd etish</button>}
-      {payableLedger(s).filter(e=>e.purchaseOrderId===po.id).map(e=><div className="list-row" key={e.id}><span className="list-row-copy"><b>{e.kind} · {money(e.amount)}</b><small>{e.date} · {e.reason||'—'} · {e.by}</small></span></div>)}
+      {payableLedger(s).filter(e=>e.purchaseOrderId===po.id).map(e=><div className="list-row" key={e.id}><span className="list-row-copy"><b>{e.kind} · {money(e.amount)}</b><small>{e.date} · {e.reason||'—'} · {e.by}{e.invoiceId?` · ${(s.supplierInvoices||[]).find(x=>x.id===e.invoiceId)?.code||''}`:''}</small></span></div>)}
+      <div className="span-2"><PurchaseInvoices po={po}/></div>
       {po.receipts.length>0&&!payableLedger(s).some(e=>e.purchaseOrderId===po.id)&&<div className="inline-note warning">Bu PO qabullari payable ledgerdan oldin yozilgan; tarixiy to‘lov va qarz taqsimoti noma’lum. Supplier boshlang‘ich qoldig‘ini tekshiring.</div>}
     </div>}
     {tab==='quality'&&(checks.length?<div className="stack-list">{checks.map(q=><button type="button" className="list-row is-clickable" key={q.id} onClick={()=>setCheck(q.id)}><span className="list-row-copy"><b>{materialName(s,q.itemId)}{q.lot?` · ${q.lot}`:''}</b><small>{q.date}{q.acceptedQty!==undefined?` · ${num(q.acceptedQty,3)} qabul / ${num(q.rejectedQty||0,3)} rad`:''}{q.reason?` · ${q.reason}`:''}</small></span><StatusBadge>{q.status}</StatusBadge></button>)}</div>:<Empty compact title="Incoming tekshiruv yo‘q"/>)}
@@ -332,7 +352,7 @@ type LinkRow={id?:string;materialId:string;supplierSku:string;price:string;curre
 /** Supplier card and the materials it supplies, saved together (one action, all or nothing). */
 function SupplierModal({supplier,subtitle,onClose,onSaved}:{supplier?:Supplier;subtitle?:string;onClose:()=>void;onSaved?:(id:string)=>void}){
   const app=useApp(),s=app.state
-  const form=useForm({name:supplier?.name||'',phone:supplier?.phone||'+998 ',email:supplier?.email||'',leadTime:String(supplier?.leadTime??3),rating:String(supplier?.rating??5),status:supplier?.status||'Faol'},v=>({name:required(v.name,'Nomi')||(s.suppliers.some(x=>x.id!==supplier?.id&&x.name.toLowerCase()===v.name.trim().toLowerCase())?'Bu nom band':undefined),phone:/\d{7,}/.test(v.phone.replace(/\D/g,''))?undefined:'Telefon raqamini to‘liq kiriting',email:v.email&&!/^\S+@\S+\.\S+$/.test(v.email)?'Email noto‘g‘ri':undefined,leadTime:Number(v.leadTime)>=0?undefined:'Lead time noto‘g‘ri'}))
+  const form=useForm({name:supplier?.name||'',phone:supplier?.phone||'+998 ',email:supplier?.email||'',leadTime:String(supplier?.leadTime??3),rating:String(supplier?.rating??5),status:supplier?.status||'Faol',contactPerson:supplier?.contactPerson||'',address:supplier?.address||'',inn:supplier?.inn||'',bankAccount:supplier?.bankAccount||'',mfo:supplier?.mfo||''},v=>({inn:v.inn.replace(/\s/g,'')&&!/^\d{9}$/.test(v.inn.replace(/\s/g,''))?'STIR 9 ta raqam':v.inn&&s.suppliers.some(x=>x.id!==supplier?.id&&x.inn===v.inn.replace(/\s/g,''))?'Bu STIR boshqa supplierda':undefined,bankAccount:v.bankAccount.replace(/\s/g,'')&&!/^\d{20}$/.test(v.bankAccount.replace(/\s/g,''))?'Hisob raqami 20 ta raqam':undefined,mfo:v.mfo.replace(/\s/g,'')&&!/^\d{5}$/.test(v.mfo.replace(/\s/g,''))?'MFO 5 ta raqam':v.bankAccount.trim()&&!v.mfo.trim()?'Bank MFO kodini kiriting':undefined,name:required(v.name,'Nomi')||(s.suppliers.some(x=>x.id!==supplier?.id&&x.name.toLowerCase()===v.name.trim().toLowerCase())?'Bu nom band':undefined),phone:/\d{7,}/.test(v.phone.replace(/\D/g,''))?undefined:'Telefon raqamini to‘liq kiriting',email:v.email&&!/^\S+@\S+\.\S+$/.test(v.email)?'Email noto‘g‘ri':undefined,leadTime:Number(v.leadTime)>=0?undefined:'Lead time noto‘g‘ri'}))
   const [links,setLinks]=useState<LinkRow[]>(()=>supplier?linksOfSupplier(s,supplier.id).map(l=>({id:l.id,materialId:l.materialId,supplierSku:l.supplierSku,price:String(l.price),currency:l.currency,purchaseUnit:l.purchaseUnit,unitFactor:String(l.unitFactor),moq:String(l.moq),leadTime:String(l.leadTime),active:l.active})):[])
   const firstLinks=useRef(JSON.stringify(links))
   useDirtyMarker(JSON.stringify(links)!==firstLinks.current)
@@ -347,7 +367,7 @@ function SupplierModal({supplier,subtitle,onClose,onSaved}:{supplier?:Supplier;s
     setSubmitted(true)
     if(links.some(rowError))return
     form.submit(v=>{
-      const r=app.saveSupplier({id:supplier?.id,supplier:{name:v.name,phone:v.phone,email:v.email,leadTime:Number(v.leadTime),rating:Number(v.rating),status:v.status},links:links.map(l=>({id:l.id,materialId:l.materialId,supplierSku:l.supplierSku,price:Number(l.price),currency:l.currency,purchaseUnit:l.purchaseUnit,unitFactor:Number(l.unitFactor),moq:Number(l.moq),leadTime:Number(l.leadTime),active:l.active}))})
+      const r=app.saveSupplier({id:supplier?.id,supplier:{name:v.name,phone:v.phone,email:v.email,leadTime:Number(v.leadTime),rating:Number(v.rating),status:v.status,contactPerson:v.contactPerson,address:v.address,inn:v.inn,bankAccount:v.bankAccount,mfo:v.mfo},links:links.map(l=>({id:l.id,materialId:l.materialId,supplierSku:l.supplierSku,price:Number(l.price),currency:l.currency,purchaseUnit:l.purchaseUnit,unitFactor:Number(l.unitFactor),moq:Number(l.moq),leadTime:Number(l.leadTime),active:l.active}))})
       if(r.ok){onSaved?.(r.id!);onClose()}
       return r.ok
     })
@@ -360,6 +380,11 @@ function SupplierModal({supplier,subtitle,onClose,onSaved}:{supplier?:Supplier;s
       <Field label="Email" error={form.error('email')}><Input type="email" {...form.input('email')}/></Field>
       <Field label="Odatiy lead time (kun)" error={form.error('leadTime')} hint="Yangi material qatorlari uchun"><Input type="number" min="0" {...form.input('leadTime')}/></Field>
       <Field label="Status"><Select value={form.values.status} onChange={v=>form.set('status',v)}><option value="Faol">Faol</option><option value="Arxiv">Arxiv</option></Select></Field>
+      <Field label="Mas’ul shaxs"><Input {...form.input('contactPerson')} placeholder="F.I.Sh."/></Field>
+      <Field label="STIR (INN)" error={form.error('inn')}><Input inputMode="numeric" {...form.input('inn')} placeholder="9 ta raqam"/></Field>
+      <Field className="span-2" label="Yuridik manzil"><Input {...form.input('address')}/></Field>
+      <Field label="Hisob raqami" error={form.error('bankAccount')}><Input inputMode="numeric" {...form.input('bankAccount')} placeholder="20 ta raqam"/></Field>
+      <Field label="Bank MFO" error={form.error('mfo')}><Input inputMode="numeric" {...form.input('mfo')} placeholder="5 ta raqam"/></Field>
     </div>
     <section className="editor-section">
       <div className="editor-head"><h4>Yetkazadigan materiallar</h4><button type="button" className="secondary-glass-btn compact" disabled={!free.length} onClick={add}><Icon name="plus" size={14}/>Material</button></div>
@@ -401,6 +426,7 @@ function SupplierDrawer({supplier,onClose,onEdit}:{supplier:Supplier;onClose:()=
       {canLink&&<div className="row-actions"><button type="button" className="secondary-glass-btn compact" onClick={()=>setLinkEdit('new')}><Icon name="plus" size={14}/>Material biriktirish</button></div>}
     </div>}
     {tab==='overview'&&<>
+      <InfoGrid columns={3} items={[{label:'Mas’ul shaxs',value:supplier.contactPerson||'—'},{label:'STIR',value:supplier.inn||'—'},{label:'Manzil',value:supplier.address||'—'},{label:'Hisob raqami',value:supplier.bankAccount||'—'},{label:'MFO',value:supplier.mfo||'—'},{label:'Invoice’lar',value:(s.supplierInvoices||[]).filter(x=>x.supplierId===supplier.id&&x.status!=='Bekor').length}]}/>
       <InfoGrid items={[
         {label:'Vaqtida yetkazish',value:perf.onTimePct===null?'Ma’lumot yo‘q':`${perf.onTimePct}% · ${perf.dueLines} qator`,tone:perf.onTimePct!==null&&perf.onTimePct<80?'warning':undefined},
         {label:'O‘rtacha lead time (amalda)',value:perf.avgLead===null?'Ma’lumot yo‘q':`${perf.avgLead} kun`},

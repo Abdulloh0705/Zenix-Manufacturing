@@ -5,7 +5,7 @@ import {Card,Checkbox,Confirm,Drawer,RecordUnavailable,Empty,Field,FilterSelect,
 import type {Customer,CustomerReturn,SalesOrder} from '../../../types'
 import {productStockOf,returnSources} from '../../../domain/manufacturingEngine'
 import {serialTracked} from '../../../domain/serials'
-import {referenceBlocker,salesAvailable} from '../../../domain/actions'
+import {referenceBlocker,salesAvailable,sellableSerials} from '../../../domain/actions'
 import {addDays,todayISO} from '../../../utils/dates'
 import {cls,compactMoney,money,num} from '../../../utils/format'
 import {customerName,productName,warehouseName} from '../../common/lookups'
@@ -36,7 +36,7 @@ function Overview(){
   return <div className="page-stack">
     <PageHeader title="Sotuv" subtitle="MTS — ombordan rezerv · MTO — MO ochiladi"/>
     <div className="kpi-grid">
-      <KPI label="Ochiq buyurtmalar" value={open.length} sub={compactMoney(open.reduce((a,o)=>a+o.total,0))} icon={<Icon name="truck"/>} onClick={()=>navigate('/sales?view=orders')}/>
+      <KPI label="Ochiq buyurtmalar" value={open.length} sub={compactMoney(open.reduce((sum,o)=>sum+o.items.reduce((amount,i)=>amount+Math.max(0,i.qty-i.delivered)*i.price,0),0))} icon={<Icon name="truck"/>} onClick={()=>navigate('/sales?view=orders')}/>
       <KPI label="Yetkazishga tayyor" value={open.filter(o=>o.status==='Tayyor').length} sub="To‘liq rezerv" tone="mint" icon={<Icon name="check"/>} onClick={()=>navigate('/sales?view=delivery')}/>
       <KPI label="Ishlab chiqarishda (MTO)" value={open.filter(o=>o.status==='Ishlab chiqarishda').length} tone="purple" icon={<Icon name="factory"/>} onClick={()=>navigate('/sales?view=orders&status=Ishlab chiqarishda')}/>
       <KPI label="Kechikkan" value={late.length} sub="Sana o‘tgan" tone="pink" icon={<Icon name="clock"/>} onClick={()=>navigate('/sales?view=orders&late=1')}/>
@@ -111,7 +111,7 @@ function SalesFormModal({onClose,onCreated,customerId}:{onClose:()=>void;onCreat
           <td className="wide-cell"><Select value={l.productId} onChange={v=>setLines(x=>x.map((y,j)=>j===i?{...y,productId:v,variantId:'',price:String(products.find(p=>p.id===v)?.salePrice||0)}:y))} ariaLabel={`Mahsulot ${i+1}`}>{products.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</Select>
             {(()=>{const p=products.find(x=>x.id===l.productId),vs=(p?.variants||[]).filter(v=>v.status==='Faol');return vs.length?<Select size="sm" value={l.variantId||''} onChange={v=>setLines(x=>x.map((y,j)=>j===i?{...y,variantId:v,price:String((p?.salePrice||0)+(vs.find(z=>z.id===v)?.priceDelta||0))}:y))} ariaLabel={`Variant ${i+1}`}>{p?.variantStock?<option value="">Variant tanlang</option>:<option value="">Variantsiz</option>}{vs.map(v=><option key={v.id} value={v.id}>{v.code} · {v.attributes}</option>)}</Select>:null})()}</td>
           <td className="align-right"><input className="ui-input cell-input" type="number" min="1" step="1" aria-label="Miqdor" value={l.qty} onChange={e=>setLines(x=>x.map((y,j)=>j===i?{...y,qty:e.target.value}:y))}/></td>
-          <td className="align-right"><div className="cell-money"><MoneyInput min="0" aria-label="Narx" value={l.price} onValue={v=>setLines(x=>x.map((y,j)=>j===i?{...y,price:v}:y))}/></div></td>
+          <td className="align-right"><div className="cell-money"><MoneyInput min="0" aria-label="Narx" value={l.price} onValue={v=>setLines(x=>x.map((y,j)=>j===i?{...y,price:v}:y))}/></div><PriceHint list={listPrice(s,l.productId,l.variantId)} price={Number(l.price)} cost={products.find(p=>p.id===l.productId)?.standardCost||undefined}/></td>
           <td className={`align-right ${!mto&&free<(Number(l.qty)||0)?'negative':''}`} title={products.find(p=>p.id===l.productId)?.variantStock?'Faqat shu variant qoldig‘i':undefined}>{needsVariant(l)?'—':num(free)}</td>
           <td className="align-right"><button type="button" className="icon-ghost danger" disabled={visible.length<2} aria-label="Qatorni o‘chirish" onClick={()=>setLines(x=>x.filter((_,j)=>j!==i))}><Icon name="trash" size={15}/></button></td>
         </tr>})}</tbody></table></div>
@@ -131,7 +131,7 @@ function SalesDrawer({soId,onClose}:{soId:string|null;onClose:()=>void}){
 
 function SalesDrawerBody({so,onClose}:{so:SalesOrder;onClose:()=>void}){
   const app=useApp(),s=app.state,navigate=useNavigate()
-  const [tab,setTab]=useState('lines'),[cancel,setCancel]=useState(false),[deliver,setDeliver]=useState(false),[ret,setRet]=useState(false),[pay,setPay]=useState(false)
+  const [tab,setTab]=useState('lines'),[cancel,setCancel]=useState(false),[deliver,setDeliver]=useState(false),[ret,setRet]=useState(false),[pay,setPay]=useState(false),[edit,setEdit]=useState(false)
   const mo=s.productionOrders.find(o=>o.id===so.productionOrderId)
   const open=OPEN_SO.includes(so.status)
   const canEdit=app.can('sales','edit')
@@ -139,22 +139,29 @@ function SalesDrawerBody({so,onClose}:{so:SalesOrder;onClose:()=>void}){
   const customer=s.customers.find(c=>c.id===so.customerId)
   const ledgerStatus=orderReceivable(s,so.id).status
   const returns=s.returns.filter(r=>r.salesOrderId===so.id)
+  const returnedOf=(productId:string)=>returns.filter(r=>r.productId===productId).reduce((sum,r)=>sum+r.qty,0)
+  const returnable=so.items.some(i=>i.delivered>returnedOf(i.productId))
+  // Lines of an open make-to-stock order are edited here; an MTO order's quantity belongs to its MO.
+  const editable=open&&canEdit&&so.mode==='Make-to-stock'&&!mo&&!so.productionOrderIds?.length
+  const totals=so.items.reduce((a,i)=>({qty:a.qty+i.qty,delivered:a.delivered+i.delivered,returned:a.returned+returnedOf(i.productId)}),{qty:0,delivered:0,returned:0})
   // Only stock this person may ship counts: active Finished/Mixed stores in their scope, unexpired, unreserved (audit #5).
-  const shortage=so.items.some(i=>i.qty-i.delivered-(i.reserved||0)>salesAvailable(s,app.currentEmployee,i.productId,todayISO(),i.variantId))
+  const shippable=so.items.some(i=>Math.min(i.qty-i.delivered,(i.reserved||0)+salesAvailable(s,app.currentEmployee,i.productId,todayISO(),i.variantId))>0)
   return <Drawer open onClose={onClose} title={so.code} eyebrow="Sales order" icon="truck" size="lg" subtitle={`${customerName(s,so.customerId)} · yetkazish ${so.deliveryDate}`}
     headerExtra={<><StatusBadge>{so.status}</StatusBadge><StatusBadge>{so.mode}</StatusBadge><StatusBadge>{paymentStatusOf(s,so)}</StatusBadge></>}
     actions={<>
       {open&&canEdit&&<button type="button" className="ghost-btn" onClick={()=>setCancel(true)}><Icon name="x" size={15}/>Bekor qilish</button>}
-      {so.status==='Yetkazildi'&&app.can('sales','create')&&<button type="button" className="secondary-glass-btn" onClick={()=>setRet(true)}><Icon name="undo" size={15}/>Qaytarish</button>}
+      {editable&&<button type="button" className="ghost-btn" onClick={()=>setEdit(true)}><Icon name="edit" size={15}/>Tahrirlash</button>}
+      {returnable&&app.can('sales','create')&&<button type="button" className="secondary-glass-btn" onClick={()=>setRet(true)}><Icon name="undo" size={15}/>Qaytarish</button>}
       <span className="spacer"/>
       {open&&so.status!=='Tayyor'&&canEdit&&<button type="button" className="secondary-glass-btn" onClick={()=>app.reserveSalesOrder(so.id)}><Icon name="refresh" size={15}/>Rezervni tekshirish</button>}
-      {open&&canEdit&&<button type="button" className="primary-glass-btn" disabled={shortage} title={shortage?'Tayyor mahsulot yetarli emas':undefined} onClick={()=>setDeliver(true)}><Icon name="truck" size={16}/>Yetkazib berish</button>}
+      {open&&canEdit&&<button type="button" className="primary-glass-btn" disabled={!shippable} title={shippable?undefined:'Yetkazish uchun available yoki rezerv stock yo‘q'} onClick={()=>setDeliver(true)}><Icon name="truck" size={16}/>Yetkazib berish</button>}
     </>}>
     <Tabs items={[{value:'lines',label:'Qatorlar'},{value:'fulfil',label:'Bajarilish'},{value:'finance',label:'To‘lov'},{value:'returns',label:'Qaytarishlar',count:returns.length},{value:'docs',label:'Hujjatlar'},{value:'history',label:'Tarix'}]} active={tab} onChange={setTab}/>
-    {tab==='lines'&&<div className="table-scroll"><table className="fit"><thead><tr><th>Mahsulot</th><th className="align-right">Miqdor</th><th className="align-right">Rezerv</th><th className="align-right">Yetkazilgan</th><th className="align-right">Narx</th><th className="align-right">Summa</th></tr></thead><tbody>{so.items.map(i=><tr key={i.productId}><td><div className="cell-main"><b>{productName(s,i.productId)}</b><small>{[i.variantId?s.products.find(p=>p.id===i.productId)?.variants.find(v=>v.id===i.variantId)?.code:'',i.warehouseId?warehouseName(s,i.warehouseId):''].filter(Boolean).join(' · ')}</small></div></td><td className="align-right">{num(i.qty)}</td><td className="align-right">{num(i.reserved||0)}</td><td className="align-right">{num(i.delivered)}</td><td className="align-right">{money(i.price)}</td><td className="align-right">{money(i.qty*i.price)}</td></tr>)}<tr className="total"><td>Jami</td><td/><td/><td/><td/><td className="align-right">{money(so.total)}</td></tr></tbody></table></div>}
+    {tab==='lines'&&<div className="table-scroll"><table className="fit"><thead><tr><th>Mahsulot</th><th className="align-right">Miqdor</th><th className="align-right">Rezerv</th><th className="align-right">Yetkazilgan</th><th className="align-right">Qaytarilgan</th><th className="align-right">Qolgan</th><th className="align-right">Narx</th><th className="align-right">Summa</th></tr></thead><tbody>{so.items.map(i=><tr key={i.productId}><td><div className="cell-main"><b>{productName(s,i.productId)}</b><small>{[i.variantId?s.products.find(p=>p.id===i.productId)?.variants.find(v=>v.id===i.variantId)?.code:'',i.warehouseId?warehouseName(s,i.warehouseId):''].filter(Boolean).join(' · ')}</small></div></td><td className="align-right">{num(i.qty)}</td><td className="align-right">{num(i.reserved||0)}</td><td className="align-right">{num(i.delivered)}</td><td className="align-right">{num(returnedOf(i.productId))}</td><td className="align-right"><b>{num(Math.max(0,i.qty-i.delivered))}</b></td><td className="align-right">{money(i.price)}</td><td className="align-right">{money(i.qty*i.price)}</td></tr>)}<tr className="total"><td>Jami</td><td className="align-right">{num(totals.qty)}</td><td/><td className="align-right">{num(totals.delivered)}</td><td className="align-right">{num(totals.returned)}</td><td className="align-right">{num(Math.max(0,totals.qty-totals.delivered))}</td><td/><td className="align-right">{money(so.total)}</td></tr></tbody></table></div>}
     {tab==='fulfil'&&<>
+      <InfoGrid columns={4} items={[{label:'Buyurtma',value:num(totals.qty)},{label:'Jo‘natilgan',value:num(totals.delivered)},{label:'Jo‘natilmagan',value:num(Math.max(0,totals.qty-totals.delivered)),tone:open&&totals.qty>totals.delivered?'warning':undefined},{label:'Qaytarilgan',value:num(totals.returned)}]}/>
       {mo?<button type="button" className="list-row is-clickable" onClick={()=>navigate(`/production?view=orders&id=${mo.id}`)}><span className="list-row-copy"><b>{mo.code} · MTO ishlab chiqarish</b><small>{num(mo.completed)}/{num(mo.quantity)} · due {mo.due} · {mo.progress}%</small></span><StatusBadge>{mo.status}</StatusBadge></button>:<p className="soft-meta">Make-to-stock: tayyor mahsulot ombordan rezerv qilinadi.</p>}
-      {shipments.length?<div className="stack-list">{shipments.map(m=><div className="list-row" key={m.id}><span className="list-row-copy"><b>{productName(s,m.itemId)} · {num(-m.qty)}</b><small>{m.date} · {warehouseName(s,m.warehouseId)}{m.lot?` · ${m.lot}`:''}</small></span>{m.lot&&<button type="button" className="ghost-btn" onClick={()=>navigate(`/reports?view=traceability&q=${encodeURIComponent(m.lot!.split('…')[0])}`)}>Trace</button>}</div>)}</div>:open?<Empty compact title="Hali jo‘natilmagan"/>:null}
+      {shipments.length?<div className="stack-list">{shipments.map(m=><div className="list-row" key={m.id}><span className="list-row-copy"><b>{productName(s,m.itemId)} · {num(-m.qty)}</b><small>{m.date} · {warehouseName(s,m.warehouseId)}{m.lot?` · ${serialTracked(s,m.itemId)?'SN':'LOT'} ${m.lot}`:''}</small></span>{m.lot&&<button type="button" className="ghost-btn" onClick={()=>navigate(`/reports?view=traceability&q=${encodeURIComponent(m.lot!.split('…')[0])}`)}>Trace</button>}</div>)}</div>:open?<Empty compact title="Hali jo‘natilmagan"/>:null}
     </>}
     {tab==='finance'&&<div className="form-stack">
       <OrderReceivableInfo so={so}/>
@@ -171,8 +178,9 @@ function SalesDrawerBody({so,onClose}:{so:SalesOrder;onClose:()=>void}){
     {tab==='docs'&&<AttachmentsPanel entityType="sales" entityId={so.id} canEdit={canEdit}/>}
     {tab==='history'&&<ActivityPanel sources={[so.code]}/>}
     <Confirm open={cancel} onClose={()=>setCancel(false)} onConfirm={()=>app.cancelSalesOrder(so.id)} danger title={`${so.code} bekor qilinsinmi?`} text={`Rezerv qaytariladi.${mo?` Bog‘langan ${mo.code}: qoralama bo‘lsa bekor qilinadi, aks holda ombor uchun davom etadi.`:''}`} confirmText="Buyurtmani bekor qilish"/>
-    <Confirm open={deliver} onClose={()=>setDeliver(false)} onConfirm={()=>app.deliverSalesOrder(so.id)} title="Yetkazib berish" text={`${so.items.map(i=>`${productName(s,i.productId)} × ${num(i.qty-i.delivered)}`).join(', ')} ombordan chiqim qilinadi (rezerv qilingan lotlar, keyin FEFO).`} confirmText="Yetkazildi"/>
+    {deliver&&<DeliveryModal order={so} onClose={()=>setDeliver(false)}/>}
     {ret&&<ReturnModal defaultSo={so.id} onClose={()=>setRet(false)}/>}
+    {edit&&<EditLinesModal order={so} onClose={()=>setEdit(false)}/>}
   </Drawer>
 }
 
@@ -262,35 +270,110 @@ function Delivery(){
 }
 
 function DeliveryModal({order,onClose}:{order:SalesOrder;onClose:()=>void}){
-  const app=useApp(),s=app.state
-  const [amounts,setAmounts]=useState<Record<string,string>>(()=>Object.fromEntries(order.items.map(i=>[i.productId,String(i.qty-i.delivered)])))
-  const firstAmounts=useRef(JSON.stringify(amounts))
-  useDirtyMarker(JSON.stringify(amounts)!==firstAmounts.current)
-  const errors=order.items.map(i=>{const open=i.qty-i.delivered,v=Number(amounts[i.productId]||0);return !Number.isFinite(v)||v<0||v>open?`${productName(s,i.productId)}: 0–${open}`:null}).filter(Boolean)
+  const app=useApp(),s=app.state,today=todayISO()
+  // Serial-tracked lines ship named units: only units in stock, usable, in an eligible store and held by no other order.
+  // A serial product whose stock has no unit records (opening / pre-serial stock) cannot name units: it ships as before.
+  const [units]=useState(()=>Object.fromEntries(order.items.filter(i=>serialTracked(s,i.productId)).map(i=>[i.productId,sellableSerials(s,app.currentEmployee,order,i.productId,today)] as const).filter(([,list])=>list.length)))
+  const maxShip=(i:SalesOrder['items'][number])=>{const stock=Math.max(0,Math.min(i.qty-i.delivered,(i.reserved||0)+salesAvailable(s,app.currentEmployee,i.productId,today,i.variantId)));return units[i.productId]?Math.min(stock,units[i.productId].length):stock}
+  const [amounts,setAmounts]=useState<Record<string,string>>(()=>Object.fromEntries(order.items.map(i=>[i.productId,String(maxShip(i))])))
+  const [picked,setPicked]=useState<Record<string,string[]>>(()=>Object.fromEntries(Object.entries(units).map(([pid,list])=>[pid,list.slice(0,Number(amounts[pid])||0).map(u=>u.code)])))
+  const [filter,setFilter]=useState<Record<string,string>>({})
+  const first=useRef(JSON.stringify({amounts,picked}))
+  useDirtyMarker(JSON.stringify({amounts,picked})!==first.current)
+  const errors=order.items.map(i=>{
+    const v=Number(amounts[i.productId]||0),max=maxShip(i),name=productName(s,i.productId)
+    if(!Number.isSafeInteger(v)||v<0||v>max)return `${name}: 0–${num(max)} jo‘natish mumkin`
+    if(units[i.productId]&&v>0&&(picked[i.productId]||[]).length!==v)return `${name}: ${num(v)} ta serial raqam tanlang (${(picked[i.productId]||[]).length} ta tanlangan)`
+    return null
+  }).filter(Boolean)
   const total=order.items.reduce((a,i)=>a+(Number(amounts[i.productId])||0),0)
-  const save=()=>{if(errors.length||total<=0)return;const r=app.deliverSalesOrder(order.id,Object.fromEntries(order.items.map(i=>[i.productId,Number(amounts[i.productId])||0])));if(r.ok)onClose()}
+  const toggle=(pid:string,code:string,on:boolean)=>setPicked(x=>({...x,[pid]:on?[...(x[pid]||[]),code]:(x[pid]||[]).filter(c=>c!==code)}))
+  const save=()=>{
+    if(errors.length||total<=0)return
+    const qty=Object.fromEntries(order.items.map(i=>[i.productId,Number(amounts[i.productId])||0]))
+    const serials=Object.fromEntries(Object.keys(units).filter(pid=>qty[pid]>0).map(pid=>[pid,picked[pid]||[]]))
+    const r=app.deliverSalesOrder(order.id,qty,Object.keys(serials).length?serials:undefined)
+    if(r.ok)onClose()
+  }
   return <Modal open onClose={onClose} title="Yetkazib berish" eyebrow={order.code} subtitle="Qisman yoki to‘liq yetkazish · rezerv avval ishlatiladi" size="md"
     footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Bekor qilish</button><button type="button" className="primary-glass-btn" disabled={Boolean(errors.length)||total<=0||!app.can('sales','edit')} onClick={save}><Icon name="truck" size={15}/>Yetkazishni tasdiqlash</button></>}>
-    <div className="stack-list">{order.items.map(i=>{const open=i.qty-i.delivered,available=salesAvailable(s,app.currentEmployee,i.productId,todayISO(),i.variantId);return <div className="list-row" key={i.productId}><span className="list-row-copy"><b>{productName(s,i.productId)}</b><small>Qolgan {num(open)} · rezerv {num(i.reserved||0)} · available {num(available)}</small></span><div style={{width:120}}><Input type="number" min="0" max={open} step="1" value={amounts[i.productId]||''} onChange={e=>setAmounts(x=>({...x,[i.productId]:e.target.value}))}/></div></div>})}</div>
-    {errors.length>0&&<div className="inline-note warning"><Icon name="warning"/>{errors[0]}</div>}
+    <div className="stack-list">{order.items.map(i=>{
+      const open=i.qty-i.delivered,available=salesAvailable(s,app.currentEmployee,i.productId,today,i.variantId),max=maxShip(i),list=units[i.productId],name=productName(s,i.productId)
+      const want=Number(amounts[i.productId])||0,chosen=picked[i.productId]||[],q=(filter[i.productId]||'').trim().toLowerCase()
+      return <div className="delivery-line" key={i.productId}>
+        <div className="list-row"><span className="list-row-copy"><b>{name}</b><small>Qolgan {num(open)} · rezerv {num(i.reserved||0)} · available {num(available)}{list?` · sotuvga yaroqli serial ${num(list.length)}`:''}</small></span><div className="delivery-qty"><Input type="number" min="0" max={max} step="1" aria-label={`${name} yetkazish miqdori`} value={amounts[i.productId]||''} onChange={e=>setAmounts(x=>({...x,[i.productId]:e.target.value}))}/></div></div>
+        {!list&&open>0&&serialTracked(s,i.productId)&&<div className="inline-note"><Icon name="info"/>Sotuvga yaroqli serial birlik yozuvi topilmadi — jo‘natish serialsiz (eski) qoldiqdan qilinadi va serial raqam bog‘lanmaydi.</div>}
+        {list&&open>0&&<fieldset className="serial-picker" aria-label={`${name} serial raqamlari`}>
+          <legend>Serial raqamlar · {num(chosen.length)} / {num(want)} tanlangan</legend>
+          {list.length>8&&<Input type="search" placeholder="Serial qidirish" aria-label={`${name} serial qidirish`} value={filter[i.productId]||''} onChange={e=>setFilter(x=>({...x,[i.productId]:e.target.value}))}/>}
+          <div className="serial-options">{list.filter(u=>!q||u.code.toLowerCase().includes(q)||chosen.includes(u.code)).map(u=><Checkbox key={u.code} checked={chosen.includes(u.code)} disabled={!chosen.includes(u.code)&&chosen.length>=want} onChange={on=>toggle(i.productId,u.code,on)}
+            label={u.code} description={`${warehouseName(s,u.warehouseId)}${u.location?` · ${u.location}`:''}${u.reserved?' · shu buyurtma rezervi':''}`}/>)}</div>
+        </fieldset>}
+      </div>})}</div>
+    {errors.length>0&&<div className="inline-note warning" role="alert"><Icon name="warning"/>{errors[0]}</div>}
+  </Modal>
+}
+
+/** List price of a line (product price plus its variant's difference) and the discount a typed price gives on it. */
+function listPrice(s:ReturnType<typeof useApp>['state'],productId:string,variantId?:string){const p=s.products.find(x=>x.id===productId);return (p?.salePrice||0)+(p?.variants.find(v=>v.id===variantId)?.priceDelta||0)}
+function PriceHint({list,price,cost}:{list:number;price:number;cost?:number}){
+  if(!(price>=0)||!list)return null
+  const off=list>0&&price<list-0.005?Math.round((1-price/list)*1000)/10:0
+  return <small className={cls('price-hint',cost!==undefined&&price<cost&&'negative')}>{off>0?`Chegirma ${off}% (ro‘yxat ${money(list)})`:price>list+0.005?`Ro‘yxat narxidan yuqori (${money(list)})`:'Ro‘yxat narxi'}{cost!==undefined&&price<cost?' · tannarxdan past':''}</small>
+}
+
+function EditLinesModal({order,onClose}:{order:SalesOrder;onClose:()=>void}){
+  const app=useApp(),s=app.state
+  const [rows,setRows]=useState(()=>order.items.map(i=>({productId:i.productId,qty:String(i.qty),price:String(i.price)})))
+  const first=useRef(JSON.stringify(rows))
+  useDirtyMarker(JSON.stringify(rows)!==first.current)
+  const errorOf=(i:SalesOrder['items'][number],r:{qty:string;price:string})=>{
+    const q=Number(r.qty),p=Number(r.price)
+    if(!Number.isSafeInteger(q)||q<=0)return 'Butun musbat miqdor kiriting'
+    if(q<i.delivered)return `Yetkazilgan ${num(i.delivered)} dan kam bo‘lmaydi`
+    if(r.price.trim()===''||!(p>=0))return 'Narx 0 yoki undan katta'
+    return null
+  }
+  const errors=order.items.map((i,k)=>errorOf(i,rows[k]))
+  const changed=JSON.stringify(rows)!==first.current
+  const total=order.items.reduce((a,_i,k)=>a+(Number(rows[k].qty)||0)*(Number(rows[k].price)||0),0)
+  const set=(k:number,field:'qty'|'price',v:string)=>setRows(x=>x.map((r,j)=>j===k?{...r,[field]:v}:r))
+  const save=()=>{if(errors.some(Boolean)||!changed)return;const r=app.updateSalesOrderLines(order.id,rows.map(x=>({productId:x.productId,qty:Number(x.qty),price:Number(x.price)})));if(r.ok)onClose()}
+  return <Modal open onClose={onClose} title="Buyurtmani tahrirlash" eyebrow={order.code} subtitle="Miqdor yetkazilgandan kam bo‘lmaydi · yetkazilgan qator narxi o‘zgarmaydi" size="lg"
+    footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Bekor qilish</button><span className="spacer"/><span className="soft-meta">Jami: <b>{money(total)}</b></span><button type="button" className="primary-glass-btn" disabled={!changed||errors.some(Boolean)} onClick={save}><Icon name="check" size={16}/>Saqlash</button></>}>
+    <div className="table-scroll"><table className="fit editor-table"><thead><tr><th>Mahsulot</th><th className="align-right">Yetkazilgan</th><th className="align-right">Miqdor</th><th className="align-right">Narx</th></tr></thead><tbody>{order.items.map((i,k)=>{const err=errors[k],p=s.products.find(x=>x.id===i.productId);return <tr key={i.productId} className={err?'row-danger':undefined}>
+      <td className="wide-cell"><div className="cell-main"><b>{productName(s,i.productId)}</b>{err?<small className="field-error">{err}</small>:<small>rezerv {num(i.reserved||0)}</small>}</div></td>
+      <td className="align-right">{num(i.delivered)}</td>
+      <td className="align-right"><input className="ui-input cell-input" type="number" min={Math.max(1,i.delivered)} step="1" aria-label={`${productName(s,i.productId)} miqdori`} value={rows[k].qty} onChange={e=>set(k,'qty',e.target.value)}/></td>
+      <td className="align-right"><div className="cell-money"><MoneyInput min="0" aria-label={`${productName(s,i.productId)} narxi`} disabled={i.delivered>0} title={i.delivered>0?'Yetkazilgan qator narxi hisob-fakturada qayd etilgan':undefined} value={rows[k].price} onValue={v=>set(k,'price',v)}/></div><PriceHint list={listPrice(s,i.productId,i.variantId)} price={Number(rows[k].price)} cost={p?.standardCost||undefined}/></td>
+    </tr>})}</tbody></table></div>
+    <div className="inline-note"><Icon name="info"/>Miqdor oshsa bo‘sh qoldiqdan qo‘shimcha rezerv qilinadi; kamaysa ortiqcha rezerv bo‘shatiladi.</div>
   </Modal>
 }
 
 function ReturnModal({defaultSo,onClose}:{defaultSo?:string;onClose:()=>void}){
   const app=useApp(),s=app.state
-  const delivered=s.salesOrders.filter(o=>o.items.some(i=>i.delivered>0))
-  const form=useForm({salesOrderId:defaultSo||delivered[0]?.id||'',productId:'',qty:'1',reason:''},v=>{const so=s.salesOrders.find(o=>o.id===v.salesOrderId);const line=so?.items.find(i=>i.productId===(v.productId||so?.items[0]?.productId));const returned=s.returns.filter(r=>r.salesOrderId===v.salesOrderId&&r.productId===line?.productId).reduce((a,r)=>a+r.qty,0);const max=(line?.delivered||0)-returned;return {salesOrderId:so?undefined:'Buyurtma tanlang',qty:!(Number(v.qty)>0)?'Miqdor kiriting':Number(v.qty)>max?`Maksimum ${max}`:undefined,reason:required(v.reason,'Sabab')}})
+  // Only what was really shipped and not yet taken back can be returned: orders and lines with a returnable quantity.
+  const returnedQty=(soId:string,productId:string)=>s.returns.filter(r=>r.salesOrderId===soId&&r.productId===productId).reduce((a,r)=>a+r.qty,0)
+  const returnableOf=(o:SalesOrder,i:SalesOrder['items'][number])=>Math.max(0,i.delivered-returnedQty(o.id,i.productId))
+  const delivered=s.salesOrders.filter(o=>o.items.some(i=>returnableOf(o,i)>0)||o.id===defaultSo)
+  const firstLine=(o?:SalesOrder)=>o?.items.find(i=>returnableOf(o,i)>0)?.productId||''
+  const form=useForm({salesOrderId:defaultSo||delivered[0]?.id||'',productId:'',qty:'1',reason:''},v=>{const so=s.salesOrders.find(o=>o.id===v.salesOrderId);const line=so?.items.find(i=>i.productId===(v.productId||firstLine(so)));const max=so&&line?returnableOf(so,line):0;return {salesOrderId:so?undefined:'Buyurtma tanlang',qty:!(Number(v.qty)>0)||Number(v.qty)%1!==0?'Butun musbat miqdor kiriting':Number(v.qty)>max?`Maksimum ${max}`:undefined,reason:required(v.reason,'Sabab')}})
   const so=s.salesOrders.find(o=>o.id===form.values.salesOrderId)
-  const productId=form.values.productId||so?.items[0]?.productId||''
+  const productId=form.values.productId||firstLine(so)
   // Serial-tracked units come back by their numbers: the units this order shipped and no return took back (audit #25).
   const units=so&&serialTracked(s,productId)?returnSources(s,so,productId,0).units:[]
-  const [serials,setSerials]=useState<string[]>([])
+  const [picked,setPicked]=useState<{key:string;codes:string[]}>({key:'',codes:[]})
+  // A selection belongs to one order line: switching order or product starts it over.
+  const lineKey=`${form.values.salesOrderId}|${productId}`
+  const serials=picked.key===lineKey?picked.codes.filter(c=>units.includes(c)):[]
+  const setSerials=(f:(x:string[])=>string[])=>setPicked({key:lineKey,codes:f(serials)})
   const serialError=units.length&&serials.length!==Number(form.values.qty)?`${form.values.qty} ta serial tanlang (${serials.length})`:undefined
   return <Modal open onClose={onClose} title="Mijoz qaytarishi" subtitle="Inspection → omborga / rework / scrap" size="md"
-    footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Bekor qilish</button><button type="button" className="primary-glass-btn" disabled={Boolean(serialError)} onClick={()=>form.submit(v=>{const r=app.createReturn({salesOrderId:v.salesOrderId,productId,qty:Number(v.qty),reason:v.reason,...(units.length?{serials}:{})});if(r.ok)onClose();return r.ok})}>Inspectionga yuborish</button></>}>
+    footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Bekor qilish</button><button type="button" className="primary-glass-btn" disabled={Boolean(serialError)||!productId} onClick={()=>form.submit(v=>{const r=app.createReturn({salesOrderId:v.salesOrderId,productId,qty:Number(v.qty),reason:v.reason,...(units.length?{serials}:{})});if(r.ok)onClose();return r.ok})}>Inspectionga yuborish</button></>}>
     {delivered.length?<div className="form-grid">
       <Field label="Sales order" required error={form.error('salesOrderId')}><Select value={form.values.salesOrderId} onChange={v=>{form.set('salesOrderId',v);form.set('productId','')}}>{delivered.map(o=><option key={o.id} value={o.id}>{o.code} · {customerName(s,o.customerId)}</option>)}</Select></Field>
-      <Field label="Mahsulot"><Select value={productId} onChange={v=>form.set('productId',v)}>{(so?.items||[]).filter(i=>i.delivered>0).map(i=><option key={i.productId} value={i.productId}>{productName(s,i.productId)} · {num(i.delivered)} yetkazilgan</option>)}</Select></Field>
+      <Field label="Mahsulot">{so&&so.items.some(i=>returnableOf(so,i)>0)?<Select value={productId} onChange={v=>form.set('productId',v)}>{so.items.filter(i=>returnableOf(so,i)>0).map(i=><option key={i.productId} value={i.productId}>{productName(s,i.productId)} · {num(returnableOf(so,i))} qaytarish mumkin</option>)}</Select>:<Input readOnly value="Qaytariladigan miqdor qolmagan"/>}</Field>
       <Field label="Miqdor" required error={form.error('qty')}><Input type="number" min="1" {...form.input('qty')}/></Field>
       {units.length>0&&<div className="field span-2"><label>Qaytarilayotgan serial raqamlar {serialError?<small className="field-error">{serialError}</small>:null}</label>
         <div className="badge-row">{units.map(code=><Checkbox key={code} label={code} checked={serials.includes(code)} onChange={on=>setSerials(x=>on?[...x,code]:x.filter(c=>c!==code))}/>)}</div></div>}

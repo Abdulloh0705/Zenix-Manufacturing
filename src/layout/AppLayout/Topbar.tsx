@@ -14,6 +14,7 @@ import {ChangePasswordForm,RecoveryKeyForm} from '../../features/auth/pages/Auth
 import {buildSearchIndex,searchRecords} from './searchIndex'
 import type {SearchResult} from './searchIndex'
 import {fallbackPath,isReadBy,unreadCount,visibleNotifications} from './notificationsView'
+import {HelpPanel} from '../../features/help/HelpExperience'
 
 type Result=SearchResult
 
@@ -187,6 +188,7 @@ function Profile(){
         {app.can('settings')&&<button type="button" className="option-row" onClick={()=>go('/settings?view=system')}><Icon name="database" size={16}/><span><b>Tizim va backup</b></span></button>}
       </div>
       <div className="menu-section links">
+        <button type="button" className="option-row" onClick={()=>go('/help')}><Icon name="info" size={16}/><span><b>Yordam markazi</b></span></button>
         <button type="button" className="option-row" onClick={()=>{setPassword(true);setOpen(false)}}><Icon name="key" size={16}/><span><b>Parolni o‘zgartirish</b></span></button>
         {isOwnerRole(app.currentRole)&&<button type="button" className="option-row" onClick={()=>{setRecoveryKey(true);setOpen(false)}}><Icon name="shield" size={16}/><span><b>Tiklash kaliti</b></span></button>}
         <button type="button" className="option-row danger" onClick={()=>{setOpen(false);app.logout()}}><Icon name="logout" size={16}/><span><b>Chiqish</b></span></button>
@@ -202,6 +204,7 @@ export function Topbar(){
   const navigate=useNavigate()
   const contextRef=useRef<HTMLButtonElement>(null)
   const [contextOpen,setContextOpen]=useState(false),[paletteOpen,setPaletteOpen]=useState(false)
+  const [helpOpen,setHelpOpen]=useState(false)
   const compactSearch=useMediaQuery('(max-width: 760px)')
   const s=app.state
   const branch=s.branches.find(x=>x.id===s.settings.defaultBranchId),warehouse=s.warehouses.find(x=>x.id===s.settings.defaultWarehouseId),line=s.productionLines.find(x=>x.id===s.settings.defaultLineId)
@@ -226,9 +229,11 @@ export function Topbar(){
     <Popover open={contextOpen} onClose={()=>setContextOpen(false)} anchorRef={contextRef} placement="bottom-end" minWidth={290} className="context-popover" ariaLabel="Ish konteksti"><ContextMenu/></Popover>
     <div className="topbar-tools">
       <DisplayControls/>
+      <button type="button" className={cls('utility-btn icon-only',helpOpen&&'open')} onClick={()=>setHelpOpen(true)} aria-label="Yordam" aria-haspopup="dialog" aria-expanded={helpOpen} title="Shu sahifa bo‘yicha yordam"><Icon name="info" size={16}/></button>
       <Notifications/>
       <Profile/>
     </div>
+    <HelpPanel open={helpOpen} onClose={()=>setHelpOpen(false)}/>
     <Modal open={paletteOpen} onClose={()=>setPaletteOpen(false)} title="Qidirish" size="lg"><GlobalSearch variant="palette" autoFocus onDone={()=>setPaletteOpen(false)}/></Modal>
   </header>
 }

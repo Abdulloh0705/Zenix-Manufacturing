@@ -136,7 +136,7 @@ test('Serial 4: returns name the units; a unit not shipped or already returned i
 test('Serial 5: a transfer moves the unit atomically and keeps its genealogy',()=>{
   let {s,mo}=makeSerials(p2Parts(clean()),2)
   refused(s,A.transferStock(s,ctx(s),'p2','w3','w4',1,[{lot:'SN-VK210-000009',qty:1}]),/SN-VK210-000009/)
-  s=ok(A.transferStock(s,ctx(s),'p2','w3','w4',1,[{lot:'SN-VK210-000002',qty:1}]))
+  s=ok(A.transferStock(s,ctx(s),'p2','w3','w4',1,[{lot:'SN-VK210-000002',qty:1}],{reason:'Seriyali mahsulotni boshqa omborga ko‘chirish'}))
   const st=SN.serialStatus(s,'SN-VK210-000002')
   assert.deepEqual([st.status,st.warehouseId,st.records.length],['available','w4',2])
   assert.equal(st.record.sourceCode,mo.code,'the copy keeps the production origin')

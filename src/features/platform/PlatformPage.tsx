@@ -13,7 +13,7 @@ import {Card,Empty,Icon} from '../../shared/ui'
 import {PlatformContext} from './platformShared'
 import type {OwnerInfo,PlatformCtx} from './platformShared'
 import {BillingSection,CompaniesSection,OverviewSection,SubscriptionsSection} from './sections/CustomerSections'
-import {FeaturesSection,HealthSection,SecuritySection,SettingsSection,SupportSection} from './sections/OperationsSections'
+import {AuditSection,FeaturesSection,HealthSection,SecuritySection,SettingsSection,SupportSection} from './sections/OperationsSections'
 
 const SAAS_KEY='zenix-saas-v1',AUTH_KEY='zenix-auth-v1',SESSION_KEY='zenix-platform-session-v1'
 const PUBLIC_KEY=(import.meta as ImportMeta&{env?:Record<string,string|undefined>}).env?.VITE_PLATFORM_PUBLIC_KEY||''
@@ -30,9 +30,10 @@ export const PLATFORM_SECTIONS:SectionDef[]=[
   {path:'billing',label:'Billing',icon:'wallet',group:'Mijozlar',render:()=><BillingSection/>},
   {path:'support',label:'Support markazi',icon:'bell',group:'Operatsiyalar',render:()=><SupportSection/>},
   {path:'features',label:'Funksiyalar boshqaruvi',icon:'target',group:'Operatsiyalar',render:()=><FeaturesSection/>},
-  {path:'security',label:'Xavfsizlik va audit',icon:'shield',group:'Boshqaruv',render:()=><SecuritySection/>},
+  {path:'audit',label:'Audit jurnali',icon:'history',group:'Boshqaruv',render:()=><AuditSection/>},
+  {path:'security',label:'Xavfsizlik',icon:'shield',group:'Boshqaruv',render:()=><SecuritySection/>},
   {path:'settings',label:'Platforma sozlamalari',icon:'settings',group:'Boshqaruv',render:()=><SettingsSection/>},
-  {path:'health',label:'Tizim holati',icon:'database',group:'Boshqaruv',render:()=><HealthSection/>},
+  {path:'health',label:'Monitoring',icon:'database',group:'Boshqaruv',render:()=><HealthSection/>},
 ]
 
 function readSaaS():{store:SaaS.SaaSStore;state:PlatformCtx['saasState']}{
@@ -135,7 +136,7 @@ export default function PlatformPage({publicKey=PUBLIC_KEY}:{publicKey?:string})
         <p>Kompaniya akkauntlari (Biznes egasi, menejer, xodim) bu ish maydoniga kirmaydi. Qisqa muddatli imzolangan chiptani administrator mahalliy provisioning skriptidan oladi.</p>
         {!publicKey?<p className="inline-note warning">VITE_PLATFORM_PUBLIC_KEY sozlanmagan. Demo platforma kirishi hozir o‘chiq.</p>:<form className="form-stack" onSubmit={e=>{e.preventDefault();void signIn()}}>
           <label>Operator ID<input className="ui-input" value={actor} onChange={e=>setActor(e.target.value)} autoComplete="off" spellCheck={false}/></label>
-          <label>Imzolangan chipta<input className="ui-input" value={ticket} onChange={e=>setTicket(e.target.value)} autoComplete="off" spellCheck={false}/></label>
+          <label>Imzolangan chipta<input className="ui-input" type="password" value={ticket} onChange={e=>setTicket(e.target.value)} autoComplete="off" spellCheck={false}/></label>
           <button type="submit" className="primary-glass-btn">Platformaga kirish</button>
         </form>}
       </>}

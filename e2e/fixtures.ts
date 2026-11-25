@@ -59,3 +59,40 @@ export function watchErrors(page:Page){
 
 /** Finishes CSS animations (dialogs fade in) so clicks land on settled elements. */
 export const settle=(page:Page)=>page.evaluate(()=>document.getAnimations().filter(a=>Number.isFinite(Number(a.effect?.getComputedTiming().endTime))).forEach(a=>a.finish()))
+
+/** Three serial units of p2 (SN-E2E-1…3) in the finished-goods store and an MTS order for 2, which pins units 1 and 2. */
+export function serialSalesOrder(){
+  let s=adminState()
+  const at='2026-11-01 08:00'
+  const units=[1,2,3].map(i=>({id:`lot-sn-e2e-${i}`,code:`SN-E2E-${i}`,kind:'serial' as const,serialFrom:`SN-E2E-${i}`,serialTo:`SN-E2E-${i}`,itemId:'p2',itemType:'finished' as const,qty:1,originalQty:1,warehouseId:'w3',status:'available' as const,sourceType:'production' as const,sourceId:'mo-e2e',sourceCode:'MO-E2E',createdAt:`${at.slice(0,9)}${i} 08:00`,consumedBy:[] as string[]}))
+  s={...s,lots:[...s.lots,...units] as ManufacturingState['lots'],stockBalances:[...s.stockBalances.filter(b=>!(b.itemId==='p2'&&b.warehouseId==='w3')),{id:'st-p2-w3-e2e',warehouseId:'w3',itemId:'p2',itemType:'finished',onHand:3,reserved:0,incoming:0,quarantine:0,unit:'dona'}] as ManufacturingState['stockBalances']}
+  const so=A.createSalesOrder(s,ctx(s),{customerId:'cu1',mode:'Make-to-stock',lines:[{productId:'p2',qty:2,price:180000}]});s=ok(so)
+  return {state:s,soId:so.result.id!,soCode:s.salesOrders.find(o=>o.id===so.result.id)!.code}
+}
+
+/** 50 kg steel sheet (rm2) and 100 bolts (rm4) found in the raw store by adjustment, each as its own LOT. */
+export function stockedRawStore(){
+  let s=adminState()
+  s=ok(A.adjustStock(s,ctx(s),'rm2','w1',50,'E2E opening'))
+  s=ok(A.adjustStock(s,ctx(s),'rm4','w1',100,'E2E opening'))
+  return s
+}
+
+/** The confirmed steel PO with 60 of its 100 kg received (debt accrued for the received part). */
+export function partlyReceivedPurchase(){
+  const {state,poId,poCode}=confirmedPurchase()
+  return {state:ok(A.receivePurchase(state,ctx(state),poId,'rm2',60)),poId,poCode}
+}
+
+/** An open NCR and a planned corrective maintenance work (from an approved request) with 50 bolts in the raw store. */
+export function qualityMaintenanceState(){
+  let s=adminState()
+  // An NCR names a real document (SEC-02): a draft MO stands in for the inspected order.
+  const mo=A.createProductionOrder(s,ctx(s),{productId:'p3',quantity:5});s=ok(mo)
+  s=ok(A.createQualityAlert(s,ctx(s),{title:'E2E teshik katta',sourceId:mo.result.id!,severity:'Yuqori',reason:'Final QC',ownerId:'em1'}))
+  const alertId=s.qualityAlerts[0].id
+  s=ok(A.adjustStock(s,ctx(s),'rm4','w1',50,'E2E opening'))
+  s={...s,maintenanceRequests:[{id:'mr-e2e',code:'MR-E2E',equipmentId:'eq1',type:'Corrective',priority:'Yuqori',status:'Yangi',requestedBy:'em1',scheduled:new Date().toISOString().slice(0,10),reason:'Moy oqmoqda',downtimeHours:2},...s.maintenanceRequests]}
+  const approved=A.approveMaintenanceRequest(s,ctx(s),'mr-e2e');s=ok(approved)
+  return {state:s,alertId,orderId:approved.result.id!}
+}

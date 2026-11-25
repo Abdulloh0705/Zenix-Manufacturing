@@ -5,7 +5,9 @@ import {Card,Confirm,Empty,Field,FilterSelect,Icon,InfoGrid,Input,KPI,Modal,Mone
 import type {Expense} from '../../../types'
 import {orderCosting} from '../../../domain/manufacturingEngine'
 import {customerBalance} from '../../../domain/receivables'
-import {addDays,formatMinutes,periodStart,todayISO} from '../../../utils/dates'
+import {supplierBalance} from '../../../domain/payables'
+import {expenseOrigin} from '../../../domain/actions'
+import {formatMinutes,periodStart,todayISO} from '../../../utils/dates'
 import {cls,compactMoney,money,num} from '../../../utils/format'
 import {productName} from '../../common/lookups'
 import {BarList,StackedBar} from '../../common/charts'
@@ -29,14 +31,15 @@ function Overview(){
   const expenses=s.expenses.filter(e=>e.date>=since)
   const total=expenses.reduce((a,e)=>a+e.amount,0)
   const receivable=s.customers.reduce((a,c)=>a+Math.max(0,customerBalance(s,c.id)),0)
+  const payable=s.suppliers.reduce((a,x)=>a+Math.max(0,supplierBalance(s,x.id)),0)
   const done=s.productionOrders.filter(o=>o.status==='Yakunlangan'&&(o.completedAt||'').slice(0,10)>=since).map(o=>({o,c:orderCosting(s,o)}))
   const actual=done.reduce((a,x)=>a+x.c.actual.total,0),planned=done.reduce((a,x)=>a+x.c.planned.total,0)
-  const sum=(side:'planned'|'actual',k:'material'|'labor'|'machine'|'overhead')=>done.reduce((a,x)=>a+x.c[side][k],0)
+  const sum=(side:'planned'|'actual',k:'material'|'labor'|'machine'|'energy'|'overhead')=>done.reduce((a,x)=>a+x.c[side][k],0)
   const waste=done.reduce((a,x)=>a+x.c.waste,0)
-  const elements:Array<[string,number|null,number]>=[['Material',sum('planned','material'),sum('actual','material')],['Mehnat',sum('planned','labor'),sum('actual','labor')],['Uskuna',sum('planned','machine'),sum('actual','machine')],['Overhead',sum('planned','overhead'),sum('actual','overhead')]]
+  const elements:Array<[string,number|null,number]>=[['Material',sum('planned','material'),sum('actual','material')],['Mehnat',sum('planned','labor'),sum('actual','labor')],['Uskuna',sum('planned','machine'),sum('actual','machine')],['Energiya',sum('planned','energy'),sum('actual','energy')],['Overhead',sum('planned','overhead'),sum('actual','overhead')]]
   const pct=(a:number,p:number)=>p?Math.round((a-p)/p*100):0
   return <div className="page-stack">
-    <PageHeader title="Xarajatlar va tannarx" subtitle="Tannarx = material + mehnat + uskuna + overhead · 30 kun"/>
+    <PageHeader title="Xarajatlar va tannarx" subtitle="Tannarx = material + mehnat + uskuna + energiya + overhead · 30 kun"/>
     <div className="kpi-grid">
       <KPI label="Ishlab chiqarish tannarxi" value={compactMoney(actual)} sub={`${done.length} yakunlangan MO`} tone="mfg" icon={<Icon name="factory"/>} onClick={()=>navigate('/costs?view=costing&status=closed&range=30')}/>
       <KPI label="Amalda vs standart" value={`${actual-planned>0?'+':''}${planned?pct(actual,planned):0}%`} sub={`${actual-planned>0?'+':''}${compactMoney(actual-planned)}`} deltaTone={actual>planned?'down':'up'} tone={actual>planned?'pink':'mint'} icon={<Icon name="chart"/>} onClick={()=>navigate('/reports?view=costs&days=30')}/>
@@ -44,6 +47,8 @@ function Overview(){
       <KPI label="Davr xarajatlari" value={compactMoney(total)} sub={`${expenses.length} yozuv`} tone="purple" icon={<Icon name="wallet"/>} onClick={()=>navigate('/costs?view=expenses')}/>
       {/* Receivables: the same ledger balance as the customer card and Sales (audit #19). */}
       <KPI label="Debitorlik qarzi" value={compactMoney(receivable)} sub="mijozlar · ledger" tone="orange" icon={<Icon name="users"/>} onClick={app.can('sales','view')?()=>navigate('/sales?view=receivables'):undefined}/>
+      {/* Payables: the supplier ledger balance shown in Purchases (receipts − payments − returns ± approved adjustments). */}
+      <KPI label="Kreditorlik qarzi" value={compactMoney(payable)} sub="supplierlar · ledger" tone="pink" icon={<Icon name="truck"/>} onClick={app.can('purchases','view')?()=>navigate('/purchases?view=suppliers'):undefined}/>
     </div>
     <div className="split-even">
       <Card title="Tannarx tarkibi" subtitle="standart vs amalda · yakunlangan MO">
@@ -88,21 +93,22 @@ function Expenses(){
   const app=useApp(),s=app.state
   const [q,setQ]=useSearchParamState('q'),[type,setType]=useSearchParamState('type'),[range,setRange]=useSearchParamState('range','30')
   const [edit,setEdit]=useState<Expense|null|'new'>(null),[remove,setRemove]=useState<Expense|null>(null)
-  const since=addDays(todayISO(),-Number(range||30))
+  // Same window as the overview KPI: N calendar days including today.
+  const since=periodStart(Number(range)||30)
   const rows=s.expenses.filter(e=>(!type||e.type===type)&&(range==='all'||e.date>=since))
   const sourceName=(id:string)=>s.productionLines.find(l=>l.id===id)?.name||s.equipment.find(e=>e.id===id)?.name||s.branches.find(b=>b.id===id)?.name||s.customers.find(c=>c.id===id)?.name||s.subcontractOrders.find(o=>o.id===id)?.code||(id==='manual'?'Umumiy':id)
   return <div className="page-stack">
     <PageHeader title="Xarajatlar" subtitle="Cost center bo‘yicha · maintenance va subcontract avtomatik" actions={<button type="button" className="primary-glass-btn" disabled={!app.can('costs','create')} onClick={()=>setEdit('new')}><Icon name="plus"/>Xarajat qo‘shish</button>}/>
-    <ResourceTable rows={rows} query={q} onQuery={setQ} placeholder="Izoh, manba..." onRow={e=>app.can('costs','edit')&&setEdit(e)} exportName="expenses" resetKey={`${type}|${range}`} initialSort={{key:'date',dir:-1}}
+    <ResourceTable rows={rows} query={q} onQuery={setQ} placeholder="Izoh, manba..." onRow={e=>app.can('costs','edit')&&!expenseOrigin(s,e)&&setEdit(e)} exportName="expenses" resetKey={`${type}|${range}`} initialSort={{key:'date',dir:-1}}
       filtersActive={Boolean(type)||range!=='30'} onResetFilters={()=>{setType('');setRange('30')}}
       filters={<><FilterSelect label="Davr" value={range} onChange={setRange} defaultValue="30" options={[{value:'7',label:'7 kun'},{value:'30',label:'30 kun'},{value:'90',label:'90 kun'},{value:'all',label:'Butun davr'}]}/><FilterSelect label="Tur" value={type} onChange={setType} options={TYPES.map(t=>({value:t,label:TYPE_LABEL[t]}))}/></>}
       columns={[
         {key:'date',label:'Sana',value:e=>e.date},
         {key:'type',label:'Tur',value:e=>TYPE_LABEL[e.type],render:e=><StatusBadge tone="info">{TYPE_LABEL[e.type]}</StatusBadge>},
         {key:'source',label:'Manba',value:e=>sourceName(e.sourceId)},
-        {key:'note',label:'Izoh',value:e=>e.note},
+        {key:'note',label:'Izoh',value:e=>e.note,render:e=>{const origin=expenseOrigin(s,e);return <div className="cell-main"><span>{e.note}</span>{origin&&<small className="cell-sub" title="Hujjatdan avtomatik yozilgan — tahrirlanmaydi va o‘chirilmaydi">avtomatik · {origin}</small>}</div>}},
         {key:'amount',label:'Summa',align:'right',value:e=>e.amount,render:e=><b>{money(e.amount)}</b>},
-        {key:'del',label:'',sortable:false,searchable:false,render:e=>app.can('costs','delete')?<button type="button" className="icon-ghost danger" aria-label="Xarajatni o‘chirish" onClick={()=>setRemove(e)}><Icon name="trash" size={15}/></button>:null},
+        {key:'del',label:'',sortable:false,searchable:false,render:e=>app.can('costs','delete')&&!expenseOrigin(s,e)?<button type="button" className="icon-ghost danger" aria-label="Xarajatni o‘chirish" onClick={()=>setRemove(e)}><Icon name="trash" size={15}/></button>:null},
       ]}/>
     <p className="soft-meta">Jami: <b>{money(rows.reduce((a,e)=>a+e.amount,0))}</b></p>
     {edit&&<ExpenseModal expense={edit==='new'?undefined:edit} onClose={()=>setEdit(null)}/>}
@@ -142,7 +148,7 @@ function Costing(){
 
 function Labor(){
   const s=useApp().state,navigate=useNavigate()
-  const since=addDays(todayISO(),-30)
+  const since=periodStart(30)
   const logs=s.timeLogs.filter(t=>t.start.slice(0,10)>=since)
   const byEmployee=s.employees.map(e=>{const minutes=logs.filter(t=>t.employeeId===e.id).reduce((a,t)=>a+t.minutes,0);return {e,minutes,cost:minutes/60*e.hourlyCost}}).filter(x=>x.minutes>0).sort((a,b)=>b.cost-a.cost)
   const expenses=s.expenses.filter(e=>e.type==='Labor'&&e.date>=since)

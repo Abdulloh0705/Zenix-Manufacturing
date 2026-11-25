@@ -7,7 +7,7 @@ import {AppProvider,useApp} from '../../src/app/providers/AppProvider/AppContext
 import App from '../../src/App'
 import PlatformPage,{PLATFORM_SECTIONS,platformTicketLive,verifyPlatformAccess} from '../../src/features/platform/PlatformPage'
 import {createSeedState} from '../../src/data/mockData'
-import {byText,click,cleanup,flush,render,type} from './helpers'
+import {byText,click,cleanup,flush,key,render,type} from './helpers'
 
 afterEach(async()=>{await cleanup();sessionStorage.clear()})
 
@@ -123,8 +123,8 @@ test('a valid platform session grants no tenant workspace or manufacturing permi
 test('navigation reaches every platform section and unknown paths show a not-found state',async()=>{
   seedMetadata()
   await openPlatform()
-  assert.equal(PLATFORM_SECTIONS.length,9)
-  assert.equal(document.querySelectorAll('.pf-nav-item').length,9)
+  assert.equal(PLATFORM_SECTIONS.length,10)
+  assert.equal(document.querySelectorAll('.pf-nav-item').length,10)
   assert.ok(document.querySelector('nav[aria-label="Platforma bo‘limlari"]'))
   assert.ok(document.querySelector('button.pf-menu[aria-controls="pf-nav"][aria-expanded="false"]'),'mobile menu toggle is labelled')
   for(const s of PLATFORM_SECTIONS){
@@ -168,6 +168,8 @@ test('companies: search, filter, owner privacy, suspend with reason, duplicate p
   assert.equal(text().includes('SECRET-HASH')||text().includes('SECRET-SALT'),false)
   await click(byText('Kompaniyani to‘xtatish'))
   assert.equal(byText('To‘xtatish')!.hasAttribute('disabled'),true,'reason required')
+  await type(document.querySelector('.entity-modal textarea'),'password: supersecret')
+  assert.equal(byText('To‘xtatish')!.hasAttribute('disabled'),true,'secret-like reason cannot reach audit')
   await type(document.querySelector('.entity-modal textarea'),'Policy review')
   await click(byText('To‘xtatish'))
   await flush(80)
@@ -187,6 +189,8 @@ test('subscription override records grace with a policy end date and audit; tria
   const modal=document.querySelector('.entity-modal')!
   assert.equal([...modal.querySelectorAll('option')].some(o=>(o as HTMLOptionElement).value==='trial'),false)
   await choose(field('Obuna holati'),'grace')
+  await type(modal.querySelector('textarea'),'password: supersecret')
+  assert.equal(byText('Davom etish')!.hasAttribute('disabled'),true,'unsafe override reason is blocked')
   await type(modal.querySelector('textarea'),'Payment promised by phone')
   await click(byText('Davom etish'));await click(byText('Override yozish'));await flush(80)
   const sub=saasOf().subscriptions.at(-1)
@@ -218,6 +222,9 @@ test('settings validate input, require a reason for sensitive changes and record
   await type(field('Sinov muddati (kun)'),'30')
   await click(byText('Saqlash'))
   assert.equal(document.querySelector('.entity-modal'),null,'sensitive change needs a reason first')
+  await type(field('O‘zgarish sababi'),'password: supersecret')
+  await click(byText('Saqlash'))
+  assert.equal(document.querySelector('.entity-modal'),null,'unsafe settings reason is blocked')
   await type(field('O‘zgarish sababi'),'Pilot customers')
   await click(byText('Saqlash'))
   assert.ok(document.querySelector('.entity-modal')?.textContent?.includes('14 → 30'))
@@ -285,4 +292,150 @@ test('closed registration policy blocks a new company signup without touching ex
   assert.equal(result!.ok,false)
   assert.match(result!.message,/yopilgan/)
   assert.equal(localStorage.getItem('zenix-saas-v1'),before)
+})
+
+// ---------------------------------------------------------------- Super Admin completion
+const storePlatform=(patch:Record<string,unknown>)=>localStorage.setItem('zenix-platform-v1',JSON.stringify({version:1,settings:{brandName:'ZENIX',supportEmail:'',supportPhone:'',defaultTrialDays:14,graceDays:7,registration:'open'},audit:[],tickets:[],...patch}))
+const modalSave=()=>byText('Saqlash','.entity-modal button')!
+
+test('companies: create explains the owner registration path; edit renames with validation, reason and linked audit',async()=>{
+  seedMetadata()
+  const erp=localStorage.getItem('zenix-manufacturing-v3-state')
+  await openPlatform('/platform/companies')
+  await click(byText('Yangi kompaniya'))
+  const modal=document.querySelector('.entity-modal')!
+  assert.ok(modal.textContent?.includes('/register'));assert.ok(modal.textContent?.includes('Backend kerak'),'invite is marked as backend work')
+  assert.ok(modal.querySelector('a[href="/register"]'),'registration link while registration is open')
+  await click(byText('Yopish'))
+  assert.equal(document.querySelector('.entity-modal'),null)
+  await click([...document.querySelectorAll('.pf-link')].find(b=>b.textContent?.includes('Factory A'))!)
+  await click(byText('Tahrirlash'))
+  const name=field('Platformadagi nomi')!,reason=()=>document.querySelector('.entity-modal textarea')
+  await type(name,'factory b');await type(reason(),'Legal rename')
+  assert.ok(text().includes('Bu nom boshqa kompaniyada ishlatilgan'));assert.equal(modalSave().hasAttribute('disabled'),true)
+  await type(name,'Factory Alpha');await type(reason(),'token=abc123456')
+  assert.equal(modalSave().hasAttribute('disabled'),true,'secret-like reason cannot reach audit')
+  await type(reason(),'Legal rename')
+  await click(modalSave());await flush(80)
+  assert.equal(saasOf().tenants[0].name,'Factory Alpha')
+  const a=platformOf().audit[0]
+  assert.equal(a.action,'tenant.rename');assert.equal(a.detail,'Factory A → Factory Alpha');assert.equal(a.saasEventId,saasOf().events[0].id)
+  assert.equal(localStorage.getItem('zenix-manufacturing-v3-state'),erp,'tenant ERP data untouched')
+  assert.ok(document.querySelector('.pf-table')!.textContent!.includes('Factory Alpha'),'company list reflects the change')
+  assert.ok(text().includes('Kompaniya nomi o‘zgardi'),'drawer history shows the audit entry')
+})
+
+test('companies table paginates and filters return to the first page',async()=>{
+  seedMetadata()
+  const meta=saasOf(),at=new Date().toISOString()
+  for(let i=0;i<11;i++){const id=`tenant-${crypto.randomUUID()}`;meta.tenants.push({id,name:`Plant ${String(i).padStart(2,'0')}`,status:'active',ownerAccountId:`o-${i}`,createdAt:at})}
+  localStorage.setItem('zenix-saas-v1',JSON.stringify(meta))
+  await openPlatform('/platform/companies')
+  assert.equal(tableRows(0).length,10);assert.ok(text().includes('1–10 / 13'))
+  await click(document.querySelector('button[aria-label="Keyingi sahifa"]'))
+  assert.equal(tableRows(0).length,3)
+  await type(document.querySelector('input[aria-label="Kompaniyani qidirish"]'),'plant 1')
+  assert.equal(tableRows(0).length,1,'filter result shown from page 1');assert.equal(document.querySelector('.pf-pager'),null)
+})
+
+test('audit journal: redacts planted secrets, filters, validates dates, paginates and opens a detail drawer',async()=>{
+  seedMetadata()
+  const audit=Array.from({length:30},(_,i)=>({id:`pa-${i}`,at:new Date(Date.now()-i*60000).toISOString(),actor:i%2?'op.two':'op.one',action:'ticket.update',targetType:'ticket',targetId:`t-${i}`,outcome:'success',detail:`entry ${i}`}))
+  audit[0]={...audit[0],reason:'password: hunter22',outcome:'denied'} as typeof audit[0]
+  storePlatform({audit})
+  await openPlatform('/platform/audit')
+  assert.equal(heading(),'Audit jurnali')
+  assert.equal(text().includes('hunter22'),false,'planted secret is never rendered');assert.ok(text().includes('[maxfiy qiymat yashirildi]'))
+  assert.equal(tableRows(0).length,25);assert.ok(text().includes('1–25 / 30'))
+  await click(document.querySelector('button[aria-label="Keyingi sahifa"]'))
+  assert.equal(tableRows(0).length,5)
+  await choose(document.querySelector('select[aria-label="Operator filtri"]'),'op.one')
+  assert.equal(tableRows(0).length,15,'filter resets to page 1')
+  await choose(document.querySelector('select[aria-label="Natija"]'),'denied')
+  assert.equal(tableRows(0).length,1)
+  await type(document.querySelector('input[aria-label="Auditni qidirish"]'),'hunter22')
+  assert.equal(document.querySelectorAll('.pf-table').length,0,'secret value is not searchable')
+  await click(byText('Filtrlarni tozalash'))
+  await type(document.querySelector('input[aria-label="Sanadan"]'),'2030-01-02');await type(document.querySelector('input[aria-label="Sanagacha"]'),'2030-01-01')
+  assert.ok(document.querySelector('[role="alert"]')?.textContent?.includes('“Dan” sanasi'))
+  await click(byText('Filtrlarni tozalash'))
+  await click(document.querySelector('.pf-table .pf-link'))
+  const drawer=document.querySelector('.drawer')!
+  assert.ok(drawer.textContent?.includes('Audit yozuvi'));assert.ok(drawer.textContent?.includes('pa-0'));assert.equal(drawer.textContent?.includes('hunter22'),false)
+  await click(byText('Shu operator amallari'))
+  assert.equal((document.querySelector('select[aria-label="Operator filtri"]') as HTMLSelectElement).value,'op.one')
+})
+
+test('security: platform permissions stay separate from company roles; events and operators are listed',async()=>{
+  seedMetadata()
+  const at=(m:number)=>new Date(Date.now()-m*60000).toISOString()
+  storePlatform({audit:[
+    {id:'s1',at:at(1),actor:'platform.operator',action:'tenant.suspend',targetType:'tenant',targetId:legacy,tenantId:legacy,outcome:'denied'},
+    {id:'s2',at:at(5),actor:'platform.operator',action:'session.start',targetType:'session',targetId:'platform',outcome:'success'},
+    {id:'s3',at:at(9),actor:'other.operator',action:'ticket.create',targetType:'ticket',targetId:'t1',outcome:'success'},
+  ]})
+  await openPlatform('/platform/security')
+  const matrix=document.querySelector('table[aria-label="Platforma ruxsatlari matritsasi"]')!
+  const rows=[...matrix.querySelectorAll('tbody tr')]
+  assert.equal(rows.find(r=>r.textContent?.startsWith('Kompaniya ERP'))!.textContent!.includes('Ruxsat'),false,'operator never gets ERP access')
+  assert.equal(rows.every(r=>r.querySelectorAll('td')[2].textContent==='Yo‘q'),true,'Business Owner holds no platform capability')
+  const events=document.querySelector('table[aria-label="Xavfsizlik hodisalari"]')!.textContent!
+  assert.ok(events.includes('Operator kirdi'));assert.ok(events.includes('Rad etilgan'));assert.equal(events.includes('Murojaat yaratildi'),false)
+  const ops=document.querySelector('table[aria-label="Platforma operatorlari"]')!.textContent!
+  assert.ok(ops.includes('platform.operator · siz'));assert.ok(ops.includes('other.operator'))
+})
+
+test('support: KPI shortcuts, category filter and priority change with history and audit',async()=>{
+  seedMetadata()
+  await openPlatform('/platform/support')
+  for(const [subject,category] of [['Billing question','billing'],['Login problem','account']]){
+    await click(byText('Yangi murojaat'))
+    await type(field('Mavzu'),subject);await choose(field('Toifa'),category)
+    await click(byText('Yaratish'));await flush(60)
+  }
+  assert.equal(platformOf().tickets.length,2)
+  await choose(document.querySelector('select[aria-label="Toifa"]'),'billing')
+  assert.deepEqual(tableRows(0).map(r=>r.querySelector('.pf-link')?.textContent),['Billing question'])
+  await click([...document.querySelectorAll('.pf-link')].find(b=>b.textContent==='Billing question')!)
+  await choose(field('Ustuvorlik'),'urgent')
+  await click(byText('Saqlash','.drawer button'));await flush(60)
+  const t=platformOf().tickets.find((x:{subject:string})=>x.subject==='Billing question')
+  assert.equal(t.priority,'urgent');assert.equal(t.notes.at(-1).kind,'priority')
+  assert.equal(platformOf().audit[0].detail,'normal → urgent')
+  assert.ok(text().includes('Ustuvorlik: normal → urgent'))
+  await key(document,'Escape');await flush(20)
+  await click([...document.querySelectorAll('button.kpi')].find(k=>k.querySelector('.kpi-label')?.textContent==='Jarayonda')!)
+  assert.equal((document.querySelector('select[aria-label="Murojaat holati"]') as HTMLSelectElement).value,'in_progress')
+  assert.ok(text().includes('Mos murojaat yo‘q'))
+})
+
+test('monitoring and overview show record-derived alerts; alert links open the focused subscription',async()=>{
+  seedMetadata()
+  await openPlatform('/platform/health')
+  assert.equal(heading(),'Monitoring')
+  assert.ok(text().includes('Factory B: sinov 3 kunda tugaydi'))
+  await choose(document.querySelector('select[aria-label="Ogohlantirish darajasi"]'),'danger')
+  assert.ok(text().includes('Bu darajada ogohlantirish yo‘q'))
+  await choose(document.querySelector('select[aria-label="Ogohlantirish darajasi"]'),'all')
+  await click(byText('Ochish','.pf-alerts a'));await flush(20)
+  assert.equal(heading(),'Rejalar va obunalar')
+  assert.equal((document.querySelector('input[aria-label="Obunani qidirish"]') as HTMLInputElement).value,'Factory B')
+  assert.equal(tableRows(1).length,1);assert.ok(tableRows(1)[0].classList.contains('pf-focus'))
+  await click([...document.querySelectorAll('.pf-nav-item')].find(a=>a.textContent==='Platforma ko‘rinishi')!)
+  assert.ok(text().includes('Ogohlantirishlar'));assert.ok(text().includes('Ro‘yxatdan o‘tish dinamikasi'))
+  assert.equal(/\$|so‘m|99\.9|\d\s?ms\b/.test(document.querySelector('.pf-content')!.textContent||''),false,'no fabricated money or latency')
+})
+
+test('features show the entitlement result; settings can load platform defaults for review',async()=>{
+  seedMetadata()
+  storePlatform({settings:{brandName:'ZENIX',supportEmail:'',supportPhone:'',defaultTrialDays:30,graceDays:7,registration:'open'}})
+  await openPlatform('/platform/features')
+  const row=(label:string)=>tableRows(1).find(r=>r.textContent?.startsWith(label))!
+  assert.ok(row('Sotuv').textContent!.includes('Ochiq'),'Plus plan includes sales')
+  assert.ok(row('AI yordamchi').textContent!.includes('rejada yo‘q'))
+  await click([...document.querySelectorAll('.pf-nav-item')].find(a=>a.textContent==='Platforma sozlamalari')!)
+  await click(byText('Standart qiymatlar'))
+  assert.equal((field('Sinov muddati (kun)') as HTMLInputElement).value,'14')
+  assert.ok(field('O‘zgarish sababi'),'sensitive default still needs a reason')
+  assert.equal(platformOf().settings.defaultTrialDays,30,'nothing saved without confirmation')
 })

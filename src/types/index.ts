@@ -142,9 +142,13 @@ export type ExtraIssue={materialId:string;qty:number;reason:string;by:string;at:
 export type CostSnapshot={material:number;labor:number;machine:number;overhead:number;total:number;
   /** Energy of machine running time; absent on snapshots frozen before it was costed. */
   energy?:number}
-export interface Supplier{id:string;name:string;phone:string;leadTime:number;rating:number;status:string;debt:number;email?:string}
+export interface Supplier{id:string;name:string;phone:string;leadTime:number;rating:number;status:string;debt:number;email?:string;
+  /** Contact person, legal address and bank requisites (STIR 9 digits, account 20 digits, MFO 5 digits); optional on older data. */
+  contactPerson?:string;address?:string;inn?:string;bankAccount?:string;mfo?:string}
 /** Signed UZS payable: receipt raises the obligation; payment/credit lowers it. Entries are append-only. */
-export interface PayableEntry{id:string;key:string;supplierId:string;kind:'opening'|'receipt'|'payment'|'credit'|'adjustment';amount:number;date:string;by:string;reason?:string;purchaseOrderId?:string;receiptId?:string;materialId?:string;currency:'UZS';method?:string}
+export interface PayableEntry{id:string;key:string;supplierId:string;kind:'opening'|'receipt'|'payment'|'credit'|'adjustment';amount:number;date:string;by:string;reason?:string;purchaseOrderId?:string;receiptId?:string;materialId?:string;currency:'UZS';method?:string;
+  /** A payment made against one approved supplier invoice, or the price variance an approved invoice settled. */
+  invoiceId?:string}
 /**
  * Supplier ↔ material sourcing terms (many-to-many, one row per pair). Prices are quoted per purchase
  * unit in the supplier's currency; `unitFactor` = material stock units in one purchase unit. Last purchase
@@ -168,7 +172,10 @@ export interface PurchaseReceipt{id:string;date:string;materialId:string;qty:num
   serials?:string[]}
 /** PO line: `qty`/`received` in material stock units, `price` in UZS per stock unit; supplier terms are kept for display. */
 export interface PurchaseLine{materialId:string;qty:number;received:number;price:number;linkId?:string;purchaseUnit?:string;unitFactor?:number;currency?:CurrencyCode;unitPrice?:number}
-export interface PurchaseOrder{id:string;code:string;supplierId:string;warehouseId:string;status:'Qoralama'|'Tasdiqlangan'|'Yo‘lda'|'Qisman qabul'|'Qabul qilindi'|'Bekor';items:PurchaseLine[];total:number;invoiceStatus:string;paymentStatus:string;expectedDate:string;createdAt:string;receipts:PurchaseReceipt[];receivedAt?:string;source?:string;productionOrderIds?:string[];
+export interface PurchaseOrder{
+  /** Draft sent for approval (Pending Approval) and an approved PO sent to the supplier; requests it was raised from. */
+  approvalRequestedAt?:string;approvalRequestedBy?:string;sentAt?:string;sentBy?:string;requestIds?:string[];
+  id:string;code:string;supplierId:string;warehouseId:string;status:'Qoralama'|'Tasdiqlangan'|'Yo‘lda'|'Qisman qabul'|'Qabul qilindi'|'Bekor';items:PurchaseLine[];total:number;invoiceStatus:string;paymentStatus:string;expectedDate:string;createdAt:string;receipts:PurchaseReceipt[];receivedAt?:string;source?:string;productionOrderIds?:string[];
   /** Who created and who approved the PO (separation of duties, A-M6). */
   createdBy?:string;approvedBy?:string;
   /** Set when the not-received rest was closed instead of received (BUG-09). */
@@ -195,7 +202,12 @@ export interface QualityCheck{id:string;type:'Kirish'|'Jarayon'|'Final';sourceTy
   returnedQty?:number;
   /** Incoming inspection split of the receipt: units released to stock and units rejected (kept apart for disposition). */
   acceptedQty?:number;rejectedQty?:number}
-export interface QualityAlert{id:string;title:string;sourceId:string;severity:'Past'|'O‘rta'|'Yuqori';status:'Ochiq'|'Jarayonda'|'Yopilgan';reason:string;ownerId:string;createdAt:string;rootCause?:string;correctiveAction?:string;preventiveAction?:string;resolution?:string}
+export interface QualityAlert{id:string;title:string;sourceId:string;severity:'Past'|'O‘rta'|'Yuqori';status:'Ochiq'|'Jarayonda'|'Yopilgan';reason:string;ownerId:string;createdAt:string;rootCause?:string;correctiveAction?:string;preventiveAction?:string;resolution?:string;
+  /** CAPA actions of this NCR; it closes only when every one of them is verified (or cancelled). Absent on older data. */
+  capa?:CapaAction[]}
+/** One corrective or preventive action: owner and deadline, evidence when done, independent verification before it counts. */
+export interface CapaAction{id:string;kind:'Tuzatuvchi'|'Oldini oluvchi';description:string;ownerId:string;dueDate:string;status:'Ochiq'|'Bajarildi'|'Tasdiqlandi'|'Bekor';
+  evidence?:string;doneAt?:string;doneBy?:string;verifiedAt?:string;verifiedBy?:string;verificationNote?:string;history:{at:string;by:string;action:string;note?:string}[]}
 /** Preventive plan: every `interval` days / weeks / months, or every `interval` running hours (needs runtime readings). */
 export interface MaintenancePlan{unit:'day'|'week'|'month'|'runtime';interval:number;
   /** Planned service duration (hours); without it a planned service blocks the whole day in capacity. */
@@ -217,7 +229,10 @@ export interface MaintenanceOrder{id:string;code:string;equipmentId:string;type:
   downtimeMinutes?:number;
   /** Set when it was planned on top of another service of the same machine on purpose. */
   override?:{by:string;at:string;reason:string};
-  history?:MaintenanceEvent[]}
+  history?:MaintenanceEvent[];
+  /** Spare parts issued from stock to this work (valued at issue); their cost is added once, at completion. */
+  parts?:MaintenancePart[]}
+export interface MaintenancePart{id:string;materialId:string;warehouseId:string;qty:number;returned:number;unitCost:number;lots:{lot?:string;qty:number;unitCost?:number}[];at:string;by:string;key?:string;returnKeys?:string[]}
 export interface Employee{id:string;name:string;roleId:string;department:string;workCenterId:string;shift:string;status:string;attendance:number;efficiency:number;hourlyCost:number;
   /** Home warehouse for a "warehouse"-scoped role; without it the scope falls back to the employee's branch. */
   warehouseId?:string;
@@ -242,7 +257,9 @@ export interface EngineeringChange{id:string;code:string;title:string;productId:
 export interface QualityControlPoint{id:string;title:string;scope:'Incoming'|'In-process'|'Final';productId?:string;operationName?:string;frequency:'Every time'|'Random'|'Periodic'|'On demand';sampleRate:number;checkType:'Instructions'|'Measure'|'Pass-Fail'|'Photo';instructions:string;active:boolean;
   /** Mandatory: an open or failed in-process check of this point blocks the next operation. */
   blocking?:boolean}
-export interface MaintenanceRequest{id:string;code:string;equipmentId:string;type:'Preventive'|'Corrective'|'Emergency';priority:'Normal'|'Yuqori'|'Kritik';status:'Yangi'|'Tasdiqlangan'|'Jarayonda'|'Yakunlangan';requestedBy:string;scheduled:string;reason:string;downtimeHours:number;startedAt?:string}
+export interface MaintenanceRequest{id:string;code:string;equipmentId:string;type:'Preventive'|'Corrective'|'Emergency';priority:'Normal'|'Yuqori'|'Kritik';status:'Yangi'|'Tasdiqlangan'|'Jarayonda'|'Yakunlangan'|'Rad etilgan';requestedBy:string;scheduled:string;reason:string;downtimeHours:number;startedAt?:string;
+  /** Who rejected it and why. */
+  decidedBy?:string;decisionNote?:string}
 export interface SubcontractOrder{id:string;code:string;supplierId:string;productId:string;qty:number;status:'Draft'|'Material yuborildi'|'Ishlab chiqarishda'|'Qisman qabul'|'Qabul qilindi'|'Bekor';materialIds:string[];expectedDate:string;cost:number;
   /** Where the receipt went and how much of it still waits for incoming QC (N-07). */
   warehouseId?:string;qcHeld?:number;
@@ -316,6 +333,10 @@ export interface ManufacturingState{
   payables?:PayableEntry[];
   /** Supplier replacement requests (audit #27) and legacy-return credit decisions (Phase 5); absent on older data. */
   supplierReplacements?:SupplierReplacement[];receivableReconciliations?:ReceivableReconciliation[];
+  /** Two-step warehouse transfers (dispatch → in transit → receipt) and stocktaking sessions; absent on older data. */
+  stockTransfers?:StockTransfer[];stockCounts?:StockCount[];
+  /** Manual purchase requests and supplier invoices (3-way match); absent on older data. */
+  purchaseRequests?:PurchaseRequest[];supplierInvoices?:SupplierInvoice[];
   /** Data model version written by `migrateState` (src/domain/migrations.ts); absent on data saved before versioning. */
   schemaVersion?:number;
   /** Records set aside on load because another record of the same collection had their id (persistence.ts); kept unchanged for export. */
@@ -324,3 +345,41 @@ export interface ManufacturingState{
 /** A stored record taken out of use on load, unchanged, with the collection it came from and why. */
 export interface QuarantinedRecord{collection:string;id:string;reason:'duplicate-id';record:Record<string,unknown>}
 export interface SearchRecord{type:string;title:string;subtitle:string;path:string;view?:string}
+
+/**
+ * One dispatched lot portion of a transfer. `record` is the lot as it left the source (origin, expiry, serial numbers),
+ * so the receiving store gets the same provenance; untracked stock has no lot and no record.
+ */
+export interface StockTransferLine{lot?:string;qty:number;received:number;returned:number;record?:Omit<LotRecord,'id'|'qty'|'originalQty'|'warehouseId'|'location'|'status'|'createdAt'|'consumedBy'>}
+export interface StockTransferReceipt{id:string;at:string;by:string;qty:number;kind:'receipt'|'return';lots:{lot?:string;qty:number}[];key?:string;note?:string}
+/**
+ * Stock that left one store and has not arrived in another. While in transit it is neither on hand in the source nor
+ * available in the target: the target books it as `incoming` only, so nothing can be reserved, shipped or counted from it.
+ */
+export interface StockTransfer{id:string;ref:string;itemId:string;itemType:'raw'|'finished';from:string;to:string;fromLocation?:string;toLocation?:string;
+  qty:number;status:'Yo‘lda'|'Qisman qabul qilindi'|'Qabul qilindi'|'Yopildi';lines:StockTransferLine[];receipts:StockTransferReceipt[];
+  createdAt:string;createdBy:string;closedAt?:string;key?:string;
+  /** Required on new transfers; optional on saved transfers made before the rule. `note` is the legacy field. */
+  reason?:string;note?:string;
+  /** Snapshot of the route and method so later warehouse edits do not rewrite transfer history. */
+  fromBranchId?:string;toBranchId?:string;mode?:'two-step'|'immediate'}
+export interface StockCountLine{balanceId:string;itemKey:string;
+  /** System on-hand when the line was added (or recounted); approval refuses lines whose stock moved since. */
+  expected:number;counted?:number;countedAt?:string;countedBy?:string;note?:string}
+/** A stocktaking session of one warehouse: counted lines are compared with the system and approved as adjustments. */
+export interface StockCount{id:string;ref:string;warehouseId:string;status:'Ochiq'|'Tasdiqlangan'|'Bekor qilingan';lines:StockCountLine[];
+  createdAt:string;createdBy:string;note?:string;approvedAt?:string;approvedBy?:string;reason?:string;adjustments?:string[];cancelledAt?:string}
+
+export interface DocEvent{at:string;by:string;action:string;note?:string}
+/** A department's request to buy: Draft → Submitted → Approved / Rejected; only an approved request becomes a PO. */
+export interface PurchaseRequest{id:string;code:string;status:'Qoralama'|'Yuborilgan'|'Tasdiqlangan'|'Rad etilgan'|'Buyurtma qilingan'|'Bekor';
+  lines:{materialId:string;qty:number}[];neededBy:string;warehouseId:string;note?:string;createdAt:string;createdBy:string;
+  decidedBy?:string;decidedAt?:string;decisionNote?:string;purchaseOrderIds?:string[];history:DocEvent[]}
+export interface SupplierInvoiceLine{materialId:string;qty:number;price:number}
+/**
+ * A supplier's bill for a PO. It never moves stock and never posts debt by itself (debt accrues at goods receipt);
+ * approving it settles only an accepted price difference in the payable ledger. Matching: PO ↔ received (GRN) ↔ invoice.
+ */
+export interface SupplierInvoice{id:string;code:string;number:string;supplierId:string;purchaseOrderId:string;date:string;dueDate?:string;
+  lines:SupplierInvoiceLine[];total:number;status:'Tekshirilmoqda'|'Tasdiqlangan'|'Rad etilgan'|'Bekor';
+  createdAt:string;createdBy:string;approvedBy?:string;approvedAt?:string;exceptionReason?:string;variance?:number;history:DocEvent[];key?:string}

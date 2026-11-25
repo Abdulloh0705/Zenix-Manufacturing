@@ -24,7 +24,8 @@ export type OrderReceivable={invoiced:number;paid:number;credited:number;outstan
 export function orderReceivable(s:Pick<S,'receivables'>,soId:string):OrderReceivable{
   const rows=ledger(s).filter(e=>e.salesOrderId===soId)
   const sum=(kind:ReceivableEntry['kind'])=>r2(rows.filter(e=>e.kind===kind).reduce((a,e)=>a+e.amount,0))
-  const invoiced=sum('invoice'),paid=-sum('payment'),credited=-sum('credit')
+  // `|| 0` keeps an order with no payment / credit at 0, not −0 (which `num()` and exports print as "-0").
+  const invoiced=sum('invoice'),paid=-sum('payment')||0,credited=-sum('credit')||0
   const outstanding=r2(invoiced-paid-credited)
   const status=invoiced<=0?null:outstanding<=0.005?'To‘langan' as const:paid>0.005?'Qisman' as const:'To‘lanmagan' as const
   return {invoiced,paid,credited,outstanding,status}

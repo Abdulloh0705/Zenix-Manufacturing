@@ -350,7 +350,7 @@ test('Location #19: a warehouse-to-warehouse LOT transfer keeps provenance and r
   let s=withStock(clean(),'rm3','w1',[{code:'PC-9',qty:40,location:'RAW-A2',expiry:'2027-03-01',sourceId:'po-9',sourceCode:'PO-9'}])
   refused(s,A.transferStock(s,ctx(s),'rm3','w1','w4',5,undefined,{toLocation:'RAW-A1'}),/joyi yo‘q/)
   refused(s,A.transferStock(s,ctx(s),'rm3','w1','w4',5,undefined,{fromLocation:'RAW-A1'}),/0 kg bor/)
-  s=ok(A.transferStock(s,ctx(s),'rm3','w1','w4',15,[{lot:'PC-9',qty:15}],{fromLocation:'RAW-A2',toLocation:'MIX-01'}))
+  s=ok(A.transferStock(s,ctx(s),'rm3','w1','w4',15,[{lot:'PC-9',qty:15}],{fromLocation:'RAW-A2',toLocation:'MIX-01',reason:'LOT zaxirasini boshqa omborga ko‘chirish'}))
   assert.deepEqual([bal(s,'rm3','w1').onHand,bal(s,'rm3','w1').bins,bal(s,'rm3','w4').onHand,bal(s,'rm3','w4').bins],[25,{'RAW-A2':25},15,{'MIX-01':15}])
   const copy=s.lots.find(l=>l.warehouseId==='w4'&&l.code==='PC-9')
   assert.deepEqual([copy.location,copy.expiry,copy.sourceId,copy.sourceCode,copy.qty],['MIX-01','2027-03-01','po-9','PO-9',15])
@@ -426,7 +426,7 @@ test('Site MRP #23/#24: incoming supply and reservations count at their own site
   assert.equal(plan.rows.find(r=>r.itemId==='rm2'&&r.branchId==='b2').buckets.reduce((a,x)=>a+x.scheduled,0),500)
   assert.equal(plan.rows.find(r=>r.itemId==='rm2'&&r.branchId==='b1').buckets.reduce((a,x)=>a+x.scheduled,0),0)
   // Stock moved to b1 by a real transfer, then the MO reserves it: its need leaves gross and the stock leaves available.
-  s=ok(A.transferStock(s,ctx(s),'rm2','w4','w1',200))
+  s=ok(A.transferStock(s,ctx(s),'rm2','w4','w1',200,undefined,{reason:'Zaxirani manba omborga qaytarish'}))
   s=ok(A.transitionProduction(s,ctx(s),mo,'Tasdiqlangan'))
   plan=P.runMrp(s,{today:TODAY})
   const b1=plan.rows.find(r=>r.itemId==='rm2'&&r.branchId==='b1')

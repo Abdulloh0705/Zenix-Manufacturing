@@ -63,14 +63,49 @@ test('operator manages companies, settings and diagnostics without touching tena
   await page.getByRole('dialog').getByRole('button',{name:'Saqlash'}).click()
   await expect(page.getByRole('status').filter({hasText:'Platforma sozlamalari saqlandi'})).toBeVisible()
 
-  await openSection(page,'Xavfsizlik va audit')
+  await openSection(page,'Audit jurnali')
   await expect(page.locator('.pf-table')).toContainText('Sozlamalar o‘zgardi')
 
-  await openSection(page,'Tizim holati')
+  await openSection(page,'Monitoring')
   await expect(page.getByText('Ulanmagan').first()).toBeVisible()
   expect(await noPageOverflow(page)).toBe(true)
 
   expect(await page.evaluate(()=>localStorage.getItem('zenix-manufacturing-v3-state'))).toBe(erpBefore)
   await page.getByRole('button',{name:'Chiqish'}).click()
   await expect(gate(page)).toBeVisible()
+})
+
+const SECTIONS=['Platforma ko‘rinishi','Kompaniyalar','Rejalar va obunalar','Billing','Support markazi','Funksiyalar boshqaruvi','Audit jurnali','Xavfsizlik','Platforma sozlamalari','Monitoring']
+test('every platform section renders without overflow on this viewport and at tablet width; core workflows open',async({page})=>{
+  await page.goto('/platform')
+  await page.getByLabel('Operator ID').fill('platform.e2e')
+  await page.getByLabel('Imzolangan chipta').fill(await ticket('platform.e2e'))
+  await page.getByRole('button',{name:'Platformaga kirish'}).click()
+  await expect(page.locator('.pf-title h1')).toHaveText('Platforma ko‘rinishi')
+  for(const label of SECTIONS){
+    await openSection(page,label)
+    expect(await noPageOverflow(page),`${label}: no horizontal page overflow`).toBe(true)
+  }
+  // Company edit dialog and create explanation open and close without writing anything.
+  await openSection(page,'Kompaniyalar')
+  await page.getByRole('button',{name:'Yangi kompaniya'}).click()
+  await expect(page.getByRole('dialog')).toContainText('/register')
+  await page.getByRole('dialog').getByRole('button',{name:'Yopish',exact:true}).last().click()
+  await page.locator('.pf-link').first().click()
+  await page.getByRole('button',{name:'Tahrirlash'}).click()
+  await expect(page.getByLabel('Platformadagi nomi')).toBeVisible()
+  expect(await noPageOverflow(page)).toBe(true)
+  await page.keyboard.press('Escape')
+  await page.keyboard.press('Escape')
+  // Audit detail drawer.
+  await openSection(page,'Audit jurnali')
+  await page.locator('.pf-table .pf-link').first().click()
+  await expect(page.getByRole('dialog')).toContainText('Audit yozuvi')
+  await page.keyboard.press('Escape')
+  // Tablet width (iPad Air portrait) across all sections.
+  await page.setViewportSize({width:820,height:1180})
+  for(const label of SECTIONS){
+    await openSection(page,label)
+    expect(await noPageOverflow(page),`${label} @820px: no horizontal page overflow`).toBe(true)
+  }
 })

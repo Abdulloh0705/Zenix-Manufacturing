@@ -60,7 +60,9 @@ export function Checkbox({checked,onChange,label,description,disabled}:{checked:
 type Option={key:string|number;value:string;label:ReactNode;text:string;disabled:boolean}
 const nodeToText=(node:ReactNode):string=>typeof node==='string'||typeof node==='number'?String(node):Array.isArray(node)?node.map(nodeToText).join(''):isValidElement(node)?nodeToText((node.props as {children?:ReactNode}).children):''
 
-export function Select({value,onChange,children,className='',placeholder='Tanlang',disabled=false,id,ariaLabel,size,triggerLabel}:{value:string;onChange:(v:string)=>void;children:ReactNode;className?:string;placeholder?:string;disabled?:boolean;id?:string;ariaLabel?:string;size?:'sm';triggerLabel?:ReactNode}){
+export function Select({value,onChange,children,className='',placeholder='Tanlang',disabled=false,id,ariaLabel,size,triggerLabel,'aria-describedby':describedBy,'aria-invalid':invalid,'aria-required':ariaRequired}:{value:string;onChange:(v:string)=>void;children:ReactNode;className?:string;placeholder?:string;disabled?:boolean;id?:string;ariaLabel?:string;size?:'sm';triggerLabel?:ReactNode;
+  /** Set by <Field> so the field's hint/error and required state are announced on the trigger. */
+  'aria-describedby'?:string;'aria-invalid'?:boolean;'aria-required'?:boolean}){
   const uid=useId()
   const listId=`${uid}-list`
   const [open,setOpen]=useState(false),[active,setActive]=useState(0)
@@ -95,7 +97,7 @@ export function Select({value,onChange,children,className='',placeholder='Tanlan
   }
   return <div className={`custom-select-wrap ${size==='sm'?'is-sm':''} ${className}`}>
     <button ref={triggerRef} id={id} type="button" role="combobox" className={`custom-select-trigger ${open?'open':''}`} disabled={disabled} onClick={()=>setOpen(v=>!v)} onKeyDown={key}
-      aria-haspopup="listbox" aria-expanded={open} aria-controls={open?listId:undefined} aria-label={ariaLabel} aria-activedescendant={open?`${uid}-opt-${active}`:undefined}>
+      aria-haspopup="listbox" aria-expanded={open} aria-controls={open?listId:undefined} aria-label={ariaLabel} aria-describedby={describedBy} aria-invalid={invalid||undefined} aria-required={ariaRequired||undefined} aria-activedescendant={open?`${uid}-opt-${active}`:undefined}>
       <span className={!selected&&!triggerLabel?'placeholder':''}>{triggerLabel??selected?.label??placeholder}</span><Icon name="chevron" size={14} className="select-chevron"/>
     </button>
     <Popover open={open} onClose={()=>setOpen(false)} anchorRef={triggerRef} className="custom-select-menu" placement="bottom-start" matchWidth minWidth={160} role="presentation" autoFocus={false}>

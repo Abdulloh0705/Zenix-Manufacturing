@@ -24,7 +24,7 @@ export function serialTracked(s:Pick<S,'products'|'rawMaterials'>,key:string){
 /** A record belongs to a lot code: its own code, or the receipt lot / output range a serial unit arrived in. */
 export const inLot=(l:Pick<LotRecord,'code'|'batch'>,code?:string)=>Boolean(code)&&(l.code===code||l.batch===code)
 
-export type SerialPhysical='available'|'quarantine'|'hold'|'rework'|'sold'|'consumed'|'supplier-returned'|'scrapped'|'written-off'|'unknown'
+export type SerialPhysical='available'|'quarantine'|'hold'|'rework'|'in-transit'|'sold'|'consumed'|'supplier-returned'|'scrapped'|'written-off'|'unknown'
 export type SerialStatus={serial:string;itemId:string;status:SerialPhysical;
   /** The record holding the unit now (in stock), else undefined. */
   record?:LotRecord;warehouseId?:string;location?:string;
@@ -37,7 +37,8 @@ export type SerialStatus={serial:string;itemId:string;status:SerialPhysical;
   /** More than one record holds the unit at once — data the engine never writes; shown, never repaired here. */
   conflict?:string}
 
-const OUT_STATUS:Record<string,SerialPhysical>={'Sale -':'sold','Material Issue -':'consumed','Subcontract -':'consumed','Unbuild -':'consumed','Supplier Return -':'supplier-returned','QC Scrap -':'scrapped','Adjustment -':'written-off'}
+// A unit dispatched by a two-step transfer has no record until it is received: it is in transit, not written off.
+const OUT_STATUS:Record<string,SerialPhysical>={'Transfer -':'in-transit','Maintenance Issue -':'consumed','Sale -':'sold','Material Issue -':'consumed','Subcontract -':'consumed','Unbuild -':'consumed','Supplier Return -':'supplier-returned','QC Scrap -':'scrapped','Adjustment -':'written-off'}
 
 /** Where a serial unit is and what it is now — read from its records and ledger rows, never stored twice. */
 export function serialStatus(s:Pick<S,'lots'|'stockMovements'>,serial:string,itemId?:string):SerialStatus|undefined{
@@ -109,7 +110,7 @@ export function serialIssues(s:Pick<S,'lots'>){
   return {problems,legacyRanges:s.lots.filter(isLegacyRange)}
 }
 
-export const SERIAL_STATUS_LABEL:Record<SerialPhysical,string>={available:'Omborda','quarantine':'QC karantin',hold:'Hold',rework:'Rework',sold:'Sotilgan',consumed:'Sarflangan','supplier-returned':'Supplierga qaytarilgan',scrapped:'Scrap','written-off':'Hisobdan chiqarilgan',unknown:'Noma’lum'}
+export const SERIAL_STATUS_LABEL:Record<SerialPhysical,string>={available:'Omborda','quarantine':'QC karantin',hold:'Hold',rework:'Rework','in-transit':'Yo‘lda',sold:'Sotilgan',consumed:'Sarflangan','supplier-returned':'Supplierga qaytarilgan',scrapped:'Scrap','written-off':'Hisobdan chiqarilgan',unknown:'Noma’lum'}
 
 /** Every serial unit with its status (indexed once — the register page reads thousands without rescanning). */
 export function serialRegister(s:Pick<S,'lots'|'stockMovements'>):SerialStatus[]{

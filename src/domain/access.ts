@@ -3,6 +3,7 @@
 // usability and integrity guard, not a security boundary (anyone with DevTools can change browser storage).
 import type {Employee,ManufacturingState,PermissionAction,PermissionMap,Role,SystemRoleKey} from '../types'
 import {rawWarehouseFor,unbuildSource} from './manufacturingEngine'
+import {orderReceivable} from './receivables'
 
 type S=ManufacturingState
 export type Rule=[module:string,action:PermissionAction]
@@ -69,6 +70,19 @@ export function allowedBy(role:Role|undefined,rules:Rules|undefined){
 
 const isDraftPo=(p:unknown)=>(p as {status?:string}|undefined)?.status==='Qoralama'
 const PROD_RUN:Rules=[['production','execute'],['production','edit']]
+/**
+ * Spare parts to a maintenance work (P4-M-04). The assigned Maintenance Engineer may issue or return them through
+ * equipment.edit; authorized warehouse staff use warehouse.edit. The assignment and branch/warehouse scope are
+ * checked by the domain command against current state, including when the UI submits a previously opened form.
+ */
+export const MAINTENANCE_PART_RULES:Rules=[['equipment','edit'],['warehouse','edit']]
+
+/** The Maintenance Engineer may handle parts only for work assigned to them; warehouse staff keep store scope. */
+export function maintenancePartAssignmentBlocker(s:S,actor:Employee|undefined,orderId:string):string|null{
+  if(!actor||roleOf(s,actor.id)?.key!=='maintenance')return null
+  const order=s.maintenanceOrders.find(m=>m.id===orderId)
+  return order&&order.technicianId!==actor.id?'Bu maintenance ishi sizga biriktirilmagan':null
+}
 
 /** Module permission needed per domain action; a function decides from the call's arguments. */
 export const ACTION_RULES:Record<string,Rules|((args:unknown[])=>Rules)>={
@@ -90,6 +104,9 @@ export const ACTION_RULES:Record<string,Rules|((args:unknown[])=>Rules)>={
   createPurchaseOrder:args=>isDraftPo(args[0])?[['purchases','create']]:[['purchases','approve']],
   createPurchaseOrders:args=>Array.isArray(args[0])&&args[0].every(isDraftPo)?[['purchases','create']]:[['purchases','approve']],
   linkSupplierMaterial:[['purchases','edit'],['materials','edit']],updateSupplierMaterial:[['purchases','edit'],['materials','edit']],removeSupplierMaterial:[['purchases','edit'],['materials','edit']],setPreferredSupplier:[['materials','edit'],['purchases','edit']],
+  // Purchase requests: raised by buyers, decided by approvers; supplier invoices are checked by buyers, approved by approvers.
+  createPurchaseRequest:[['purchases','create']],updatePurchaseRequest:[['purchases','create']],submitPurchaseRequest:[['purchases','create']],decidePurchaseRequest:[['purchases','approve']],cancelPurchaseRequest:[['purchases','edit']],purchaseOrderFromRequest:[['purchases','create']],
+  requestPurchaseApproval:[['purchases','edit']],markPurchaseSent:[['purchases','edit']],registerSupplierInvoice:[['purchases','edit']],approveSupplierInvoice:[['purchases','approve']],rejectSupplierInvoice:[['purchases','approve']],
   confirmPurchase:[['purchases','approve']],markPurchaseInTransit:[['purchases','edit']],cancelPurchase:[['purchases','edit']],closePurchaseShort:[['purchases','edit']],updatePurchaseMeta:[['purchases','edit']],receivePurchase:[['purchases','edit'],['warehouse','edit']],returnPurchaseToSupplier:[['purchases','edit'],['warehouse','edit']],advanceSubcontract:[['purchases','edit']],correctSubcontractServiceCost:[['purchases','edit']],cancelSubcontract:[['purchases','edit']],
   recordSupplierPayment:[['purchases','approve'],['costs','edit']],adjustSupplierBalance:[['purchases','approve'],['costs','edit']],
   // Draft lines are purchasing work; an inspection decision and the write-off of rejected goods are quality decisions.
@@ -98,12 +115,17 @@ export const ACTION_RULES:Record<string,Rules|((args:unknown[])=>Rules)>={
   requestSupplierReplacement:[['purchases','edit']],closeSupplierReplacement:[['purchases','edit']],receiveSupplierReplacement:[['purchases','edit'],['warehouse','edit']],
   // A credit decision on a pre-ledger order changes what a customer owes: the same right as a manual adjustment.
   resolveReturnCredit:[['sales','approve']],
-  createSalesOrder:[['sales','create']],reserveSalesOrder:[['sales','edit']],deliverSalesOrder:[['sales','edit'],['warehouse','edit']],cancelSalesOrder:[['sales','edit']],updateSalesMeta:[['sales','edit']],recordCustomerPayment:[['sales','edit']],adjustCustomerBalance:[['sales','approve']],createReturn:[['sales','create'],['quality','edit']],dispositionReturn:[['quality','edit']],
+  createSalesOrder:[['sales','create']],reserveSalesOrder:[['sales','edit']],deliverSalesOrder:[['sales','edit'],['warehouse','edit']],cancelSalesOrder:[['sales','edit']],updateSalesMeta:[['sales','edit']],updateSalesOrderLines:[['sales','edit']],recordCustomerPayment:[['sales','edit']],adjustCustomerBalance:[['sales','approve']],createReturn:[['sales','create'],['quality','edit']],dispositionReturn:[['quality','edit']],
   transferStock:[['warehouse','edit']],adjustStock:[['warehouse','edit']],countStock:[['warehouse','edit']],
+  dispatchTransfer:[['warehouse','edit']],receiveTransfer:[['warehouse','edit']],returnTransfer:[['warehouse','edit']],
+  // The warehouse module has no separate approve right; approval posts adjustments exactly like adjustStock (edit).
+  createStockCount:[['warehouse','edit']],recordStockCount:[['warehouse','edit']],approveStockCount:[['warehouse','edit']],cancelStockCount:[['warehouse','edit']],
   // Phase 3: location moves and reconciliation are warehouse work; switching variant stock is product master data.
   moveStockBin:[['warehouse','edit']],assignVariantStock:[['warehouse','edit']],setVariantStock:[['products','edit']],
   allocateLegacyLots:args=>args[0]==='mo'?[['warehouse','edit'],['production','edit']]:[['warehouse','edit'],['sales','edit']],
-  startDowntime:[['equipment','edit'],...PROD_RUN],endDowntime:[['equipment','edit'],...PROD_RUN],approveMaintenanceRequest:[['equipment','approve']],startMaintenance:[['equipment','edit']],completeMaintenance:[['equipment','edit']],cancelMaintenance:[['equipment','edit']],planPreventiveMaintenance:[['equipment','edit']],advanceRepair:[['equipment','edit']],
+  startDowntime:[['equipment','edit'],...PROD_RUN],endDowntime:[['equipment','edit'],...PROD_RUN],approveMaintenanceRequest:[['equipment','approve']],rejectMaintenanceRequest:[['equipment','approve']],issueMaintenancePart:MAINTENANCE_PART_RULES,returnMaintenancePart:MAINTENANCE_PART_RULES,
+  // CAPA: owners record actions; verification is a separate approval right.
+  addCapaAction:[['quality','edit']],completeCapaAction:[['quality','edit']],cancelCapaAction:[['quality','edit']],verifyCapaAction:[['quality','approve']],startMaintenance:[['equipment','edit']],completeMaintenance:[['equipment','edit']],cancelMaintenance:[['equipment','edit']],planPreventiveMaintenance:[['equipment','edit']],advanceRepair:[['equipment','edit']],
   // Operators hold equipment.create to raise requests; planning an order is maintenance planning work.
   createMaintenanceOrder:[['equipment','edit']],updateMaintenanceOrder:[['equipment','edit']],saveMaintenancePlan:[['equipment','edit']],recordEquipmentRuntime:[['equipment','edit']],
   createBomDraft:[['products','create']],saveBom:[['products','edit']],deleteBomDraft:[['products','delete']],activateBom:[['products','approve']],createEngineeringChange:[['products','create']],applyEngineeringChange:[['products','approve']],
@@ -124,6 +146,9 @@ export const ENTITY_MODULE:Record<EntityKeyName,string>={products:'products',raw
 export function entityRules(key:EntityKeyName,action:PermissionAction):Rules{
   // Operators raise maintenance requests from the shop floor.
   if(key==='maintenanceRequests'&&action==='create')return [['equipment','create'],...PROD_RUN]
+  // The settings module has no create right (PERMISSION_MODULES): company structure — branches and production
+  // lines — is added with settings.edit, the same right the Settings → Locations screen offers the button for.
+  if(ENTITY_MODULE[key]==='settings'&&action==='create')return [['settings','edit']]
   return [[ENTITY_MODULE[key],action]]
 }
 
@@ -251,6 +276,18 @@ export function scopeTargets(s:S,name:string,args:unknown[]):ScopeTargets{
   const addPo=(id:unknown)=>{const po=s.purchaseOrders.find(x=>x.id===id);if(po?.warehouseId)t.warehouses.push(po.warehouseId)}
   const addSo=(id:unknown)=>{const so=s.salesOrders.find(x=>x.id===id);if(so)t.warehouses.push(...salesOrderSites(s,so))}
   const addLine=(lineId:unknown)=>{const line=s.productionLines.find(l=>l.id===lineId);if(line)t.branches.push(line.branchId)}
+  // The document an NCR (or a quality record) is about, of whatever kind: its sites decide who may act on it (SEC-02).
+  const addSource=(id:unknown)=>{
+    if(typeof id!=='string'||!id)return
+    addOrder(order(id));addPo(id);addSo(id)
+    const sc=s.subcontractOrders.find(x=>x.id===id);if(sc)t.warehouses.push(subcontractWarehouse(s,sc))
+    t.warehouses.push(...returnWarehouses(s,id))
+  }
+  const addAlert=(id:unknown)=>addSource(s.qualityAlerts.find(a=>a.id===id)?.sourceId)
+  const addEquipment=(id:unknown)=>{const e=s.equipment.find(x=>x.id===id);if(e)t.workCenters.push(e.workCenterId)}
+  // A balance-wide change of a customer or supplier reaches every order it holds, in every branch (SEC-04).
+  const addCustomerOrders=(customerId:unknown,openOnly=false)=>{for(const so of s.salesOrders)if(so.customerId===customerId&&(!openOnly||orderReceivable(s,so.id).outstanding>0.005))addSo(so.id)}
+  const addSupplierOrders=(supplierId:unknown)=>{for(const po of s.purchaseOrders)if(po.supplierId===supplierId)addPo(po.id)}
   switch(name){
     case 'reportOutput':case 'recordScrap':case 'recordMaterialScan':case 'transitionProduction':case 'issueExtraMaterial':
     case 'shortCloseProduction':case 'splitProduction':case 'createBackorder':case 'checkAvailability':case 'createReworkOrder':case 'reconcileReworkOwnership':case 'rescheduleProductionOrder':case 'refreshMaterialReservation':addOrder(order(args[0]));break
@@ -282,7 +319,32 @@ export function scopeTargets(s:S,name:string,args:unknown[]):ScopeTargets{
       break
     }
     case 'updatePurchaseDraft':{addPo(args[0]);const p=args[1] as {warehouseId?:string}|undefined;if(p?.warehouseId)t.warehouses.push(p.warehouseId);break}
-    case 'recordSupplierPayment':{const p=args[0] as {purchaseOrderId?:string}|undefined;if(p?.purchaseOrderId)addPo(p.purchaseOrderId);break}
+    case 'recordSupplierPayment':{
+      // Paid against a PO, an invoice (its PO) or, with neither, the supplier's whole balance (SEC-04).
+      const p=args[0] as {purchaseOrderId?:string;invoiceId?:string;supplierId?:string}|undefined
+      const invoicePo=p?.invoiceId?(s.supplierInvoices||[]).find(x=>x.id===p.invoiceId)?.purchaseOrderId:undefined
+      if(p?.purchaseOrderId)addPo(p.purchaseOrderId)
+      if(invoicePo)addPo(invoicePo)
+      if(!p?.purchaseOrderId&&!invoicePo)addSupplierOrders(p?.supplierId)
+      break
+    }
+    case 'adjustSupplierBalance':addSupplierOrders((args[0] as {supplierId?:string}|undefined)?.supplierId);break
+    case 'recordCustomerPayment':{
+      // An order payment touches that order; an unallocated one is applied to the customer's open invoices (FIFO).
+      const p=args[0] as {customerId?:string;salesOrderId?:string}|undefined
+      if(p?.salesOrderId)addSo(p.salesOrderId);else addCustomerOrders(p?.customerId,true)
+      break
+    }
+    case 'adjustCustomerBalance':addCustomerOrders((args[0] as {customerId?:string}|undefined)?.customerId);break
+    case 'addCapaAction':case 'completeCapaAction':case 'verifyCapaAction':case 'cancelCapaAction':addAlert(args[0]);break
+    case 'advanceRepair':addEquipment(s.repairOrders.find(r=>r.id===args[0])?.equipmentId);break
+    case 'planPreventiveMaintenance':{
+      // Planning reaches every machine it is given (all of them when none are named).
+      const ids=Array.isArray(args[1])?args[1] as unknown[]:s.equipment.map(e=>e.id)
+      for(const id of ids)addEquipment(id)
+      break
+    }
+    case 'setForecast':{const o=args[3] as {branchId?:string}|undefined;if(o?.branchId)t.branches.push(o.branchId);break}
     case 'requestSupplierReplacement':{const p=args[0] as {qualityCheckId?:string}|undefined;const q=s.qualityChecks.find(x=>x.id===p?.qualityCheckId),po=s.purchaseOrders.find(x=>x.id===q?.sourceId);const wh=po?.receipts.find(r=>r.id===q?.receiptId)?.warehouseId||po?.warehouseId;if(wh)t.warehouses.push(wh);break}
     case 'receiveSupplierReplacement':case 'closeSupplierReplacement':{
       const rep=(s.supplierReplacements||[]).find(x=>x.id===args[0]),po=s.purchaseOrders.find(x=>x.id===rep?.purchaseOrderId)
@@ -306,9 +368,15 @@ export function scopeTargets(s:S,name:string,args:unknown[]):ScopeTargets{
     case 'createPurchaseOrder':{const p=args[0] as {warehouseId?:string}|undefined;if(p?.warehouseId)t.warehouses.push(p.warehouseId);break}
     case 'createPurchaseOrders':for(const p of Array.isArray(args[0])?args[0] as {warehouseId?:string}[]:[])if(p?.warehouseId)t.warehouses.push(p.warehouseId);break
     case 'confirmPurchase':case 'markPurchaseInTransit':case 'cancelPurchase':case 'closePurchaseShort':case 'updatePurchaseMeta':addPo(args[0]);break
+    case 'requestPurchaseApproval':case 'markPurchaseSent':addPo(args[0]);break
+    case 'createPurchaseRequest':{const p=args[0] as {warehouseId?:string}|undefined;t.warehouses.push(String(p?.warehouseId||''));break}
+    case 'updatePurchaseRequest':case 'submitPurchaseRequest':case 'decidePurchaseRequest':case 'cancelPurchaseRequest':case 'purchaseOrderFromRequest':{const r=(s.purchaseRequests||[]).find(x=>x.id===args[0]);if(r)t.warehouses.push(r.warehouseId);const p=args[1] as {warehouseId?:string}|undefined;if(name==='updatePurchaseRequest'&&p?.warehouseId)t.warehouses.push(p.warehouseId);break}
+    case 'registerSupplierInvoice':{const p=args[0] as {purchaseOrderId?:string}|undefined;addPo(p?.purchaseOrderId);break}
+    case 'approveSupplierInvoice':case 'rejectSupplierInvoice':addPo((s.supplierInvoices||[]).find(x=>x.id===args[0])?.purchaseOrderId);break
     // Every change of a sales order is bound to where it sits (reservations, shipments, its MOs) — audit #6.
-    case 'cancelSalesOrder':case 'reserveSalesOrder':case 'updateSalesMeta':addSo(args[0]);break
-    case 'createQualityAlert':{const p=args[0] as {sourceId?:string}|undefined;addOrder(order(p?.sourceId));break}
+    case 'cancelSalesOrder':case 'reserveSalesOrder':case 'updateSalesMeta':case 'updateSalesOrderLines':addSo(args[0]);break
+    // An NCR on any document (MO, PO, subcontract, return, sales order) is bound to that document's sites (SEC-02).
+    case 'createQualityAlert':{const p=args[0] as {sourceId?:string}|undefined;addSource(p?.sourceId);break}
     case 'advanceSubcontract':case 'correctSubcontractServiceCost':case 'cancelSubcontract':{const sc=s.subcontractOrders.find(x=>x.id===args[0]);if(sc)t.warehouses.push(subcontractWarehouse(s,sc));break}
     case 'createEntity':case 'updateEntity':case 'deleteEntity':case 'duplicateEntity':{
       // Location-bound master data: a branch-scoped role manages only its own branch's sites (P1-2).
@@ -340,6 +408,8 @@ export function scopeTargets(s:S,name:string,args:unknown[]):ScopeTargets{
         }
       }
       if(['maintenanceOrders','maintenanceRequests','repairOrders'].includes(key))for(const eq of field('equipmentId')){const e=s.equipment.find(x=>x.id===eq);if(e)t.workCenters.push(e.workCenterId)}
+      // An NCR is bound to its document's sites, before and after the edit (SEC-02).
+      if(key==='qualityAlerts')for(const id of field('sourceId'))addSource(id)
       break
     }
     case 'startWorkOrder':case 'pauseWorkOrder':case 'finishWorkOrder':case 'reportOperationOutput':case 'markSetupDone':case 'assignWorkOrder':{
@@ -355,16 +425,25 @@ export function scopeTargets(s:S,name:string,args:unknown[]):ScopeTargets{
       if(e)t.workCenters.push(e.workCenterId)
       break
     }
-    case 'approveMaintenanceRequest':{const r=s.maintenanceRequests.find(x=>x.id===args[0]),e=s.equipment.find(x=>x.id===r?.equipmentId);if(e)t.workCenters.push(e.workCenterId);break}
+    case 'issueMaintenancePart':{const p=args[1] as {warehouseId?:string}|undefined;if(p?.warehouseId)t.warehouses.push(p.warehouseId);const m=s.maintenanceOrders.find(x=>x.id===args[0]),e=s.equipment.find(x=>x.id===m?.equipmentId);if(e)t.workCenters.push(e.workCenterId);break}
+    case 'returnMaintenancePart':{const m=s.maintenanceOrders.find(x=>x.id===args[0]),part=m?.parts?.find(x=>x.id===args[1]),e=s.equipment.find(x=>x.id===m?.equipmentId);if(part)t.warehouses.push(part.warehouseId);if(e)t.workCenters.push(e.workCenterId);break}
+    case 'rejectMaintenanceRequest':case 'approveMaintenanceRequest':{const r=s.maintenanceRequests.find(x=>x.id===args[0]),e=s.equipment.find(x=>x.id===r?.equipmentId);if(e)t.workCenters.push(e.workCenterId);break}
     case 'endDowntime':{const ev=s.downtimeEvents.find(x=>x.id===args[0]);if(ev)t.workCenters.push(ev.workCenterId);break}
     case 'createQualityCheck':{
-      const p=args[0] as {sourceType?:string;sourceId?:string}|undefined
-      if(p?.sourceType==='production')addOrder(order(p.sourceId))
-      if(p?.sourceType==='purchase')addPo(p.sourceId)
+      const p=args[0] as {sourceType?:string;sourceId?:string;receiptId?:string}|undefined
+      if(p?.sourceType==='production'||!p?.sourceType)addOrder(order(p?.sourceId))
+      if(p?.sourceType==='purchase'){addPo(p.sourceId);const wh=s.purchaseOrders.find(x=>x.id===p.sourceId)?.receipts.find(r=>r.id===p.receiptId)?.warehouseId;if(wh)t.warehouses.push(wh)}
+      if(p?.sourceType==='subcontract'){const sc=s.subcontractOrders.find(x=>x.id===p.sourceId);if(sc)t.warehouses.push(subcontractWarehouse(s,sc))}
       if(p?.sourceType==='return')t.warehouses.push(...returnWarehouses(s,p.sourceId))
       break
     }
     case 'transferStock':t.warehouses.push(String(args[1]),String(args[2]));break
+    case 'dispatchTransfer':{const p=args[0] as {from?:string;to?:string}|undefined;t.warehouses.push(String(p?.from||''),String(p?.to||''));break}
+    // Receiving is the target store's work; sending the rest back touches both stores.
+    case 'receiveTransfer':{const tr=(s.stockTransfers||[]).find(x=>x.id===args[0]);if(tr)t.warehouses.push(tr.to);break}
+    case 'returnTransfer':{const tr=(s.stockTransfers||[]).find(x=>x.id===args[0]);if(tr)t.warehouses.push(tr.from,tr.to);break}
+    case 'createStockCount':{const p=args[0] as {warehouseId?:string}|undefined;t.warehouses.push(String(p?.warehouseId||''));break}
+    case 'recordStockCount':case 'approveStockCount':case 'cancelStockCount':{const c=(s.stockCounts||[]).find(x=>x.id===args[0]);if(c)t.warehouses.push(c.warehouseId);break}
     case 'moveStockBin':case 'assignVariantStock':{const p=args[0] as {warehouseId?:string}|undefined;t.warehouses.push(String(p?.warehouseId||''));break}
     case 'allocateLegacyLots':{if(args[0]==='mo')addOrder(order(args[1]));else addSo(args[1]);break}
     case 'adjustStock':t.warehouses.push(String(args[1]));break
@@ -383,6 +462,10 @@ export function scopeTargets(s:S,name:string,args:unknown[]):ScopeTargets{
 export function commandBlocker(s:S,actor:Employee|undefined,name:string,args:unknown[]):string|null{
   if(!actor)return 'Avval tizimga kiring'
   if(!allowedBy(roleOf(s,actor.id),actionRules(name,args)??[['__unlisted__','view']]))return 'Rolingizda bu amal uchun ruxsat yo‘q'
+  if(name==='issueMaintenancePart'||name==='returnMaintenancePart'){
+    const unassigned=maintenancePartAssignmentBlocker(s,actor,String(args[0]||''))
+    if(unassigned)return unassigned
+  }
   return scopeBlocker(s,actor,name,args)
 }
 
@@ -579,6 +662,11 @@ export function scopedView(s:S,actor:Employee|undefined):S{
     notifications:s.notifications.filter(n=>{const id=linkedId(n.path);return (!n.branchId||branches.has(n.branchId))&&(!id||!hiddenIds.has(id))}),
     supplierReplacements:(s.supplierReplacements||[]).filter(r=>purchaseIds.has(r.purchaseOrderId)),
     receivableReconciliations:(s.receivableReconciliations||[]).filter(r=>salesIds.has(r.salesOrderId)),
+    // A transfer is seen by both ends; a stocktaking session only by its own store's staff.
+    stockTransfers:(s.stockTransfers||[]).filter(t=>stockWarehouses.has(t.from)||stockWarehouses.has(t.to)),
+    stockCounts:(s.stockCounts||[]).filter(c=>stockWarehouses.has(c.warehouseId)),
+    purchaseRequests:(s.purchaseRequests||[]).filter(r=>stockWarehouses.has(r.warehouseId)),
+    supplierInvoices:(s.supplierInvoices||[]).filter(i=>purchaseIds.has(i.purchaseOrderId)),
     activity:s.activity.filter(a=>(!a.userId||employeeIds.has(a.userId))&&(!a.source||!hiddenCodes.has(a.source))),
   }
 }

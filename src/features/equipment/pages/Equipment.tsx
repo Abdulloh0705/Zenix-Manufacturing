@@ -13,6 +13,8 @@ import {employeeName,equipmentName,lineName,productName,useNow,workCenterName} f
 import {ActivityPanel,AttachmentsPanel} from '../../common/RecordPanels'
 import {BarList} from '../../common/charts'
 import {WorkingDaysPicker,workingDaysLabel} from '../../common/WorkingDays'
+import {RejectRequestModal,SparePartsPanel} from '../components/SpareParts'
+import type {MaintenanceRequest} from '../../../types'
 
 export default function Equipment(){
   const [sp]=useSearchParams(),view=sp.get('view')||'equipment'
@@ -198,11 +200,13 @@ function MachineDrawer({machine,onClose,onEdit}:{machine:EquipmentType;onClose:(
 function WorkCenters(){
   const app=useApp(),s=app.state
   const loads=calculateCapacityLoads(s,7)
-  const [edit,setEdit]=useState<WorkCenter|null>(null)
-  const canEdit=app.can('equipment','edit')
+  const [edit,setEdit]=useState<WorkCenter|null>(null),[create,setCreate]=useState(false)
+  const canEdit=app.can('equipment','edit'),canCreate=app.can('equipment','create')
+  const add=canCreate?<button type="button" className="primary-glass-btn" onClick={()=>setCreate(true)}><Icon name="plus"/>Work center qo‘shish</button>:undefined
   return <div className="page-stack">
-    <PageHeader title="Work Centers" subtitle="7 kunlik yuklama (kalendar bo‘yicha), OEE, samaradorlik va stavka"/>
-    <div className="card flush"><div className="table-scroll"><table className="wc-table"><thead><tr><th>Work center</th><th>Holat</th><th>7 kun yuklama</th><th className="align-right">Ochiq ish</th><th className="align-right">OEE (7k)</th><th className="align-right">Samaradorlik</th>{app.can('costs')&&<th className="align-right">Stavka / soat</th>}<th>Uskunalar</th>{canEdit&&<th className="action-col"><span className="sr-only">Amal</span></th>}</tr></thead><tbody>
+    <PageHeader title="Work Centers" subtitle="7 kunlik yuklama (kalendar bo‘yicha), OEE, samaradorlik va stavka" actions={add}/>
+    {create&&<WorkCenterCreateModal onClose={()=>setCreate(false)}/>}
+    {!s.workCenters.length?<Empty icon="factory" title="Work center kiritilmagan" text="Work center liniyaga biriktiriladi; BOM routing va operator ish joyi shu yerdan tanlanadi"/>:<div className="card flush"><div className="table-scroll"><table className="wc-table"><thead><tr><th>Work center</th><th>Holat</th><th>7 kun yuklama</th><th className="align-right">Ochiq ish</th><th className="align-right">OEE (7k)</th><th className="align-right">Samaradorlik</th>{app.can('costs')&&<th className="align-right">Stavka / soat</th>}<th>Uskunalar</th>{canEdit&&<th className="action-col"><span className="sr-only">Amal</span></th>}</tr></thead><tbody>
       {s.workCenters.map(w=>{const l=loads.find(x=>x.workCenter.id===w.id)!,o=workCenterOee(s,w.id);return <tr key={w.id} className={l.down?'row-danger':l.overloaded?'row-warning':undefined}>
         <td><div className="cell-main"><b>{w.name}</b><small>{w.code} · {lineName(s,w.lineId)}</small><small>{(()=>{const c=workCenterCalendar(s,w);const brk=(w.calendar?.breaks||[]).reduce((a,b)=>a+b.minutes,0);return `${workingDaysLabel(c.workingDays)} · ${w.calendar?.shiftStart||'08:00'} · ${c.shifts}×${c.shiftMinutes} min${brk?` · tanaffus ${brk} min`:''}${(w.calendar?.parallel||1)>1?` · ${w.calendar!.parallel} parallel`:''}`})()}</small></div></td>
         <td><StatusBadge tone={l.down?'danger':l.overloaded?'warning':'success'}>{l.down?'To‘xtagan':l.overloaded?'Overload':'Normal'}</StatusBadge></td>
@@ -214,9 +218,40 @@ function WorkCenters(){
         <td className="wrap">{s.equipment.filter(e=>e.workCenterId===w.id).map(e=>e.name).join(', ')||'—'}</td>
         {canEdit&&<td className="action-col"><button type="button" className="icon-ghost" aria-label={`${w.name} — tahrirlash`} onClick={()=>setEdit(w)}><Icon name="edit" size={15}/></button></td>}
       </tr>})}
-    </tbody></table></div><p className="table-note">Yuklama = qolgan setup + run vaqti ÷ (ish kunlari × smenalar × smena × samaradorlik − texnik xizmat / to‘xtash) · ustunlar = 7 kun</p></div>
+    </tbody></table></div><p className="table-note">Yuklama = qolgan setup + run vaqti ÷ (ish kunlari × smenalar × smena × samaradorlik − texnik xizmat / to‘xtash) · ustunlar = 7 kun</p></div>}
     {edit&&<WorkCenterModal wc={edit} onClose={()=>setEdit(null)}/>}
   </div>
+}
+
+/**
+ * A new work center sits on a production line and takes the line's branch, so branch scope and the line → branch
+ * rule in the domain stay consistent. Calendar and energy are left to the company defaults and edited afterwards.
+ */
+function WorkCenterCreateModal({onClose}:{onClose:()=>void}){
+  const app=useApp(),s=app.state,navigate=useNavigate()
+  const lines=s.productionLines.filter(l=>s.branches.some(b=>b.id===l.branchId&&b.status!=='Arxiv'))
+  const taken=(code:string)=>s.workCenters.some(w=>w.code.trim().toUpperCase()===code.trim().toUpperCase())
+  const form=useForm({name:'',code:'',lineId:lines[0]?.id||'',efficiency:'100',costPerHour:'0'},v=>({name:required(v.name,'Nomi'),
+    code:required(v.code,'Kod')||(taken(v.code)?'Bu kod band':undefined),lineId:v.lineId?undefined:'Liniyani tanlang',
+    efficiency:Number(v.efficiency)>0&&Number(v.efficiency)<=120?undefined:'1–120%',costPerHour:v.costPerHour!==''&&Number(v.costPerHour)>=0?undefined:'Stavka noto‘g‘ri'}))
+  const save=()=>form.submit(v=>{
+    const line=lines.find(l=>l.id===v.lineId)
+    if(!line)return false
+    const r=app.createEntity('workCenters',{name:v.name.trim(),code:v.code.trim().toUpperCase(),branchId:line.branchId,lineId:line.id,capacity:0,
+      efficiency:Number(v.efficiency),status:'Ishlamoqda',machineIds:[],costPerHour:Number(v.costPerHour)})
+    if(r.ok)onClose();return r.ok
+  })
+  return <Modal open onClose={onClose} title="Yangi work center" size="md" footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Bekor qilish</button><button type="button" className="primary-glass-btn" disabled={!lines.length} onClick={save}>Saqlash</button></>}>
+    {!lines.length?<div className="inline-note warning"><Icon name="warning"/><span>Avval ishlab chiqarish liniyasini yarating — work center liniya va uning filialiga biriktiriladi.</span>
+      <button type="button" className="ghost-btn" onClick={()=>navigate('/settings?view=locations')}>Liniya qo‘shish <Icon name="chevron" size={13}/></button></div>:
+    <div className="form-grid">
+      <Field label="Nomi" required error={form.error('name')}><Input {...form.input('name')} autoFocus/></Field>
+      <Field label="Kod" required error={form.error('code')}><Input {...form.input('code')}/></Field>
+      <Field className="span-2" label="Liniya" required hint={`Filial: ${s.branches.find(b=>b.id===lines.find(l=>l.id===form.values.lineId)?.branchId)?.name||'—'}`} error={form.error('lineId')}><Select value={form.values.lineId} onChange={v=>form.set('lineId',v)}>{lines.map(l=><option key={l.id} value={l.id}>{l.name} · {l.code}</option>)}</Select></Field>
+      <Field label="Samaradorlik %" hint="Sig‘im = smena × samaradorlik" error={form.error('efficiency')}><Input type="number" {...form.input('efficiency')}/></Field>
+      <Field label="Soatlik stavka" hint="Machine cost uchun" error={form.error('costPerHour')}><MoneyInput min="0" {...form.money('costPerHour')}/></Field>
+    </div>}
+  </Modal>
 }
 
 /** "12:00+60, 15:00+15" → breaks; null when any part is not a real clock time with 1–240 minutes. */
@@ -287,7 +322,8 @@ function MaintenanceDrawer({order,onClose}:{order:MaintenanceOrder;onClose:()=>v
       {label:'Amalda boshlangan',value:order.startedAt||'—'},{label:'Amalda tugagan',value:order.completed||'—'},{label:'To‘xtash',value:stopMinutes!==undefined?formatMinutes(stopMinutes):'—'},{label:'Xarajat',value:order.cost?money(order.cost):'—'}]}/>
     <div className="inline-note"><Icon name="info"/>{order.note}</div>
     {order.override&&<div className="inline-note warning"><Icon name="warning"/>Boshqa servis bilan kesishuv tasdiqlangan: {order.override.reason} · {employeeName(s,order.override.by)}</div>}
-    {order.status==='Jarayonda'&&canEdit&&<div className="form-grid"><Field label="Yakuniy xarajat" hint="Ehtiyot qism + ish haqi"><MoneyInput min="0" value={cost} onValue={setCost}/></Field><Field label="Bajarilgan ish"><Input value={note} onChange={e=>setNote(e.target.value)} placeholder="Masalan: podshipnik almashtirildi"/></Field></div>}
+    {order.status==='Jarayonda'&&canEdit&&<div className="form-grid"><Field label="Ish / xizmat xarajati" hint="Ombordan berilgan ehtiyot qismlarsiz — ular avtomatik qo‘shiladi"><MoneyInput min="0" value={cost} onValue={setCost}/></Field><Field label="Bajarilgan ish"><Input value={note} onChange={e=>setNote(e.target.value)} placeholder="Masalan: podshipnik almashtirildi"/></Field></div>}
+    <SparePartsPanel order={order}/>
     {order.status==='Rejada'&&<p className="soft-meta">Boshlash uskunani to‘xtatadi (downtime ochiladi) va ishlayotgan operatsiyalarni pauzaga o‘tkazadi; yakunlash faqat jarayon boshlanganidan keyin mavjud.</p>}
     {order.history?.length?<><SectionTitle title="Tarix"/><div className="stack-list">{order.history.map((h,i)=><div className="list-row" key={i}><span className="list-row-copy"><b>{h.action}</b><small>{h.at} · {employeeName(s,h.by)}{h.note?` · ${h.note}`:''}</small></span></div>)}</div></>:<ActivityPanel sources={[order.code]}/>}
     {edit&&<MaintenanceOrderModal order={order} onClose={()=>setEdit(false)}/>}
@@ -341,7 +377,7 @@ function Preventive(){
   const weeks=Array.from({length:4},(_,w)=>Array.from({length:7},(_,d)=>addDays(today,w*7+d)))
   return <div className="page-stack">
     <PageHeader title="Preventive Maintenance" subtitle="Kun / hafta / oy yoki ish soati bo‘yicha reja · 14 kun ichida muddati keladiganlar uchun PM"
-      actions={<button type="button" className="primary-glass-btn" disabled={!app.can('equipment','edit')} onClick={()=>app.planPreventiveMaintenance(14)}><Icon name="calendar"/>PM rejasini yaratish</button>}/>
+      actions={<button type="button" className="primary-glass-btn" disabled={!app.can('equipment','edit')} onClick={()=>app.planPreventiveMaintenance(14,s.equipment.map(e=>e.id))}><Icon name="calendar"/>PM rejasini yaratish</button>}/>
     <Tabs items={[{value:'schedule',label:'Servis jadvali',count:rows.filter(r=>['overdue','due','soon'].includes(r.due.state)).length},{value:'calendar',label:'Kalendar (28 kun)',count:calendar.length},{value:'orders',label:'Rejadagi PM',count:planned.length}]} active={tab} onChange={setTab}/>
     {tab==='schedule'&&<Card className="flush"><div className="table-scroll"><table className="fit"><thead><tr><th>Uskuna</th><th>Reja</th><th>Oxirgi servis</th><th>Keyingi</th><th>Holat</th><th>PM</th>{app.can('equipment','edit')&&<th className="action-col"><span className="sr-only">Amal</span></th>}</tr></thead><tbody>
       {rows.map(({e,due})=>{const pm=planned.find(m=>m.equipmentId===e.id);return <tr key={e.id} className={due.state==='overdue'?'row-danger':due.state==='soon'||due.state==='due'?'row-warning':undefined}>
@@ -399,7 +435,7 @@ function RequestModal({equipmentId,onClose}:{equipmentId?:string;onClose:()=>voi
   const app=useApp(),s=app.state
   const form=useForm({equipmentId:equipmentId||s.equipment[0]?.id||'',type:'Corrective',priority:'Normal',scheduled:addDays(todayISO(),1),reason:''},v=>({reason:required(v.reason,'Sabab')}))
   return <Modal open onClose={onClose} title="Maintenance so‘rovi" size="md" subtitle="Tasdiqlanganda buyurtma rejalashtiriladi"
-    footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Bekor qilish</button><button type="button" className="primary-glass-btn" onClick={()=>form.submit(v=>{const r=app.createEntity('maintenanceRequests',{code:`MR-${Date.now().toString().slice(-6)}`,equipmentId:v.equipmentId,type:v.type,priority:v.type==='Emergency'?'Kritik':v.priority,status:'Yangi',requestedBy:app.currentEmployee.id,scheduled:`${v.scheduled} 09:00`,reason:v.reason.trim(),downtimeHours:0});if(r.ok)onClose();return r.ok})}>Yuborish</button></>}>
+    footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Bekor qilish</button><button type="button" className="primary-glass-btn" onClick={()=>form.submit(v=>{const r=app.createEntity('maintenanceRequests',{equipmentId:v.equipmentId,type:v.type,priority:v.type==='Emergency'?'Kritik':v.priority,status:'Yangi',requestedBy:app.currentEmployee.id,scheduled:`${v.scheduled} 09:00`,reason:v.reason.trim(),downtimeHours:0});if(r.ok)onClose();return r.ok})}>Yuborish</button></>}>
     <div className="form-grid">
       <Field label="Uskuna"><Select value={form.values.equipmentId} onChange={v=>form.set('equipmentId',v)}>{s.equipment.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}</Select></Field>
       <Field label="Tur"><Select value={form.values.type} onChange={v=>form.set('type',v)}>{['Preventive','Corrective','Emergency'].map(x=><option key={x} value={x}>{x}</option>)}</Select></Field>
@@ -413,22 +449,23 @@ function RequestModal({equipmentId,onClose}:{equipmentId?:string;onClose:()=>voi
 function Requests(){
   const app=useApp(),s=app.state
   const [q,setQ]=useSearchParamState('q'),[status,setStatus]=useSearchParamState('status')
-  const [create,setCreate]=useState(false)
+  const [create,setCreate]=useState(false),[reject,setReject]=useState<MaintenanceRequest|null>(null)
   const rows=s.maintenanceRequests.filter(r=>!status||r.status===status)
   return <div className="page-stack">
     <PageHeader title="Maintenance so‘rovlari" subtitle="So‘rov → tasdiqlash → buyurtma" actions={<button type="button" className="primary-glass-btn" disabled={!app.can('equipment','create')&&!app.can('production','edit')} onClick={()=>setCreate(true)}><Icon name="plus"/>So‘rov</button>}/>
     <ResourceTable rows={rows} query={q} onQuery={setQ} placeholder="Kod, uskuna, sabab..." exportName="maintenance-requests"
-      filters={<FilterSelect label="Status" value={status} onChange={setStatus} options={['Yangi','Tasdiqlangan','Jarayonda','Yakunlangan']}/>} filtersActive={Boolean(status)} onResetFilters={()=>setStatus('')}
+      filters={<FilterSelect label="Status" value={status} onChange={setStatus} options={['Yangi','Tasdiqlangan','Jarayonda','Yakunlangan','Rad etilgan']}/>} filtersActive={Boolean(status)} onResetFilters={()=>setStatus('')}
       columns={[
-        {key:'code',label:'So‘rov',value:r=>r.code,render:r=><div className="cell-main"><b>{r.code}</b><small className="wrap">{r.reason}</small></div>},
+        {key:'code',label:'So‘rov',value:r=>r.code,render:r=><div className="cell-main"><b>{r.code}</b><small className="wrap">{r.reason}{r.decisionNote?` · rad etildi: ${r.decisionNote}`:''}</small></div>},
         {key:'equipment',label:'Uskuna',value:r=>equipmentName(s,r.equipmentId)},
         {key:'type',label:'Tur',value:r=>r.type},
         {key:'priority',label:'Priority',value:r=>r.priority,render:r=><StatusBadge>{r.priority}</StatusBadge>},
         {key:'status',label:'Status',value:r=>r.status,render:r=><StatusBadge>{r.status}</StatusBadge>},
         {key:'by',label:'So‘ragan',value:r=>employeeName(s,r.requestedBy),priority:'low'},
-        {key:'action',label:'',sortable:false,searchable:false,render:r=>r.status==='Yangi'?<button type="button" className="soft-glass-btn compact" disabled={!app.can('equipment','approve')} title={app.can('equipment','approve')?undefined:'Tasdiqlash uchun equipment.approve ruxsati kerak'} onClick={()=>app.approveMaintenanceRequest(r.id)}>Tasdiqlash</button>:<span className="soft-meta">{s.maintenanceOrders.find(m=>m.requestId===r.id)?.code||''}</span>},
+        {key:'action',label:'',sortable:false,searchable:false,render:r=>r.status==='Yangi'?<span className="badge-row"><button type="button" className="ghost-btn compact" disabled={!app.can('equipment','approve')} onClick={()=>setReject(r)}>Rad etish</button><button type="button" className="soft-glass-btn compact" disabled={!app.can('equipment','approve')} title={app.can('equipment','approve')?undefined:'Tasdiqlash uchun equipment.approve ruxsati kerak'} onClick={()=>app.approveMaintenanceRequest(r.id)}>Tasdiqlash</button></span>:<span className="soft-meta">{s.maintenanceOrders.find(m=>m.requestId===r.id)?.code||''}</span>},
       ]}/>
     {create&&<RequestModal onClose={()=>setCreate(false)}/>}
+    {reject&&<RejectRequestModal request={reject} onClose={()=>setReject(null)}/>}
   </div>
 }
 

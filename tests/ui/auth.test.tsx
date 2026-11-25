@@ -244,6 +244,7 @@ test('owner ticket: storage tricks and forged tickets fail; a real one restores 
   const before=stored()
   await open('/forgot-password',owner.publicKey)
   await click(byText('Kalitim yo‘q'))
+  assert.equal(input('forgot-ticket')?.getAttribute('type'),'password','the signed ticket is masked on screen')
   await type(input('forgot-login'),'Boss')
   const command=document.querySelector('.auth-code code')?.textContent||''
   assert.ok(command.includes('--login "boss"'),'the page gives the command for the typed login')

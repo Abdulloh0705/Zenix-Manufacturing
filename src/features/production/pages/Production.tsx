@@ -403,7 +403,9 @@ function ShopFloor({open}:{open:Open}){
   const opStarted=Boolean(current&&['Jarayonda','Pauzada'].includes(current.status))
   const equipment=s.equipment.find(e=>e.workCenterId===current?.workCenterId)
   const openDowntime=equipment&&s.downtimeEvents.find(d=>d.equipmentId===equipment.id&&!d.end)
-  const canEdit=app.can('production','edit')
+  // Every control below is shop-floor execution (PROD_RUN in access.ts: production.execute or .edit), so an
+  // operator — who holds execute, not edit — can run it.
+  const canEdit=app.can('production','execute')||app.can('production','edit')
   const running=['Jarayonda','Pauzada'].includes(o.status)
   const done=o.workOrders.filter(w=>w.status==='Yakunlangan').length
   const submitScan=()=>{if(!scan.trim())return;app.recordMaterialScan(o.id,scan);setScan('')}

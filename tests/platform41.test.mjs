@@ -205,3 +205,18 @@ test('platform store normalization rejects malformed data and caps audit',()=>{
   assert.equal(p.audit.length,P.PLATFORM_AUDIT_LIMIT)
   assert.equal(P.sessionAudit(P.emptyPlatformStore(),'<script>','session.start',now).audit[0].actor,'unknown')
 })
+
+test('platform audit reasons reject secrets before any tenant, subscription, feature or settings write',()=>{
+  const snap=fixture(),before=JSON.stringify(snap),secret='password: supersecret'
+  assert.match(P.platformReasonProblem(secret),/maxfiy|parol|kalit/i)
+  assert.match(P.platformReasonProblem('api_key: sk-1234567890123456'),/maxfiy|parol|kalit/i)
+  assert.match(P.platformReasonProblem('token: abcdef1234567890'),/maxfiy|parol|kalit/i)
+  const outcomes=[
+    P.opTenantStatus(snap,actor,T(1),'suspended',secret,now),
+    P.opOverride(snap,actor,T(1),'pro','active',secret,now),
+    P.opFeature(snap,actor,T(1),'sales',false,secret,now),
+    P.opSettings(snap,actor,{...snap.platform.settings,defaultTrialDays:30},secret,now),
+  ]
+  for(const out of outcomes){assert.equal(out.ok,false);assert.match(out.error,/maxfiy|parol|kalit/i)}
+  assert.equal(JSON.stringify(snap),before)
+})

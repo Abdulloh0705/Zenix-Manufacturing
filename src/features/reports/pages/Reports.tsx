@@ -4,7 +4,7 @@ import {Link,useNavigate,useSearchParams} from 'react-router-dom'
 import {useApp} from '../../../app/providers/AppProvider/AppContext'
 import {Card,Empty,FilterSelect,Icon,InfoGrid,KPI,PageHeader,StatusBadge,useSearchParamState} from '../../../shared/ui'
 import type {ManufacturingState} from '../../../types'
-import {buildTraceability,calculateCapacityLoads,downtimeByReason,findTraceOrder,orderCosting,productionOee,stockOf,workCenterOee} from '../../../domain/manufacturingEngine'
+import {buildTraceability,calculateCapacityLoads,downtimeByReason,findTraceOrder,inventoryValuation,orderCosting,productionOee,stockOf,stockValuation,workCenterOee} from '../../../domain/manufacturingEngine'
 import {profitabilityByProduct} from '../../../domain/profitability'
 import {addDays,daysBetween,displayStamp,shortDate,todayISO} from '../../../utils/dates'
 import {compactMoney,money,num} from '../../../utils/format'
@@ -77,24 +77,27 @@ function buildReport(view:string,s:S,since:string,period:number):Report{
     const daysList=Array.from({length:Math.min(period,31)},(_,i)=>addDays(todayISO(),-Math.min(period,31)+1+i))
     const output=daysList.map(d=>({label:shortDate(d),value:s.stockMovements.filter(m=>m.type==='Production +'&&m.date.startsWith(d)&&!m.note.includes('By-product')).reduce((a,m)=>a+m.qty,0),detail:d}))
     const completed=s.productionOrders.filter(o=>o.status==='Yakunlangan'&&inPeriod(o.completedAt))
+    // Rework processes units already counted by the source MO; counting them again inflates physical yield.
+    const yieldOrders=completed.filter(o=>!o.reworkOf)
+    const good=yieldOrders.reduce((a,o)=>a+o.completed,0),total=yieldOrders.reduce((a,o)=>a+o.completed+o.scrap,0)
     const onTime=completed.filter(o=>(o.completedAt||'').slice(0,10)<=o.due).length
     const byProduct=s.products.map(p=>({p,qty:output.length?s.stockMovements.filter(m=>m.type==='Production +'&&m.itemId===p.id&&inPeriod(m.date)).reduce((a,m)=>a+m.qty,0):0})).filter(x=>x.qty>0)
     return {title:'Ishlab chiqarish hisoboti',subtitle:'Tayyor kirim va yakunlangan MOlar',
       rows:completed.map(o=>({MO:o.code,Mahsulot:productName(s,o.productId),Reja:o.quantity,Tayyor:o.completed,Scrap:o.scrap,Due:o.due,Yakunlangan:o.completedAt||'',Vaqtida:(o.completedAt||'').slice(0,10)<=o.due?'Ha':'Yo‘q',Lot:o.lot||o.serialRange||''})),
       body:<>
-        <div className="kpi-grid"><KPI label="Ishlab chiqarildi" value={num(output.reduce((a,d)=>a+d.value,0))} sub="dona" icon={<Icon name="factory"/>}/><KPI label="Yakunlangan MO" value={completed.length} tone="mint" icon={<Icon name="check"/>}/><KPI label="Vaqtida yakunlash" value={completed.length?`${Math.round(onTime/completed.length*100)}%`:'—'} sub={`${onTime}/${completed.length}`} tone="purple" icon={<Icon name="clock"/>}/><KPI label="Yield" value={completed.length?`${(completed.reduce((a,o)=>a+o.completed,0)/Math.max(1,completed.reduce((a,o)=>a+o.completed+o.scrap,0))*100).toFixed(1)}%`:'—'} sub="Yaroqli / jami" tone="orange" icon={<Icon name="target"/>}/></div>
+        <div className="kpi-grid"><KPI label="Ishlab chiqarildi" value={num(output.reduce((a,d)=>a+d.value,0))} sub="dona" icon={<Icon name="factory"/>}/><KPI label="Yakunlangan MO" value={completed.length} tone="mint" icon={<Icon name="check"/>}/><KPI label="Vaqtida yakunlash" value={completed.length?`${Math.round(onTime/completed.length*100)}%`:'—'} sub={`${onTime}/${completed.length}`} tone="purple" icon={<Icon name="clock"/>}/><KPI label="Yield" value={total?`${(good/total*100).toFixed(1)}%`:'—'} sub="Yaroqli / jami" tone="orange" icon={<Icon name="target"/>}/></div>
         <div className="split-main"><Card title="Kunlik output"><ColumnChart title="Kunlik output" data={output} valueLabel="Ishlab chiqarildi" unit="dona"/></Card><Card title="Mahsulot bo‘yicha">{byProduct.length?<BarList rows={byProduct.map(x=>({label:x.p.name,value:x.qty}))} unit="dona"/>:<Empty compact title="Output yo‘q"/>}</Card></div>
       </>}
   }
   if(view==='costs'){
     const done=s.productionOrders.filter(o=>o.status==='Yakunlangan'&&inPeriod(o.completedAt)).map(o=>({o,c:orderCosting(s,o)}))
-    const sum=(k:'material'|'labor'|'machine'|'overhead')=>done.reduce((a,x)=>a+x.c.actual[k],0)
+    const sum=(k:'material'|'labor'|'machine'|'energy'|'overhead')=>done.reduce((a,x)=>a+x.c.actual[k],0)
     const total=done.reduce((a,x)=>a+x.c.actual.total,0),planned=done.reduce((a,x)=>a+x.c.planned.total,0)
     return {title:'Tannarx va variance',subtitle:'Yakunlangan MO: amalda vs reja',
-      rows:done.map(({o,c})=>({MO:o.code,Mahsulot:productName(s,o.productId),Tayyor:o.completed,Material:Math.round(c.actual.material),Mehnat:Math.round(c.actual.labor),Uskuna:Math.round(c.actual.machine),Overhead:Math.round(c.actual.overhead),Jami:Math.round(c.actual.total),Reja:Math.round(c.planned.total),'Variance %':c.variancePct,'Birlik tannarx':Math.round(c.unitCost)})),
+      rows:done.map(({o,c})=>({MO:o.code,Mahsulot:productName(s,o.productId),Tayyor:o.completed,Material:Math.round(c.actual.material),Mehnat:Math.round(c.actual.labor),Uskuna:Math.round(c.actual.machine),Energiya:Math.round(c.actual.energy),Overhead:Math.round(c.actual.overhead),Jami:Math.round(c.actual.total),Reja:Math.round(c.planned.total),'Variance %':c.variancePct,'Birlik tannarx':Math.round(c.unitCost)})),
       body:<>
         <div className="kpi-grid"><KPI label="Amaldagi tannarx" value={compactMoney(total)} icon={<Icon name="wallet"/>}/><KPI label="Reja" value={compactMoney(planned)} tone="purple" icon={<Icon name="chart"/>}/><KPI label="Variance" value={`${total-planned>0?'+':''}${compactMoney(total-planned)}`} sub={planned?`${((total-planned)/planned*100).toFixed(1)}%`:'—'} tone={total>planned?'pink':'mint'} icon={<Icon name="activity"/>}/><KPI label="MOlar" value={done.length} tone="orange" icon={<Icon name="factory"/>}/></div>
-        <div className="two-col"><Card title="Tannarx tarkibi"><StackedBar title="Tannarx tarkibi" segments={[{label:'Material',value:Math.round(sum('material')),slot:1},{label:'Mehnat',value:Math.round(sum('labor')),slot:2},{label:'Uskuna',value:Math.round(sum('machine')),slot:3},{label:'Overhead',value:Math.round(sum('overhead')),slot:4}]} format={compactMoney}/></Card>
+        <div className="two-col"><Card title="Tannarx tarkibi"><StackedBar title="Tannarx tarkibi" segments={[{label:'Material',value:Math.round(sum('material')),slot:1},{label:'Mehnat',value:Math.round(sum('labor')),slot:2},{label:'Uskuna',value:Math.round(sum('machine')),slot:3},{label:'Energiya',value:Math.round(sum('energy')),slot:4},{label:'Overhead',value:Math.round(sum('overhead')),slot:5}]} format={compactMoney}/></Card>
           <Card title="Variance bo‘yicha">{done.length?<div className="stack-list">{done.sort((a,b)=>b.c.variancePct-a.c.variancePct).map(({o,c})=><div className="list-row" key={o.id}><span className="list-row-copy"><b>{o.code} · {productName(s,o.productId)}</b><small>{money(c.actual.total)} · birlik {money(c.unitCost)}</small></span><b className={c.variancePct>0?'negative':'positive'}>{c.variancePct>0?'+':''}{c.variancePct}%</b></div>)}</div>:<Empty compact title="Ma’lumot yo‘q"/>}</Card></div>
       </>}
   }
@@ -116,15 +119,18 @@ function buildReport(view:string,s:S,since:string,period:number):Report{
   }
   if(view==='inventory'){
     const cost=(id:string)=>s.rawMaterials.find(m=>m.id===id)?.standardCost??s.products.find(p=>p.id===id)?.standardCost??0
-    const byWh=s.warehouses.map(w=>({w,value:s.stockBalances.filter(b=>b.warehouseId===w.id).reduce((a,b)=>a+b.onHand*cost(b.itemId),0)}))
+    // P4-I-01 (decision STANDARD): book value at standard cost; the same stock at actual lot cost and the difference beside it.
+    const byWh=s.warehouses.map(w=>{const v=inventoryValuation(s,s.stockBalances.filter(b=>b.warehouseId===w.id));return {w,value:v.standard,valuation:v}})
+    const total=inventoryValuation(s)
+    const signed=(n:number)=>`${n>0?'+':n<0?'−':''}${compactMoney(Math.abs(n))}`
     const lots=s.lots.filter(l=>l.qty>0)
     const aging=[['0–7 kun',0,7],['8–30 kun',8,30],['31–90 kun',31,90],['90+ kun',91,9999]].map(([label,a,b])=>({label:String(label),value:lots.filter(l=>{const d=daysBetween(l.createdAt,todayISO());return d>=Number(a)&&d<=Number(b)}).reduce((x,l)=>x+l.qty*cost(l.itemId),0)}))
     const moves=s.stockMovements.filter(m=>inPeriod(m.date))
     return {title:'Ombor hisoboti',subtitle:'Qiymat, ombor bo‘yicha, lot yoshi',
-      rows:s.stockBalances.map(b=>({Ombor:warehouseName(s,b.warehouseId),Item:materialName(s,b.itemId),'On hand':Math.round(b.onHand*100)/100,Rezerv:Math.round(b.reserved*100)/100,Available:Math.round((b.onHand-b.reserved)*100)/100,"Yo‘lda":b.incoming,Qiymat:Math.round(b.onHand*cost(b.itemId))})),
+      rows:s.stockBalances.map(b=>({Ombor:warehouseName(s,b.warehouseId),Item:materialName(s,b.itemId),'On hand':Math.round(b.onHand*100)/100,Rezerv:Math.round(b.reserved*100)/100,Available:Math.round((b.onHand-b.reserved)*100)/100,"Yo‘lda":b.incoming,...(v=>({'Qiymat (standart)':v.standard,'Qiymat (LOT)':v.actual,'Narx farqi (LOT − standart)':v.variance}))(stockValuation(s,b))})),
       body:<>
-        <div className="kpi-grid"><KPI label="Zaxira qiymati" value={compactMoney(byWh.reduce((a,x)=>a+x.value,0))} icon={<Icon name="wallet"/>}/><KPI label="Faol lotlar" value={lots.length} tone="purple" icon={<Icon name="barcode"/>}/><KPI label="Kirim harakatlari" value={moves.filter(m=>m.qty>0).length} tone="mint" icon={<Icon name="download"/>}/><KPI label="Chiqim harakatlari" value={moves.filter(m=>m.qty<0).length} tone="orange" icon={<Icon name="upload"/>}/></div>
-        <div className="two-col"><Card title="Ombor bo‘yicha qiymat"><BarList rows={byWh.map(x=>({label:x.w.name,sub:x.w.type,value:x.value}))} valueFormat={v=>compactMoney(v)}/></Card><Card title="Lot yoshi (qiymat)"><BarList rows={aging} valueFormat={v=>compactMoney(v)}/></Card></div>
+        <div className="kpi-grid"><KPI label="Zaxira qiymati · standart" value={compactMoney(total.standard)} sub="Ombor balansi (asosiy baholash)" icon={<Icon name="wallet"/>}/><KPI label="LOT xarid tannarxida" value={compactMoney(total.actual)} sub="Ishlab chiqarish shu narxda hisoblaydi" tone="mint" icon={<Icon name="wallet"/>}/><KPI label="Narx farqi (LOT − standart)" value={signed(total.variance)} sub="Ko‘rsatiladi, hisobga o‘tkazilmaydi" tone={total.variance>0?'pink':'purple'} icon={<Icon name="chart"/>}/><KPI label="Faol lotlar" value={lots.length} tone="purple" icon={<Icon name="barcode"/>}/><KPI label="Kirim harakatlari" value={moves.filter(m=>m.qty>0).length} tone="mint" icon={<Icon name="download"/>}/><KPI label="Chiqim harakatlari" value={moves.filter(m=>m.qty<0).length} tone="orange" icon={<Icon name="upload"/>}/></div>
+        <div className="two-col"><Card title="Ombor bo‘yicha qiymat" subtitle="Standart narxda"><BarList rows={byWh.map(x=>({label:x.w.name,sub:`${x.w.type} · LOT ${compactMoney(x.valuation.actual)}`,value:x.value}))} valueFormat={v=>compactMoney(v)}/></Card><Card title="Lot yoshi (qiymat)" subtitle="Standart narxda"><BarList rows={aging} valueFormat={v=>compactMoney(v)}/></Card></div>
       </>}
   }
   if(view==='efficiency'){
@@ -193,7 +199,7 @@ function Traceability(){
         <TraceNode icon="users" label="Mijoz" title={trace.downstreamSales.map(o=>o.code).join(', ')||'Omborda'} sub={[...new Set(trace.downstreamSales.map(o=>customerName(s,o.customerId)))].join(', ')||'Hali sotilmagan'}/>
       </div>
       <div className="two-col">
-        <Card title="Upstream: sarflangan lotlar">{trace.upstreamLots.length?<div className="stack-list">{trace.upstreamLots.map(l=><button type="button" key={l.id} className="list-row is-clickable" onClick={()=>setQ(l.code)}><span className="list-row-copy"><b>{l.code}</b><small>{materialName(s,l.itemId)} · {l.sourceCode}{l.sourceType==='purchase'?` · ${supplierName(s,s.purchaseOrders.find(p=>p.id===l.sourceId)?.supplierId)}`:''}</small></span><span className="list-row-meta"><span className="num">{num(order.consumed.filter(c=>c.lot===l.code).reduce((a,c)=>a+c.qty,0),1)}</span></span></button>)}</div>:<Empty compact title="Material hali sarflanmagan"/>}</Card>
+        <Card title="Upstream: sarflangan lotlar">{trace.upstreamLots.length?<div className="stack-list">{trace.upstreamLots.map(l=><button type="button" key={l.id} className="list-row is-clickable" onClick={()=>setQ(l.code)}><span className="list-row-copy"><b>{l.code}</b><small>{materialName(s,l.itemId)} · {l.sourceCode}{l.sourceType==='purchase'?` · ${supplierName(s,s.purchaseOrders.find(p=>p.id===l.sourceId)?.supplierId)}`:''}</small></span><span className="list-row-meta"><span className="num">{num(order.consumed.filter(c=>c.lot===l.code&&c.materialId===l.itemId&&(!c.warehouseId||c.warehouseId===l.warehouseId)).reduce((a,c)=>a+c.qty,0),1)}</span></span></button>)}</div>:<Empty compact title="Material hali sarflanmagan"/>}</Card>
         <Card title="Downstream: jo‘natmalar">{trace.movements.filter(m=>m.type==='Production +').length?<div className="stack-list">{shipments(s,trace.outputLots).map(g=><div className="list-row" key={g.key}><span className="list-row-copy"><b>{g.source}</b><small>{g.date} · {num(g.qty)} · {g.lots.slice(0,3).join(', ')}{g.lots.length>3?` +${g.lots.length-3}`:''}</small></span><StatusBadge tone="success">Jo‘natilgan</StatusBadge></div>)}{trace.outputLots.filter(l=>!isSerialUnit(l)).map(l=><div className="list-row" key={l.id}><span className="list-row-copy"><b>{l.code}</b><small>Omborda qoldiq {num(l.qty)} · {warehouseName(s,l.warehouseId)}</small></span></div>)}{unitsInStock(trace.outputLots).map(([wh,codes])=><div className="list-row" key={wh}><span className="list-row-copy"><b>{codes.length} ta serial omborda</b><small>{warehouseName(s,wh)} · {codes.slice(0,3).join(', ')}{codes.length>3?` +${codes.length-3}`:''}</small></span></div>)}</div>:<Empty compact title="Tayyor mahsulot hali qabul qilinmagan"/>}</Card>
       </div>
       <InfoGrid items={[{label:'Mahsulot zaxirasi',value:num(stockOf(s,order.productId).onHand)},{label:'Ishlab chiqarilgan',value:order.completedAt||'jarayonda'},{label:'Harakatlar',value:trace.movements.length},{label:'Qaytarishlar',value:s.returns.filter(r=>r.lot&&trace.outputLots.some(l=>l.code===r.lot)).length}]}/>

@@ -398,3 +398,155 @@ To‘liq dalil va cheklovlar: `docs/audits/ZENIX_PRO_FULL_AUDIT.md`.
 | ZA-012 | FIXED | Scoped rol uchun xodim profilida va akkaunt faollashtirishda filial/ish markazi/ombor tekshiriladi. |
 
 **Ochiq:** ZA-008 yakuniy COGS farq jurnali, ZA-009 ko‘p kalitli ro‘yxatdan o‘tish atomikligi, ZA-010 kompaniya nomi/ID siyosati, yuborilgan material qaytarishi va qabuldan keyingi subcontract narx tuzatishi. Bularni tarixiy tannarxni dalilsiz qayta yozmasdan loyihalash kerak. Tafsilot va tekshiruvlar: `docs/audits/ZENIX_PHASE36_REPORT.md`.
+
+## Frontend completion — bosqich 1 (2026-11-12)
+
+Bu bosqich faqat `ZENIX-Pro` frontendiga tegishli. Backend, state schema/migration va GitHub push qilinmadi.
+
+| ID | Holat | Tuzatish va tekshiruv |
+| --- | --- | --- |
+| FC-001 | FIXED | Sales order kartasi qisman stock bo‘lganda jo‘natishni bloklamaydi; kartadagi amal va Delivery sahifasi bir xil miqdorli oynani ishlatadi. Jo‘natish miqdori available + rezerv va butun birlik bilan cheklanadi. `tests/ui/salesDelivery.test.tsx`. |
+| FC-002 | FIXED | Qisman yetkazilgan buyurtmada qaytarish mumkin bo‘lgan miqdor qolsa, kartada “Qaytarish” amali ko‘rinadi. `tests/ui/salesDelivery.test.tsx`. |
+| FC-003 | FIXED | Sotuv overview’dagi ochiq buyurtmalar summasi faqat yetkazilmagan qator qiymatidan hisoblanadi. `tests/ui/salesDelivery.test.tsx`. |
+| FC-004 | FIXED | Domain tannarxiga kiradigan energiya Costs tarkib jadvalida, Reports grafikida va eksport qatorida alohida ko‘rsatiladi. `tests/ui/costEnergy.test.tsx`. |
+| FC-005 | FIXED | Super Admin kompaniya, obuna, funksiya va sozlama sabablarida parol, chipta, API kalit yoki token ko‘rinishidagi matnni tasdiqlashdan oldin hamda domain yozish chegarasida rad etadi; bunday matn auditga tushmaydi. `tests/platform41.test.mjs`, `tests/ui/platform.test.tsx`. |
+
+Tekshiruv: TypeScript, ESLint va production build o‘tdi; domain 438/438, UI 99/99, Chrome E2E desktop/mobile 37/37 (mavjud tablet 820px sinovi bilan). `git diff --check` o‘tdi. Brauzerda barcha tugma va barcha ekran o‘lchami to‘liq qamrab olindi degan xulosa chiqarilmaydi.
+
+**Keyingi frontend ishlar:** serial birlikni Sales delivery’da aniq tanlash (hozir FEFO tanlaydi), modullar bo‘yicha qolgan action/form/filtr kombinatsiyalarini va tablet responsive holatini kengaytirilgan sinash. ZA-008 COGS farq jurnali kabi tarixiy moliyaviy postinglar uchun yangi model va migratsiya kerak; joriy taqiq ostida avtomatik tasdiq yoki tarixiy tannarxni qayta yozish qilinmaydi. Platform billing/monitoring va xavfsizlikning haqiqiy server qismi backend integratsiyasiga bog‘liq.
+
+## Super Admin yakunlash (2026-11-12)
+
+Faqat `ZENIX-Pro` frontend, `/platform` ish maydoni. Backend, ma’lumotlar bazasi, migratsiya, commit va push qilinmadi. Saqlash sxemasi o‘zgarmadi (`zenix-saas-v1`, `zenix-platform-v1` mavjud normalizatorlardan o‘tadi).
+
+| ID | Holat | Tuzatish va tekshiruv |
+| --- | --- | --- |
+| SA-001 | FIXED | Kompaniya tahrirlash yo‘q edi. Platformadagi nomni sabab bilan o‘zgartirish (2–80 belgi, katta-kichik harfsiz takror nom va maxfiyga o‘xshash matn rad etiladi), SaaS hodisasi va bog‘langan audit. Kompaniyaning ERP profili o‘zgarmaydi. `tests/platformAdmin.test.mjs`, `tests/ui/platform.test.tsx`. |
+| SA-002 | FIXED (demo) | “Yangi kompaniya” tugmasi yo‘q edi. Endi egasi o‘zi ro‘yxatdan o‘tish yo‘lini, sinov muddati va ro‘yxat holatini ko‘rsatadi; taklif (invite) “Backend kerak” deb belgilangan. Platforma begona parol yaratmaydi. |
+| SA-003 | FIXED | Kompaniyalar, obunalar, support va audit jadvallarida sahifalash yo‘q edi (audit faqat “Yana 50 ta”). Umumiy `Pager`, filtr o‘zgarsa 1-sahifaga qaytadi. Obunalarda saralash qo‘shildi. |
+| SA-004 | FIXED | Audit alohida “Audit jurnali” bo‘limiga ajratildi: operator, sana oralig‘i (teskari oraliq xabar beradi), tartib filtrlari va batafsil drawer. |
+| SA-005 | FIXED | Brauzer xotirasiga qo‘lda yozilgan parol/token ko‘rinishidagi sabab yoki izoh UI’da ko‘rsatilmaydi va qidiruvda topilmaydi (`safeText`). Yozish chegarasidagi avvalgi filtr (FC-005) o‘zgarmadi. |
+| SA-006 | FIXED | Support: ustuvorlikni o‘zgartirish tarix va audit bilan, toifa filtri, saralash, holat KPI tugmalari. |
+| SA-007 | FIXED | Monitoring: obuna tugashi/yo‘qligi, shoshilinch va eskirgan murojaatlar, rad etilgan amallar, demo saqlash hajmi bo‘yicha yozuvlardan hisoblangan ogohlantirishlar; dashboardda ham ko‘rinadi, havola fokuslangan obunani ochadi. Server metrikasi ko‘rsatilmaydi. |
+| SA-008 | FIXED | Xavfsizlik: platforma ruxsatlari matritsasi (kompaniya rollari platforma huquqiga ega emas), xavfsizlik hodisalari va operatorlar xulosasi. Alohida platforma rollari “Backend kerak”. |
+| SA-009 | FIXED | Funksiyalar: har modul uchun entitlement natijasi va sababi; reja katalogida reja bo‘yicha kompaniya soni; sozlamalarda “Standart qiymatlar” (tasdiq va sababsiz saqlanmaydi). |
+
+**Qolgan (backend talab qiladi):** platforma identifikatori va alohida platforma rollari, server sessiyalari, o‘zgarmas audit ombori, to‘lov/invoice/narxlar, kompaniyani taklif bilan yaratish, ma’lumot saqlash siyosati bilan butunlay o‘chirish, server monitoringi.
+
+## Sales yakunlash (2026-11-12)
+
+Faqat `ZENIX-Pro` frontend (Sales moduli). Backend, ma’lumotlar bazasi, migratsiya, commit va push qilinmadi. Saqlash sxemasi o‘zgarmadi (mavjud ixtiyoriy maydonlar ishlatildi).
+
+| ID | Holat | Tuzatish va tekshiruv |
+| --- | --- | --- |
+| SL-001 | FIXED | Serial mahsulot yetkazishda tizim FEFO bo‘yicha birlikni o‘zi tanlardi (FC bosqichidagi “keyingi ish”). Endi `deliverSalesOrder(..., serials)` aniq serial raqamlarni qabul qiladi: miqdorga teng soni, omborda mavjud, yaroqli (QC/hold/muddati o‘tmagan), ruxsat etilgan sotuv omborida va boshqa buyurtmaga band bo‘lmagan birlik. Sotilgan, noma’lum, takroriy yoki band serial aniq sabab bilan rad etiladi. Har birlikning `Sale -` ledger qatori shu raqam bilan yoziladi (buyurtma va jo‘natma bilan bog‘lanadi); ishlatilmagan rezerv pini bo‘shatiladi. `sellableSerials` ro‘yxati UI uchun. `tests/salesCompletion.test.mjs`, `tests/ui/salesDelivery.test.tsx`, `e2e/sales.spec.ts`. |
+| SL-002 | FIXED | Ochiq MTS buyurtmani tahrirlash yo‘q edi (faqat sana). `updateSalesOrderLines`: miqdor yetkazilgandan kam bo‘lmaydi, yetkazilgan qator narxi o‘zgarmaydi, ortiqcha rezerv bo‘shatiladi, yetishmagani qayta rezerv qilinadi, jami qayta hisoblanadi; yetkazilgancha qisqartirilsa buyurtma yopiladi. MTO buyurtma MO orqali boshqariladi. Ruxsat: `sales.edit`, buyurtma omborlari scope’i. |
+| SL-003 | FIXED | Qaytarish oynasida buyurtma yoki mahsulot almashtirilganda oldingi serial belgilari saqlanib qolardi; to‘liq qaytarilgan buyurtma/qator ham taklif qilinardi. Endi faqat qaytariladigan miqdori qolgan qatorlar va “N qaytarish mumkin” ko‘rsatiladi, tanlov qatorga bog‘langan. |
+| SL-004 | FIXED | Buyurtma qatorlarida qaytarilgan va jo‘natilmagan (qolgan) miqdor, “Bajarilish” bo‘limida jami xulosa va jo‘natma tarixida SN/LOT belgisi ko‘rsatiladi. |
+| SL-005 | FIXED | Narx kiritishda ro‘yxat narxiga nisbatan chegirma foizi va tannarxdan past narx ogohlantirishi (yaratish va tahrirlash oynalarida). Alohida chegirma maydoni qo‘shilmadi — chegirma narx orqali beriladi. |
+
+Serial birlik yozuvi bo‘lmagan (eski/ochilish) serial qoldiq avvalgidek serialsiz jo‘natiladi va UI buni ochiq yozadi. To‘lovlar, ortiqcha to‘lov bloki, qisman yetkazish, qaytarish miqdori va serial qaytarish tekshiruvi avvaldan domain’da bor edi va o‘zgartirilmadi.
+
+## Inventory yakunlash (2026-11-12)
+
+Faqat `ZENIX-Pro` frontend (Ombor moduli). Backend, ma’lumotlar bazasi, migratsiya, commit va push qilinmadi. Yangi `stockTransfers` va `stockCounts` ro‘yxatlari ixtiyoriy; eski ma’lumotda yo‘q bo‘lsa bo‘sh hisoblanadi (migratsiyasiz).
+
+| ID | Holat | Tuzatish va tekshiruv |
+| --- | --- | --- |
+| IN-001 | FIXED | Transfer bir lahzada yakunlanardi: jo‘natish/qabul, yo‘ldagi holat va qisman qabul yo‘q edi. `dispatchTransfer` mahsulotni manbadan chiqaradi (LOT/serial, FEFO yoki tanlangan, rezerv/karantin/muddati o‘tgan tegilmaydi) va qabul omborida faqat `incoming` qiladi — yo‘ldagi mahsulot hech qayerda available emas, rezerv/sotuv/sanoqqa tushmaydi, MRP uni kelayotgan ta’minot deb ko‘radi. `receiveTransfer` qisman yoki to‘liq qabul qiladi (ortiqcha qabul rad etiladi, bir xil qabul kaliti ikki marta yozilmaydi), LOT manbasi va yaroqlilik muddati saqlanadi. `returnTransfer` qolganini sabab bilan manbaga qaytaradi. Statuslar: Yo‘lda → Qisman qabul qilindi → Qabul qilindi / Yopildi; tarix drawer’da. Darhol transfer (bir joydagi omborlar) saqlangan. `tests/inventoryCompletion.test.mjs`, `tests/ui/inventory.test.tsx`, `e2e/inventory.spec.ts`. |
+| IN-002 | FIXED | Transferlar ro‘yxati bir nechta LOT’li transferda faqat birinchi `Transfer −` qatorini ko‘rsatardi (miqdor kam). Endi ma’lumotnoma bo‘yicha barcha qatorlar yig‘iladi. |
+| IN-003 | FIXED | Yo‘ldagi serial birlik `written-off` (hisobdan chiqarilgan) deb ko‘rinardi. Endi `Yo‘lda` holati; shu raqamni qayta ro‘yxatga olish bloklanadi; qabulda o‘sha birlik bo‘lib keladi. |
+| IN-004 | FIXED | Inventarizatsiya faqat bitta qatorni darhol adjustment qilardi. Endi ombor bo‘yicha sessiya: ochish (har omborda bitta ochiq), qatorlarni sanash (tizim qoldig‘i sanoq paytida olinadi), farq va qiymatni ko‘rish, izoh bilan tasdiqlash — har farq oddiy adjustment qoidalari bilan yoziladi (LOT, rezerv, karantin). Hammasi yoki hech narsa; sanoqdan keyin qoldiq o‘zgargan qator qayta sanashni talab qiladi; bekor qilish qoldiqni o‘zgartirmaydi. Tezkor cycle count saqlangan. |
+| IN-005 | FIXED | Filialga cheklangan foydalanuvchi faqat o‘z omborlariga tegishli transfer va inventarizatsiyalarni ko‘radi; reset ularni tranzaksiya sifatida tozalaydi. |
+
+**Qolgan:** omborda alohida “tasdiqlash” huquqi yo‘q (inventarizatsiya tasdig‘i `warehouse.edit` bilan, oddiy adjustment kabi) — huquqlar matritsasini o‘zgartirish kerak. Material uchun maksimal stock limiti maydoni yo‘q (minimal/reorder bor). Yo‘ldagi tovar qiymati standart tannarx bo‘yicha ko‘rsatiladi; buxgalteriya “goods in transit” hisobi backendda. Serialsiz eski qoldiq cheklovlari o‘zgarmagan.
+
+## Procurement yakunlash (2026-11-12)
+
+Faqat `ZENIX-Pro` frontend (Xaridlar moduli). Backend, ma’lumotlar bazasi, migratsiya, commit va push qilinmadi. Yangi `purchaseRequests` va `supplierInvoices` ro‘yxatlari va supplier rekvizitlari ixtiyoriy maydonlar (migratsiyasiz).
+
+| ID | Holat | Tuzatish va tekshiruv |
+| --- | --- | --- |
+| PR-001 | FIXED | Qo‘lda xarid so‘rovi yo‘q edi (faqat MRP tavsiyalari). Endi so‘rov: qoralama → yuborilgan → tasdiqlangan / rad etilgan (sabab bilan) → PO; tarix har qadamda. O‘z so‘rovini o‘zi tasdiqlay olmaydi; tasdiqlanmagan so‘rovdan PO yaratilmaydi; PO qoralama bo‘lib PO tasdiqlash jarayonidan o‘tadi. MRP tavsiyalari alohida tabda saqlangan. `tests/procurementCompletion.test.mjs`, `tests/ui/procurement.test.tsx`, `e2e/procurement.spec.ts`. |
+| PR-002 | FIXED | PO’da “tasdiq kutilmoqda” va “supplierga yuborilgan” bosqichlari yo‘q edi. `requestPurchaseApproval` (tahrirlangan qoralama qaytadan yuborilishi kerak), `markPurchaseSent` (faqat tasdiqlangan PO). Mavjud tasdiq/ikki kishilik tasdiq qoidalari o‘zgarmagan. |
+| PR-003 | FIXED | Supplier invoice va 3-way matching yo‘q edi (invoice holati qo‘lda tanlanardi). Invoice PO’ga bog‘lanadi; har qatorda PO miqdori/narxi, qabul (GRN, supplierga qaytgani ayirilgan), avvalgi invoice’lar va invoice miqdori/narxi solishtiriladi. Qabul qilinmagan yoki qayta invoice qilingan miqdor hech qachon tasdiqlanmaydi; narx farqi faqat istisno sababi bilan tasdiqlanadi va farq payable ledgerga bir marta yoziladi. Supplier bo‘yicha takroriy invoice raqami va qayta yuborish bloklanadi; qisman va bir nechta invoice ishlaydi. Invoice zaxirani va (mos bo‘lsa) qarzni o‘zgartirmaydi — qarz GRN’da hisoblanadi. PO invoice holati invoice’lardan hisoblanadi. |
+| PR-004 | FIXED | To‘lovni invoice’ga bog‘lash: faqat tasdiqlangan invoice, invoice qoldig‘i va PO qoldig‘idan oshmaydi; bir xil kalit bilan ikki marta yozilmaydi. Supplier qarzi faqat ledgerdan. |
+| PR-005 | FIXED | Supplier rekvizitlari (mas’ul shaxs, manzil, STIR, hisob raqami, MFO) va domain validatsiyasi: telefon 7–15 raqam, email, STIR 9 raqam va unikal, hisob 20 raqam, MFO 5 raqam (hisob bilan majburiy). Takroriy nom avvaldan bloklangan. |
+
+**Qolgan (backend):** haqiqiy hujjat raqamlash va ketma-ketlik serverda, bank to‘lovi va bank ko‘chirmasi bilan solishtirish, valyutadagi invoice va kurs farqi buxgalteriyasi (hozir UZS), qo‘shimcha xarid xarajatlarini (transport, bojxona) tannarxga taqsimlash, elektron hisob-faktura (soliq tizimi) integratsiyasi.
+
+## Manufacturing tekshiruvi (2026-11-12)
+
+Faqat tekshiruv: Manufacturing ilova kodiga o‘zgartirish kiritilmadi, chunki talab qilingan qoidalarning hech biri buzilgan holda topilmadi. Backend, migratsiya, commit va push yo‘q.
+
+| ID | Holat | Natija |
+| --- | --- | --- |
+| MF-V1 | VERIFIED | Tasdiqlangan MO materialni FEFO LOT pini bilan rezervlaydi; bekor qilish rezerv va pinlarni bo‘shatadi, zaxira o‘zgarmaydi. |
+| MF-V2 | VERIFIED | Material natija bilan backflush qilinadi; ombor kamayishi buyurtma sarfiga teng. Bir xil natija kaliti bir marta qabul qilinadi, rejadan ortiq natija rad etiladi. |
+| MF-V3 | VERIFIED | Operatsiya: ikki marta boshlash/yakunlash va boshlanmaganini yakunlash rad etiladi; start/pause/resume tarixi saqlanadi; bog‘liqlik (dependsOn) va to‘xtagan uskuna bloklaydi. |
+| MF-V4 | VERIFIED | Qo‘shimcha chiqim sababsiz va BOM rejasidan ortiq rad etiladi; qaytarish faqat ish to‘xtatilgan holda va bir kalit bilan bir marta. |
+| MF-V5 | VERIFIED | Yangi BOM versiyasi faollashtirilganda eski versiya arxivlanadi, mavjud MO BOM snapshot’i o‘zgarmaydi; yakunlangan MO tannarxi narx o‘zgarsa ham saqlanadi, WIP 0. |
+| MF-V6 | VERIFIED | Final QC majburiy bo‘lsa natija karantinda va sotuvga available emas. |
+| MF-V7 | VERIFIED | 10 ta ishlab chiqarish ko‘rinishi (Gantt/Calendar/Capacity, MPS, MRP, operatsiyalar, shop floor, advanced) va MO drawer tablari desktop, telefon (Pixel 7) va 820px planshetda gorizontal overflow va xatosiz. |
+
+Testlar: `tests/manufacturingCompletion.test.mjs` (6), `e2e/manufacturing.spec.ts`. Status nomlari mavjud modelda qoldi (Qoralama → Tasdiqlangan → Material kutilmoqda → Jarayonda/Pauzada → Sifat nazoratida → Yakunlangan / Bekor qilingan); ularni “Planned/Released” ga qayta nomlash arxitektura o‘zgarishi bo‘lgani uchun qilinmadi. **Qolgan:** ZA-008 yakuniy COGS farq jurnali (yangi moliyaviy model va migratsiya talab qiladi), N-07 subcontract xizmat xarajatining to‘liq oqimi.
+
+## Quality & Maintenance yakunlash (2026-11-12)
+
+Faqat `ZENIX-Pro` frontend. Backend, migratsiya, commit va push yo‘q. Yangi maydonlar (`QualityAlert.capa`, `MaintenanceOrder.parts`, so‘rov `decisionNote`) ixtiyoriy.
+
+| ID | Holat | Tuzatish va tekshiruv |
+| --- | --- | --- |
+| QM-001 | FIXED | NCR’da CAPA amallari yo‘q edi (faqat matn maydonlari; yopish faqat root cause talab qilardi). Endi tuzatuvchi / oldini oluvchi amal: mas’ul, muddat (o‘tgan sana rad etiladi), dalil bilan “Bajarildi”, boshqa xodim tomonidan samaradorlik tekshiruvi (samarasiz bo‘lsa qayta ochiladi), bekor qilish sababi bilan; to‘liq tarix. Tasdiqlanmagan amal bor NCR yopilmaydi. Tekshirish huquqi `quality.approve`. `tests/qualityMaintenance.test.mjs`, `tests/ui/qualityMaintenance.test.tsx`, `e2e/qualityMaintenance.spec.ts`. |
+| QM-002 | FIXED | Muddati o‘tgan CAPA amallari CAPA doskasida ogohlantirish va kartochkada belgi bilan ko‘rsatiladi (tekshirilmaguncha). Amal tayinlanganda bildirishnoma. |
+| QM-003 | FIXED | Maintenance so‘rovini rad etib bo‘lmasdi. Endi faqat yangi so‘rov sabab bilan rad etiladi (`equipment.approve`); rad etilgan so‘rov tasdiqlanmaydi. |
+| QM-004 | FIXED | Ehtiyot qismlar ombordan berilmasdi (xarajat qo‘lda yozilardi). Endi rejadagi yoki jarayondagi ishga bo‘sh, yaroqli qoldiqdan (rezerv va karantin emas, LOT FEFO; LOT’siz qoldiq LOT kuzatiladigan qismga berilmaydi) beriladi va qaytariladi — har biri bir kalit bilan bir marta. Qism berilgan ish bekor qilinmaydi. Qismlar qiymati yakunlashda ish xarajati bilan bitta xarajat yozuvi va uskuna xarajatiga bir marta qo‘shiladi. |
+| QM-005 | FIXED (UI) | NCR drawer’da CAPA paneli uzun formadan oldin joylashtirildi: drawer pastki chetidagi tugma fokusda siljib, bosish yonidagi kartaga tushardi (Chrome E2E’da aniqlandi). |
+
+Avvaldan mavjud va tekshirilgan: kirish / jarayon / final QC va control point’lar, failed QC → NCR, karantin va release, rework → qayta tekshiruv, scrap, preventive reja (kun/hafta/oy/ishlash soati), downtime va OEE, work order’ni ikki marta yopish bloki. **Qolgan:** “Conditional approval” (shartli qabul) alohida holat sifatida yo‘q (Hold / Rework bor); ehtiyot qismlar alohida katalog emas, xomashyo ro‘yxatidan; ish haqi soat bo‘yicha emas, summa sifatida kiritiladi.
+
+## Costs & Finance yakunlash (2026-11-14)
+
+Faqat `ZENIX-Pro` frontend (Xarajatlar, debitorlik/kreditorlik ledgeri, tannarx). Backend, ma’lumotlar bazasi, migratsiya, commit va push yo‘q. Saqlash sxemasi o‘zgarmadi.
+
+| ID | Holat | Tuzatish va tekshiruv |
+| --- | --- | --- |
+| FN-001 | FIXED | Supplier to‘lovi invoice orqali, PO ko‘rsatilmasdan yozilsa, faqat supplier umumiy qarzi va invoice qoldig‘i tekshirilardi: invoice’siz to‘liq to‘langan PO invoice orqali yana to‘lanishi (takroriy to‘lov, PO qoldig‘i manfiy) mumkin edi. `recordSupplierPayment` endi PO’ni invoice’dan oladi va PO ochiq qoldig‘idan oshirmaydi; to‘lov yozuvi shu PO’ga bog‘lanadi. `tests/financeCompletion.test.mjs`. |
+| FN-002 | FIXED | Maintenance, ta’mir va subcontract QC scrap avtomatik yozgan xarajatlar Xarajatlar ro‘yxatida tahrirlanar, o‘chirilar va (domain orqali) nusxalanar edi — uskuna `maintenanceCost` o‘zgarmay qolib, hujjat xarajati ikki marta yoki umuman hisobga olinmasdi. `expenseOrigin` hujjatni aniqlaydi; `updateEntity` / `deleteEntity` / `duplicateEntity` rad etadi; UI’da “avtomatik · hujjat kodi” belgisi, tahrir oynasi ochilmaydi, o‘chirish tugmasi yo‘q. Qo‘lda kiritilgan xarajatlar avvalgidek tahrirlanadi. `tests/ui/costsFinance.test.tsx`, `e2e/finance.spec.ts`. |
+| FN-003 | FIXED | Umumiy ko‘rinishdagi “Davr xarajatlari · 30 kun” 30 kalendar kunini, bosilganda ochiladigan Xarajatlar ro‘yxati va Labor “30 kun” esa 31 kunni olardi — jami summalar mos kelmasdi. Hammasi `periodStart(N)` (bugun bilan N kun). |
+| FN-004 | FIXED | To‘lovsiz/kreditsiz buyurtmada `orderReceivable` `paid`/`credited` qiymatini `-0` qaytarardi (`num()` va eksportda “-0”). Endi 0. |
+| FN-005 | ADDED | Xarajatlar umumiy ko‘rinishida “Kreditorlik qarzi” KPI: supplier payable ledger qoldig‘i (Xaridlardagi bilan bir manba), Xaridlar → Supplierlar’ga o‘tadi. Purchases’dagi to‘lov KPI’ni aynan to‘lov summasiga kamaytirishi E2E’da tekshirildi. |
+
+**Tekshirildi, o‘zgartirilmadi:** yetkazishda hisob-faktura har jo‘natma uchun bir marta; mijoz to‘lovi kalit bilan idempotent, buyurtma/mijoz qoldig‘idan oshmaydi; qaytarish kredit-notasi bir marta va hisob-fakturadan oshmaydi; `Customer.debt` / `Supplier.debt` = ledger; GRN qarzi PO narxida bir marta, mos invoice qarz qo‘shmaydi, narx farqi istisno sababi bilan bir marta; to‘lov holatlari ledgerdan, qo‘lda o‘zgartirilmaydi; yakunlangan MO tannarxi snapshot’dan; waste tannarx ichida (qo‘shilmaydi), rework o‘z MO’sida, WIP faqat ochiq MO’da; Hisobotlar va Xarajatlar bir xil `orderCosting` va davrdan foydalanadi.
+
+**Qolgan (backend / buxgalteriya modeli):** supplier narx farqi (PPV) faqat payable’da — ombor qiymati va LOT tannarxi PO narxida qoladi, farq P&L’ga alohida yozilmaydi; ombor hisobotidagi qiymat standart tannarxda (LOT haqiqiy tannarxida emas); Overhead va Machine ko‘rinishlarida davr filtri yo‘q (butun tarix); bosh kitob (GL), davrni yopish, bank ko‘chirmasi bilan solishtirish, valyuta kurs farqi va soliq hisob-fakturasi serverda bo‘lishi kerak; mijoz to‘lovi qayta yuborilganda (bir xil kalit) summa farqi solishtirilmaydi (supplier to‘lovida solishtiriladi) — kalit har oyna ochilishida yangi bo‘lgani uchun amalda xavf past. Alohida “Moliya” sahifasi yo‘q: debitorlik Sotuv’da, kreditorlik Xaridlar’da, KPI’lar Xarajatlar’da.
+
+## Xavfsizlik va biznes-mantiq auditi (2026-11-14)
+
+Faqat `ZENIX-Pro` frontend. Backend, ma’lumotlar bazasi, migratsiya, commit va push yo‘q. Saqlash sxemasi o‘zgarmadi. Har bir topilma tuzatishdan oldin to‘g‘ridan-to‘g‘ri domain chaqiruvi (o‘zgartirilgan payload, boshqa filial ID’si, soxta workflow maydoni, qayta ishlatilgan kalit) bilan qayta hosil qilindi; yangi 17 ta test tuzatishgacha bo‘lgan kodda yiqiladi, tuzatishdan keyin o‘tadi.
+
+**Avvalgi (Codex) xabar qilingan tuzatishlar:** ish daraxtida faqat support murojaatidagi “Bearer …” filtri bor edi (tekshirildi, saqlandi va kengaytirildi). Filial PO standart ombori, NCR’ning boshqa filial hujjati, inspeksiya mahsuloti va platforma chiptasini yashirish tuzatishlari ish daraxtida **yo‘q edi** — hammasi qayta hosil qilinib, quyida tuzatildi.
+
+| ID | Daraja | Holat | Tuzatish va tekshiruv |
+| --- | --- | --- | --- |
+| SEC-01 | High | FIXED | Filialga cheklangan xaridchi `warehouseId` yubormasa, PO kompaniya standart omboriga (boshqa filial) tushardi — darvoza omborni ko‘rmasdi. `createPurchaseOrder` endi aniqlangan omborni `scopeBlocker` bilan tekshiradi (`createPurchaseOrders` ham). |
+| SEC-02 | High | FIXED | NCR boshqa filial PO/subcontract/qaytarish/sotuv hujjatiga ochilar, generic tahrir bilan boshqa hujjatga ko‘chirilar va boshqa filial NCR’ining CAPA amallari bajarilar edi. `scopeTargets`: NCR manbasining har turi, CAPA amallari va `qualityAlerts` generic yozuvi. `createQualityAlert` mavjud hujjat, ma’lum daraja va faol mas’ulni talab qiladi. |
+| SEC-03 | Medium | FIXED | Ishlab chiqarish tekshiruvi MO mahsulotidan boshqa mahsulotga, mavjud bo‘lmagan manbaga va noma’lum manba/tur bilan yaratilardi; subcontract tekshiruvi filial darvozasidan o‘tmasdi. |
+| SEC-04 | High | FIXED | Filial sotuvchisi boshqa filial buyurtmasiga to‘lov yozar, FIFO to‘lov boshqa filial invoice’lariga tushar, mijoz/supplier balansini tuzatar; supplier to‘lovi invoice orqali boshqa filial PO’siga yozilardi. Darvoza endi buyurtma, invoice PO’si yoki balansga kiruvchi barcha buyurtmalarni tekshiradi. |
+| SEC-05 | High | FIXED | Generic `updateEntity` har qanday maydonni qabul qilardi: soxta “Tasdiqlandi” CAPA massivi bilan NCR mustaqil tekshiruvsiz yopilardi; `equipment.edit` bilan maintenance so‘rovi tasdiqlanardi (`equipment.approve` o‘rniga); ta’mir va maintenance buyurtmasi holati/narxi qo‘lda o‘zgarardi; NCR holati/darajasi ixtiyoriy matn bo‘lardi. `ENTITY_RULES`: workflow maydonlari faqat o‘z amallari bilan o‘zgaradi; yaratish boshlang‘ich holatda. |
+| SEC-06 | Medium | FIXED | `advanceRepair` va `planPreventiveMaintenance` filial darvozasidan o‘tmasdi (boshqa filial uskunasiga xarajat/downtime va PM buyurtmalari). Rejalash endi uskuna ro‘yxatini oladi; UI ko‘rinadigan uskunalarni beradi. |
+| SEC-07 | Low | FIXED | `setForecast` boshqa filial prognozini o‘zgartirardi. |
+| SEC-08 | Medium | FIXED | Mijoz to‘lovi kaliti boshqa mijoz/summa/buyurtma bilan qayta yuborilsa “allaqachon qayd etilgan” muvaffaqiyati qaytardi — yangi to‘lov jimgina yo‘qolardi. Endi faqat aynan bir xil to‘lov takrorlanadi, boshqasi rad etiladi (supplier to‘lovidagi kabi). |
+| SEC-09 | Low | FIXED | PO `invoiceStatus` va ledgerdan oldingi SO `paymentStatus` ixtiyoriy matnni qabul qilardi; invoice kiritilgan PO’da qo‘lda holat yozilardi. |
+| SEC-10 | Low | FIXED | `readNumber` `"0x10"`, `"0b11"`, `"0o7"` ni son deb o‘qirdi (to‘lov 16 bo‘lib yozilardi). Faqat o‘nlik yozuv. |
+| SEC-11 | Medium | FIXED | `execute()` ruxsatni boshqa oynaning yangi saqlovini o‘qishdan **oldin** tekshirardi: boshqa oynada rol huquqi olib tashlangach, storage hodisasi kelmaguncha generic yozuv (createEntity/updateEntity/…) eski huquq bilan bajarilardi. Endi avval yangilanadi, keyin tekshiriladi. |
+| SEC-12 | Medium | FIXED | Faoliyat arxivi (`activityArchive`) scope’siz o‘qilardi: audit ko‘rish huquqi bor filial roli boshqa filial tarixini ko‘rardi. Endi jonli lenta bilan bir xil `scopedView` orqali. |
+| SEC-13 | Low | FIXED | Platforma kirishidagi va egasi tiklashidagi imzolangan chipta ochiq matn maydonida edi — endi `type="password"`. Support matnida yalang‘och JWT, AWS (`AKIA…`) va GitHub (`ghp_…`) kalitlari ham rad etiladi va ko‘rsatilmaydi. |
+
+Testlar: `tests/securityAudit.test.mjs` (14), `tests/ui/securityAudit.test.tsx` (3), `tests/ui/auth.test.tsx` (chipta maydoni). `tests/qualityMaintenance.test.mjs`, `tests/ui/qualityMaintenance.test.tsx` va `e2e/fixtures.ts` fixture’lari mavjud bo‘lmagan `mo-x` o‘rniga haqiqiy qoralama MO’da NCR ochadi (yangi SEC-02 qoidasi).
+
+**Qolgan (frontend, past xavf):** kalit bilan takrorlanadigan boshqa amallar (material qaytarish, balans tuzatish, ehtiyot qism berish, subcontract qabuli) qayta yuborilgan boshqa payloadni solishtirmasdan “allaqachon qayd etilgan” deydi — kalitlar har forma uchun yangi, xavf faqat qo‘lda yasalgan chaqiruvda. Admin faoliyat jurnalidagi kirish (auth) hodisalari scope bo‘yicha filtrlanmaydi. Scope’dagi rejalashtiruvchi filialsiz (kompaniya bo‘yicha) prognozni o‘zgartira oladi. Supplier/material bog‘lanishlari kompaniya master ma’lumoti sifatida filial roli tomonidan tahrirlanadi.
+
+**Backendsiz kafolatlab bo‘lmaydi:** barcha ruxsat va filial tekshiruvi brauzerda — DevTools orqali localStorage’ni o‘zgartirgan foydalanuvchi har qanday tekshiruvni chetlab o‘tadi; platforma chiptasi `sessionStorage`da; parol xeshlari va audit brauzerda (o‘zgarmas emas); ko‘p oynali yozuvlar qulfsiz (faqat read-before-write); idempotentlik kalitlari server tomonida noyob emas.
+
+Tekshiruv: TypeScript, ESLint va production build o‘tdi; domain 498/498, UI 121/121, Chrome E2E desktop/mobile 55/55. `git diff --check` o‘tdi. Bu xavfsizlik kafolati emas — yuqoridagi backend cheklovlari saqlanadi.

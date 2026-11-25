@@ -1,12 +1,13 @@
-import {useState} from 'react'
+import {useRef,useState} from 'react'
 import {useNavigate,useSearchParams} from 'react-router-dom'
 import {useApp} from '../../../app/providers/AppProvider/AppContext'
-import {Card,Confirm,Drawer,Empty,Field,FilterSelect,Icon,InfoGrid,Input,KPI,Modal,MoneyInput,PageHeader,Progress,ResourceTable,Select,StatusBadge,Tabs,nonNegative,required,useForm,useRecordParam,useSearchParamState} from '../../../shared/ui'
+import {Card,Confirm,Drawer,Empty,Field,FilterSelect,Icon,InfoGrid,Input,KPI,Modal,MoneyInput,PageHeader,Progress,ResourceTable,Select,StatusBadge,Tabs,useForm,useRecordParam,useSearchParamState} from '../../../shared/ui'
 import type {Employee,ManufacturingState} from '../../../types'
 import {referenceBlocker} from '../../../domain/actions'
-import {PERMISSION_MODULES,assignRoleBlocker,employeeRemovalBlocker,hasPermission,isSuperAdminRole} from '../../../domain/access'
+import {PERMISSION_MODULES,assignRoleBlocker,employeeBranchIds,employeeRemovalBlocker,hasPermission,isSuperAdminRole,roleOf} from '../../../domain/access'
 import {PermissionMatrix} from '../../admin/components/PermissionMatrix'
 import {laborNow} from '../../../domain/manufacturingEngine'
+import {EMPLOYEE_DEPARTMENTS,employeePayload,employeeWorkCenterOptions,reconcileWorkCenter,usesWorkCenter,validateEmployeeDraft,type EmployeeDraft} from '../../../domain/employeeForm'
 import {addDays,formatMinutes,minutesBetween,periodStart,stamp,todayISO} from '../../../utils/dates'
 import {compactMoney,initials,money,num} from '../../../utils/format'
 import {orderCode,productName,useNow,workCenterCode,workCenterName} from '../../common/lookups'
@@ -67,7 +68,7 @@ function All(){
         ...(app.can('costs')?[{key:'rate',label:'Stavka',align:'right' as const,value:(e:Employee)=>e.hourlyCost,render:(e:Employee)=>compactMoney(e.hourlyCost),priority:'low' as const}]:[]),
       ]}/>
     {edit&&<EmployeeModal employee={edit==='new'?undefined:edit} onClose={()=>setEdit(null)} onCreated={id=>{setEdit(null);setActivateId(id)}}/>}
-    {activate&&<CreateAccountForEmployee employee={activate} onClose={()=>setActivateId(null)}/>}
+    {activate&&<CreateAccountForEmployee employee={activate} afterCreate onClose={()=>setActivateId(null)}/>}
     {employee&&<EmployeeDrawer key={employee.id} employee={employee} onClose={()=>setId(null)} onEdit={()=>setEdit(employee)}/>}
   </div>
 }
@@ -76,25 +77,62 @@ function EmployeeModal({employee,onClose,onCreated}:{employee?:Employee;onClose:
   const app=useApp(),s=app.state
   // Only roles this user may hand out are offered; the employee's current role stays visible (A-C2).
   const assignable=s.roles.filter(r=>!isSuperAdminRole(r)&&!assignRoleBlocker(s,app.currentEmployee,employee,r.id))
+  const actorScope=roleOf(s,app.currentEmployee.id)?.scope
+  const permittedBranches=s.branches.filter(b=>b.status!=='Arxiv'&&(actorScope==='all'||employeeBranchIds(s,app.currentEmployee).includes(b.id)))
   const self=employee?.id===app.currentEmployee.id
   const roleLocked=self||!app.can('users','edit')||Boolean(employee&&assignable.length<=1)
-  const initialBranch=employee?.branchId||s.workCenters.find(w=>w.id===employee?.workCenterId)?.branchId||s.warehouses.find(w=>w.id===employee?.warehouseId)?.branchId||s.branches[0]?.id||''
-  const form=useForm({name:employee?.name||'',department:employee?.department||'Production',roleId:employee?.roleId||assignable.find(r=>r.key==='operator')?.id||assignable[0]?.id||'',branchId:initialBranch,branchIds:employee?.branchIds?.length?employee.branchIds:[initialBranch].filter(Boolean),workCenterId:employee?.workCenterId||s.workCenters.find(w=>w.branchId===initialBranch)?.id||'',warehouseId:employee?.warehouseId||'',shift:employee?.shift||'A',status:employee?.status||'Faol',hourlyCost:String(employee?.hourlyCost??40000),attendance:String(employee?.attendance??100)},v=>({name:required(v.name,'F.I.Sh')||(v.name.trim().split(/\s+/).length<2?'Ism va familiyani kiriting':undefined),branchId:s.roles.find(r=>r.id===v.roleId)?.scope!=='all'&&!v.branchId?'Filialni tanlang':undefined,workCenterId:s.roles.find(r=>r.id===v.roleId)?.scope==='workcenter'&&!v.workCenterId?'Ish markazini tanlang':undefined,warehouseId:s.roles.find(r=>r.id===v.roleId)?.scope==='warehouse'&&!v.warehouseId?'Omborni tanlang':undefined,hourlyCost:nonNegative(v.hourlyCost,'Stavka'),attendance:Number(v.attendance)>=0&&Number(v.attendance)<=100?undefined:'0–100%'}))
+  const initialBranch=employee?.branchId||s.workCenters.find(w=>w.id===employee?.workCenterId)?.branchId||s.warehouses.find(w=>w.id===employee?.warehouseId)?.branchId||permittedBranches.find(b=>b.id===s.settings.defaultBranchId)?.id||permittedBranches[0]?.id||''
+  // A new employee starts without a work center: one is assigned only when the user picks it.
+  const form=useForm<EmployeeDraft>({name:employee?.name||'',department:employee?.department||'Production',roleId:employee?.roleId||assignable.find(r=>r.key==='operator')?.id||assignable[0]?.id||'',branchId:initialBranch,branchIds:employee?.branchIds?.length?employee.branchIds:[initialBranch].filter(Boolean),workCenterId:employee?.workCenterId||'',warehouseId:employee?.warehouseId||'',shift:employee?.shift||'A',status:employee?.status||'Faol',hourlyCost:String(employee?.hourlyCost??40000),attendance:String(employee?.attendance??100)},v=>validateEmployeeDraft(s,v,employee))
+  const [busy,setBusy]=useState<null|'add'|'login'>(null),[saveError,setSaveError]=useState(''),[wcNotice,setWcNotice]=useState('')
+  const busyRef=useRef(false)
+  const withLogin=!employee&&app.can('users','create')
+  const scope=s.roles.find(r=>r.id===form.values.roleId)?.scope
+  const wcApplies=usesWorkCenter(s,form.values)
+  const wcOptions=employeeWorkCenterOptions(s,form.values,employee)
+  const wcMissing=form.values.workCenterId&&!wcOptions.some(w=>w.id===form.values.workCenterId)?form.values.workCenterId:''
+  /** Department, role or branch edits keep the chosen work center only while it is still offered — never pick another. */
+  const change=(patch:Partial<EmployeeDraft>)=>{
+    for(const [k,v] of Object.entries(patch))form.set(k as keyof EmployeeDraft,v as never)
+    const r=reconcileWorkCenter(s,{...form.values,...patch},employee)
+    if(r.cleared){form.set('workCenterId','');setWcNotice(`“${r.cleared}” olib tashlandi — tanlangan filial yoki bo‘limga mos emas`)}
+  }
+  /** "add" saves the profile only; "login" saves it and continues to the existing account step. One save at a time. */
+  const save=(mode:'add'|'login')=>{
+    if(busyRef.current)return
+    form.submit(v=>{
+      busyRef.current=true;setBusy(mode);setSaveError('')
+      const payload=employeePayload(v)
+      const r=employee?app.updateEntity('employees',employee.id,payload):app.createEntity('employees',{...payload,efficiency:0})
+      // A refused save keeps the modal and everything typed; the reason is shown here as well as in the toast.
+      if(!r.ok){busyRef.current=false;setBusy(null);setSaveError(r.message);return false}
+      if(mode==='login'&&!employee&&r.id)onCreated(r.id);else onClose()
+      return true
+    })
+  }
+  const wcHint=wcNotice||(!wcApplies?'Bu bo‘lim uchun ish markazi talab qilinmaydi':!wcOptions.length?'Tanlangan filialda faol ish markazi yo‘q':scope==='workcenter'?'Bu rol uchun majburiy':'Ixtiyoriy — tanlanmasa xodim ish markaziga biriktirilmaydi')
+  const primaryMode=withLogin?'login':'add'
   return <Modal open onClose={onClose} title={employee?'Xodimni tahrirlash':'Yangi xodim'} size="lg"
-    footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Bekor qilish</button><button type="button" className="primary-glass-btn" onClick={()=>form.submit(v=>{const payload={...v,name:v.name.trim(),warehouseId:v.warehouseId||undefined,hourlyCost:Number(v.hourlyCost),attendance:Number(v.attendance)};const r=employee?app.updateEntity('employees',employee.id,payload):app.createEntity('employees',{...payload,efficiency:0});if(r.ok){if(!employee&&r.id&&app.can('users','create'))onCreated(r.id);else onClose()}return r.ok})}>{employee||!app.can('users','create')?'Saqlash':'Saqlash va login yaratish'}</button></>}>
+    footer={<>
+      <button type="button" className="ghost-btn" disabled={Boolean(busy)} onClick={onClose}>Bekor qilish</button>
+      {withLogin&&<button type="button" className="secondary-glass-btn" disabled={Boolean(busy)} aria-busy={busy==='add'||undefined} onClick={()=>save('add')}>{busy==='add'?'Saqlanmoqda…':<><Icon name="plus" size={16}/>Qo‘shish</>}</button>}
+      <button type="button" className="primary-glass-btn" disabled={Boolean(busy)} aria-busy={busy===primaryMode||undefined} onClick={()=>save(primaryMode)}>{busy===primaryMode?'Saqlanmoqda…':<><Icon name={withLogin?'key':'check'} size={16}/>{employee?'Saqlash':withLogin?'Saqlash va login yaratish':'Qo‘shish'}</>}</button>
+    </>}>
     <div className="form-grid">
       <Field label="F.I.Sh" required error={form.error('name')}><Input {...form.input('name')} autoFocus/></Field>
-      <Field label="Bo‘lim"><Select value={form.values.department} onChange={v=>form.set('department',v)}>{['Production','Quality','Maintenance','Warehouse','Procurement','Management'].map(x=><option key={x} value={x}>{x}</option>)}</Select></Field>
-      <Field label="Rol (RBAC)" hint={self?'O‘z rolingizni o‘zgartira olmaysiz':!app.can('users','edit')?'Rol berish uchun users.edit kerak':undefined}><Select value={form.values.roleId} disabled={roleLocked} onChange={v=>form.set('roleId',v)}>{assignable.map(r=><option key={r.id} value={r.id}>{r.name}</option>)}</Select></Field>
-      <Field label="Asosiy filial" required error={form.error('branchId')}><Select value={form.values.branchId} onChange={v=>{form.set('branchId',v);form.set('branchIds',[v,...form.values.branchIds.filter(id=>id!==form.values.branchId&&id!==v)]);form.set('workCenterId','');form.set('warehouseId','')}}><option value="">— Tanlang —</option>{s.branches.filter(b=>b.status!=='Arxiv').map(b=><option key={b.id} value={b.id}>{b.name}</option>)}</Select></Field>
-      {s.roles.find(r=>r.id===form.values.roleId)?.scope==='branch'&&s.branches.length>1&&<Field label="Qo‘shimcha filiallar" hint="Faqat aniq biriktirilgan filiallar ko‘rinadi"><div className="badge-row">{s.branches.filter(b=>b.status!=='Arxiv'&&b.id!==form.values.branchId).map(b=><label key={b.id}><input type="checkbox" checked={form.values.branchIds.includes(b.id)} onChange={e=>form.set('branchIds',e.target.checked?[...form.values.branchIds,b.id]:form.values.branchIds.filter(id=>id!==b.id))}/>{b.name}</label>)}</div></Field>}
-      <Field label="Work center" error={form.error('workCenterId')}><Select value={form.values.workCenterId} onChange={v=>form.set('workCenterId',v)}><option value="">— Tanlanmagan —</option>{s.workCenters.filter(w=>form.values.branchIds.includes(w.branchId)).map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</Select></Field>
+      <Field label="Bo‘lim"><Select value={form.values.department} onChange={v=>change({department:v})}>{[...new Set([...EMPLOYEE_DEPARTMENTS,form.values.department])].map(x=><option key={x} value={x}>{x}</option>)}</Select></Field>
+      <Field label="Rol (RBAC)" error={form.error('roleId')} hint={self?'O‘z rolingizni o‘zgartira olmaysiz':!app.can('users','edit')?'Rol berish uchun users.edit kerak':undefined}><Select value={form.values.roleId} disabled={roleLocked} onChange={v=>change({roleId:v})}>{assignable.map(r=><option key={r.id} value={r.id}>{r.name}</option>)}</Select></Field>
+      <Field label="Asosiy filial" required error={form.error('branchId')}><Select value={form.values.branchId} onChange={v=>{form.set('warehouseId','');change({branchId:v,branchIds:[v,...form.values.branchIds.filter(id=>id!==form.values.branchId&&id!==v)].filter(Boolean)})}}><option value="">— Tanlang —</option>{permittedBranches.map(b=><option key={b.id} value={b.id}>{b.name}</option>)}</Select></Field>
+      {scope==='branch'&&permittedBranches.length>1&&<Field label="Qo‘shimcha filiallar" hint="Faqat aniq biriktirilgan filiallar ko‘rinadi"><div className="badge-row">{permittedBranches.filter(b=>b.id!==form.values.branchId).map(b=><label key={b.id}><input type="checkbox" checked={form.values.branchIds.includes(b.id)} onChange={e=>change({branchIds:e.target.checked?[...form.values.branchIds,b.id]:form.values.branchIds.filter(id=>id!==b.id)})}/>{b.name}</label>)}</div></Field>}
+      <Field label="Work center" required={scope==='workcenter'} error={form.error('workCenterId')} hint={wcHint}><Select value={form.values.workCenterId} placeholder="Tanlanmagan" disabled={!wcApplies&&!form.values.workCenterId} onChange={v=>{form.set('workCenterId',v);form.touch('workCenterId');setWcNotice('')}}><option value="">Tanlanmagan</option>{wcOptions.map(w=><option key={w.id} value={w.id}>{w.name} · {w.code}</option>)}{wcMissing&&<option value={wcMissing}>{s.workCenters.find(w=>w.id===wcMissing)?.name||wcMissing} — mavjud emas</option>}</Select></Field>
       <Field label="Ish ombori" error={form.error('warehouseId')} hint="“Ombor” doirasidagi rol faqat shu omborda ishlaydi"><Select value={form.values.warehouseId} onChange={v=>form.set('warehouseId',v)}><option value="">— Tanlanmagan —</option>{s.warehouses.filter(w=>(w.status==='Faol'||w.id===form.values.warehouseId)&&form.values.branchIds.includes(w.branchId)).map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</Select></Field>
       <Field label="Smena"><Select value={form.values.shift} onChange={v=>form.set('shift',v)}>{['A','B','C','Kunduzgi'].map(x=><option key={x} value={x}>{x}</option>)}</Select></Field>
       <Field label="Status"><Select value={form.values.status} onChange={v=>form.set('status',v)}>{['Faol','Smenada','Ta’tilda','Arxiv'].map(x=><option key={x} value={x}>{x}</option>)}</Select></Field>
       {app.can('costs')&&<Field label="Soatbay stavka" error={form.error('hourlyCost')} hint="Labor cost uchun"><MoneyInput min="0" {...form.money('hourlyCost')}/></Field>}
       <Field label="Davomat % (HR)" error={form.error('attendance')}><Input type="number" min="0" max="100" {...form.input('attendance')}/></Field>
     </div>
+    {withLogin&&<div className="inline-note"><Icon name="info"/><span>“Qo‘shish” faqat xodim profilini saqlaydi — login va parol yaratilmaydi. “Saqlash va login yaratish” profilni saqlab, kirish ma’lumotlarini so‘raydi.</span></div>}
+    {saveError&&<div className="inline-note danger" role="alert"><Icon name="warning"/><span>{saveError}</span></div>}
   </Modal>
 }
 

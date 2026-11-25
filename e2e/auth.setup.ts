@@ -1,6 +1,7 @@
 import {test as setup,expect} from '@playwright/test'
 import {randomUUID} from 'node:crypto'
 import fs from 'node:fs'
+import {dirname} from 'node:path'
 import {build} from 'esbuild'
 
 // First run of a clean browser: the app asks for a Business Owner. The password is generated per run and never
@@ -37,6 +38,7 @@ setup('first-run set-up creates the Business Owner and opens the dashboard',asyn
   const demo=fixtures.createInitialState()
   const employees=demo.employees.map((employee:{id:string})=>employee.id===clean.employees[0].id?clean.employees[0]:employee)
   await page.evaluate(({key,state})=>localStorage.setItem(key,JSON.stringify(state)),{key:stateKey,state:{...demo,employees,activity:clean.activity,settings:{...demo.settings,company:clean.settings.company}}})
-  fs.mkdirSync('e2e/.auth',{recursive:true})
-  await page.context().storageState({path:'e2e/.auth/admin.json'})
+  const authStatePath=process.env.PW_AUTH_STATE_PATH||'e2e/.auth/admin.json'
+  fs.mkdirSync(dirname(authStatePath),{recursive:true})
+  await page.context().storageState({path:authStatePath})
 })

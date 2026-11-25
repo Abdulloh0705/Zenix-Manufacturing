@@ -8,6 +8,7 @@ import {cls} from '../../utils/format'
 import {Sidebar} from './Sidebar'
 import {Topbar} from './Topbar'
 import {AiAssistant} from './AiAssistant'
+import {HelpOnboardingBanner} from '../../features/help/HelpExperience'
 
 const COLLAPSE_KEY='zenix-ui-sidebar-collapsed'
 
@@ -75,6 +76,7 @@ export default function AppLayout(){
     <div className="main-area">
       <Topbar/>
       <ModuleSubnav/>
+      <HelpOnboardingBanner/>
       {app.storageError&&<div className="storage-alert" role="alert"><Icon name="warning" size={16}/><span>Brauzer o‘zgarishlarni saqlamayapti (xotira to‘la yoki bloklangan). Ular faqat shu oynada turibdi — Tizim → Backup eksport qiling.</span></div>}
       <ExportPermission.Provider value={app.can(byPath[location.pathname]?.module||'dashboard','export')}><main id="main" className="content" tabIndex={-1}><Outlet/></main></ExportPermission.Provider>
     </div>

@@ -25,6 +25,8 @@ const AI=lazy(()=>import('./features/ai/pages/AI'))
 const Admin=lazy(()=>import('./features/admin/pages/Admin'))
 const Subscription=lazy(()=>import('./features/subscription/pages/Subscription'))
 const Platform=lazy(()=>import('./features/platform/PlatformPage'))
+// Help ships with the shell (topbar panel and first-time banner), so its page is not split into a lazy chunk.
+import HelpPage from './features/help/HelpExperience'
 
 function StateCard({icon,title,text,action}:{icon:string;title:string;text:string;action:ReactNode}){
   return <div className="permission-state card"><span className="state-icon"><Icon name={icon} size={26}/></span><h1>{title}</h1><p>{text}</p>{action}</div>
@@ -118,7 +120,7 @@ function AppRoutes(){
     <Route path="/admin" element={<Page module="users|roles|audit|settings"><Admin/></Page>}/>
     <Route path="/subscription" element={<Page module="subscription"><Subscription/></Page>}/>
     {Object.entries(legacyRedirects).filter(([from,to])=>from!=='/ai'&&!PUBLIC_PATHS.includes(to)).map(([from,to])=><Route key={from} path={from} element={<Navigate to={to} replace/>}/>)}
-    <Route path="/help" element={<Navigate to="/settings?view=system" replace/>}/>
+    <Route path="/help" element={<Page><HelpPage/></Page>}/>
     <Route path="*" element={<NotFound/>}/>
   </Route></Routes>
 }

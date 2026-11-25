@@ -2,7 +2,7 @@
 // state plus a synchronous result — no React, no side effects — so UI feedback is always accurate
 // and every workflow can be unit-tested and replayed to build consistent seed data.
 import type {
-  ActionResult,Attachment,Bom,BomOperation,CostSnapshot,CustomerReturn,DowntimeReason,EcoChange,EngineeringChange,Employee,LotPin,LotRecord,ManufacturingState,MaterialConsumption,MaterialReservation,PackUnit,PermissionAction,
+  ActionResult,Attachment,Bom,CapaAction,Expense,MaintenanceOrder,MaintenancePart,QualityAlert,DocEvent,PurchaseRequest,SupplierInvoice,SupplierInvoiceLine,StockCount,StockCountLine,StockTransfer,StockTransferLine,BomOperation,CostSnapshot,CustomerReturn,DowntimeReason,EcoChange,EngineeringChange,Employee,LotPin,LotRecord,ManufacturingState,MaterialConsumption,MaterialReservation,PackUnit,PermissionAction,
   PayableEntry,PermissionMap,ProductVariant,ProductionOrder,ProductionStatus,PurchaseLine,PurchaseOrder,QualityCheck,QualityControlPoint,ReceivableEntry,Role,SalesOrder,StockMovement,Supplier,SupplierMaterial,SupplierReplacement,WorkCenter,WorkOrder,WorkOrderEvent,
 } from '../types'
 import {
@@ -13,7 +13,7 @@ import {maintenanceClashes,maintenanceDue,nextDueDate,planOf,runtimeForecast,run
 import {cleanLink,findLink,linkBlock,linkUnitCost,openPurchasesFor,orderProposal,receiptQuantities,rejectedOpen,replaceableQty,replacementOutstanding,replacementView,returnedLots,validateLink} from './supplierMaterials'
 import type {LinkInput} from './supplierMaterials'
 import {CURRENCIES} from '../utils/format'
-import {employeeRemovalBlocker,employeeWriteBlocker,hasPermission,operatorScopeBlocker,roleManageBlocker,roleOf,rolePermissionBlocker,roleRank,scopeBlocker,scopeMayDelegate,stockScope} from './access'
+import {commandBlocker,employeeRemovalBlocker,employeeWriteBlocker,hasPermission,operatorScopeBlocker,roleManageBlocker,roleOf,rolePermissionBlocker,roleRank,scopeBlocker,scopeMayDelegate,stockScope} from './access'
 import {addDays,addMinutes,compactCode,isoDate,minutesBetween,stamp} from '../utils/dates'
 import {COUNT_UNITS,checkMoney,checkQuantity,dateProblem,isArchived,isIsoDate,isIsoStamp,itemDecimals,readNumber} from './validation'
 import {binQty,itemKeyFor,keyOf,legacyGap,lotsAt,splitKey} from './inventory'
@@ -21,7 +21,7 @@ import {convertQty,packsProblem,unitFactor} from './uom'
 import {PAYMENT_METHODS,customerBalance,hasEntry,ledger,orderReceivable,returnCreditGap,withDebts} from './receivables'
 import {deliveredLotCost} from './profitability'
 import {payableLedger,purchaseBalance,purchasePaymentStatus,supplierBalance,withSupplierDebts} from './payables'
-import {inLot,isSerialUnit,parseSerials,serialConflict,serialTracked} from './serials'
+import {inLot,isSerialUnit,parseSerials,serialConflict,serialStatus,serialTracked,serialUnitsInStock,SERIAL_STATUS_LABEL} from './serials'
 
 export type Ctx={now:Date;user:Employee;id:(prefix:string)=>string}
 export type Outcome={state:ManufacturingState;result:ActionResult}
@@ -1451,8 +1451,12 @@ export function recordMaterialScan(s:S,ctx:Ctx,orderId:string,code:string):Outco
   const component=o.bomSnapshot.components.find(c=>{const material=s.rawMaterials.find(m=>m.id===c.materialId),product=s.products.find(p=>p.id===c.materialId);return [c.materialId,material?.sku,product?.sku].some(v=>v?.toLowerCase()===token)})
     ||o.bomSnapshot.components.find(c=>s.lots.some(l=>l.itemId===c.materialId&&l.code.toLowerCase()===token))
   if(!component)return fail(s,'Bu kod BOM komponentlariga tegishli emas')
-  const stores=[...orderReservations(s,o).filter(r=>r.materialId===component.materialId).map(r=>r.warehouseId),...sourcesFor(s,ctx,o,component.materialId)]
-  const exactLot=s.lots.find(l=>l.itemId===component.materialId&&l.code.toLowerCase()===token&&stores.includes(l.warehouseId))||s.lots.find(l=>l.itemId===component.materialId&&l.code.toLowerCase()===token)
+  const reserved=orderReservations(s,o).filter(r=>r.materialId===component.materialId).map(r=>r.warehouseId)
+  const stores=[...reserved,...sourcesFor(s,ctx,o,component.materialId)]
+  // A lot split across stores (e.g. after a transfer) is issued from the order's own reservation first, so the scan
+  // does not take free stock elsewhere while the reserved quantity stays held.
+  const sameLot=(l:S['lots'][number])=>l.itemId===component.materialId&&l.code.toLowerCase()===token
+  const exactLot=s.lots.find(l=>sameLot(l)&&reserved.includes(l.warehouseId)&&l.qty>1e-9)||s.lots.find(l=>sameLot(l)&&stores.includes(l.warehouseId))||s.lots.find(sameLot)
   if(exactLot&&!stores.includes(exactLot.warehouseId))return fail(s,`${exactLot.code} boshqa omborda`)
   if(exactLot&&['quarantine','hold','rework'].includes(exactLot.status||'available'))return fail(s,`${exactLot.code} QC/hold holatida — issue mumkin emas`)
   if(exactLot&&isExpired(exactLot,isoDate(ctx.now)))return fail(s,`${exactLot.code} yaroqlilik muddati o‘tgan (${exactLot.expiry}) — issue mumkin emas`)
@@ -1713,6 +1717,19 @@ export function createQualityCheck(s:S,ctx:Ctx,payload:Partial<QualityCheck>):Ou
   const sourceType=payload.sourceType||'production'
   // Customer returns are inspected through their own disposition (N-05).
   if(sourceType==='return')return fail(s,'Mijoz qaytarishi Sotuv → Qaytarishlar bo‘limida qaror bilan tekshiriladi')
+  if(!['production','purchase','subcontract'].includes(sourceType))return fail(s,'Tekshiruv manbasi turi noto‘g‘ri')
+  if(payload.type!==undefined&&!['Kirish','Jarayon','Final'].includes(payload.type))return fail(s,'Tekshiruv turi noto‘g‘ri')
+  // An inspection is of the item its document makes: a check of another product would gate the wrong output (SEC-03).
+  if(sourceType==='production'){
+    const mo=s.productionOrders.find(o=>o.id===payload.sourceId)
+    if(!mo)return fail(s,'Ishlab chiqarish buyurtmasi topilmadi')
+    if(payload.itemId!==mo.productId)return fail(s,`${mo.code}: tekshiruv mahsuloti buyurtma mahsulotiga (${itemName(s,mo.productId)}) mos emas`)
+  }
+  if(sourceType==='subcontract'){
+    const sc=s.subcontractOrders.find(o=>o.id===payload.sourceId)
+    if(!sc)return fail(s,'Subcontract buyurtmasi topilmadi')
+    if(payload.itemId!==sc.productId)return fail(s,`${sc.code}: tekshiruv mahsuloti subcontract mahsulotiga mos emas`)
+  }
   if(sourceType==='production'&&payload.type==='Final'){
     const mo=s.productionOrders.find(o=>o.id===payload.sourceId)
     if(!mo||!isOpenOrder(mo))return fail(s,'Final tekshiruv faqat ochiq ishlab chiqarish buyurtmasi uchun yaratiladi')
@@ -1918,8 +1935,19 @@ export function sourceLabel(s:S,id:string){
   return s.productionOrders.find(x=>x.id===id)?.code||s.purchaseOrders.find(x=>x.id===id)?.code||s.subcontractOrders.find(x=>x.id===id)?.code||s.returns.find(x=>x.id===id)?.code||s.salesOrders.find(x=>x.id===id)?.code||id
 }
 
+const NCR_SEVERITIES:QualityAlert['severity'][]=['Past','O‘rta','Yuqori']
+const NCR_STATUSES:QualityAlert['status'][]=['Ochiq','Jarayonda','Yopilgan']
+/** Whether `id` is a document an NCR may be raised on: an MO, PO, subcontract, customer return or sales order. */
+function qualitySourceExists(s:S,id:unknown){
+  return typeof id==='string'&&Boolean(id)&&[s.productionOrders,s.purchaseOrders,s.subcontractOrders,s.returns,s.salesOrders].some(list=>(list as {id:string}[]).some(x=>x.id===id))
+}
+
 export function createQualityAlert(s:S,ctx:Ctx,payload:{title:string;sourceId:string;severity:'Past'|'O‘rta'|'Yuqori';reason:string;ownerId?:string}):Outcome{
   if(!payload.title.trim()||!payload.reason.trim())return fail(s,'Sarlavha va sabab majburiy')
+  // An NCR names a real document; its site decides who sees and works on it (SEC-02).
+  if(!qualitySourceExists(s,payload.sourceId))return fail(s,'NCR manbasi (buyurtma yoki hujjat) topilmadi')
+  if(!NCR_SEVERITIES.includes(payload.severity))return fail(s,'NCR darajasi noto‘g‘ri')
+  if(payload.ownerId&&!s.employees.some(e=>e.id===payload.ownerId&&e.status!=='Arxiv'))return fail(s,'Mas’ul xodim topilmadi yoki arxivlangan')
   const id=ctx.id('qa')
   const next=logActivity({...s,qualityAlerts:[{id,title:payload.title.trim(),sourceId:payload.sourceId,severity:payload.severity,status:'Ochiq',reason:payload.reason.trim(),ownerId:payload.ownerId||ctx.user.id,createdAt:stamp(ctx.now)},...s.qualityAlerts]},ctx,'NCR ochildi','Sifat',sourceLabel(s,payload.sourceId),'warning',payload.title)
   return ok(next,'NCR / Quality Alert ochildi',id)
@@ -1938,20 +1966,38 @@ function postPayable(s:S,ctx:Ctx,e:Omit<PayableEntry,'id'|'date'|'by'|'currency'
   return next
 }
 
-export function recordSupplierPayment(s:S,ctx:Ctx,p:{supplierId:string;amount:number;key:string;purchaseOrderId?:string;method?:string;reason:string}):Outcome{
+export function recordSupplierPayment(s:S,ctx:Ctx,p:{supplierId:string;amount:number;key:string;purchaseOrderId?:string;invoiceId?:string;method?:string;reason:string}):Outcome{
   const supplier=s.suppliers.find(x=>x.id===p.supplierId)
   if(!supplier)return fail(s,'Supplier topilmadi')
   const key=String(p.key||'').trim()
   if(!key||!p.reason?.trim())return fail(s,'To‘lov kaliti va sababi kerak')
-  if(payableLedger(s).some(e=>e.key===`payment:${key}`))return ok(s,'Bu to‘lov allaqachon qayd etilgan')
   const amount=checkMoney(p.amount,'To‘lov miqdori',false)
   if('error' in amount)return fail(s,amount.error)
-  const po=p.purchaseOrderId?s.purchaseOrders.find(x=>x.id===p.purchaseOrderId):undefined
-  if(p.purchaseOrderId&&(!po||po.supplierId!==supplier.id))return fail(s,'PO ushbu supplierga tegishli emas')
+  const previous=payableLedger(s).find(e=>e.key===`payment:${key}`)
+  if(previous){
+    const paymentPoId=p.purchaseOrderId||(p.invoiceId?(s.supplierInvoices||[]).find(x=>x.id===p.invoiceId)?.purchaseOrderId:undefined)
+    const same=previous.supplierId===supplier.id&&Math.abs(previous.amount+amount.value)<0.005
+      &&previous.purchaseOrderId===paymentPoId&&previous.invoiceId===p.invoiceId
+      &&previous.method===(p.method||'Boshqa')&&previous.reason===p.reason.trim()
+    return same?ok(s,'Bu to‘lov allaqachon qayd etilgan'):fail(s,'To‘lov kaliti boshqa to‘lovda ishlatilgan')
+  }
+  // A payment against an invoice is a payment of the invoice's PO (FN-001): without the PO given, it is still capped by
+  // what is open on that PO, so an order already paid directly is never paid a second time through its invoice.
+  const inv=p.invoiceId?(s.supplierInvoices||[]).find(x=>x.id===p.invoiceId):undefined
+  const poId=p.purchaseOrderId||(inv?.supplierId===supplier.id?inv.purchaseOrderId:undefined)
+  const po=poId?s.purchaseOrders.find(x=>x.id===poId):undefined
+  if(poId&&(!po||po.supplierId!==supplier.id))return fail(s,'PO ushbu supplierga tegishli emas')
   if(stockScope(s,ctx.user)&&(!po||!stockScope(s,ctx.user)!.has(po.warehouseId)))return fail(s,'To‘lov POsi vakolat doirasidan tashqarida')
   const open=po?purchaseBalance(s,po.id):supplierBalance(s,supplier.id)
   if(open<=0.005||amount.value>open+0.005)return fail(s,`To‘lov ochiq qarzdan oshadi (${open} UZS)`)
-  let next=postPayable(s,ctx,{key:`payment:${key}`,supplierId:supplier.id,kind:'payment',amount:-amount.value,purchaseOrderId:po?.id,reason:p.reason.trim(),method:p.method||'Boshqa'})
+  // Against an invoice: an approved invoice of this supplier and PO, never above what is still open on it.
+  if(p.invoiceId){
+    if(!inv||inv.supplierId!==supplier.id||(po&&inv.purchaseOrderId!==po.id))return fail(s,'Invoice ushbu supplier yoki PO’ga tegishli emas')
+    if(inv.status!=='Tasdiqlangan')return fail(s,`${inv.code}: faqat tasdiqlangan invoice to‘lanadi`)
+    const left=invoiceOpen(s,inv)
+    if(amount.value>left+0.005)return fail(s,`To‘lov ${inv.code} qoldig‘idan oshadi (${left} UZS)`)
+  }
+  let next=postPayable(s,ctx,{key:`payment:${key}`,supplierId:supplier.id,kind:'payment',amount:-amount.value,purchaseOrderId:po?.id||inv?.purchaseOrderId,...(inv?{invoiceId:inv.id}:{}),reason:p.reason.trim(),method:p.method||'Boshqa'})
   next=logActivity(next,ctx,'Supplier to‘lovi','Xaridlar',po?.code||supplier.name,'info',`${amount.value} UZS · ${p.reason.trim()}`)
   return ok(next,'Supplier to‘lovi ledgerga yozildi')
 }
@@ -2030,6 +2076,9 @@ export function createPurchaseOrder(s:S,ctx:Ctx,p:PurchasePayload):Outcome{
   const warehouseId=p.warehouseId||rawWarehouseFor(s,s.settings.defaultWarehouseId||finishedWarehouseFor(s,s.settings.defaultLineId))
   const wh=s.warehouses.find(w=>w.id===warehouseId)
   if(!wh||wh.status!=='Faol'||!['Raw','Mixed'].includes(wh.type))return fail(s,'Xomashyo uchun faol Raw yoki Mixed ombor tanlang')
+  // The store the PO lands in is checked even when it was not given: the company default may sit in another branch (SEC-01).
+  const outside=scopeBlocker(s,ctx.user,'createPurchaseOrder',[{...p,warehouseId}])
+  if(outside)return fail(s,outside)
   const orderIds=[...new Set((p.productionOrderIds||[]).filter(x=>s.productionOrders.some(o=>o.id===x)))]
   const id=ctx.id('po'),code=nextCode(s.purchaseOrders.map(x=>x.code),'PO',ctx.now)
   const status=p.status||'Tasdiqlangan'
@@ -2102,18 +2151,26 @@ export function updatePurchaseDraft(s:S,ctx:Ctx,id:string,p:{lines:PurchaseLineI
   const expectedDate=p.expectedDate||po.expectedDate
   if(!isIsoDate(expectedDate))return fail(s,'Expected date noto‘g‘ri')
   const total=Math.round(built.lines.reduce((a,l)=>a+l.qty*l.price,0))
-  const updated:PurchaseOrder={...po,items:built.lines,warehouseId,expectedDate,total}
+  // A draft waiting for approval goes back to draft when edited: the approver must see what is approved.
+  const updated:PurchaseOrder={...po,items:built.lines,warehouseId,expectedDate,total,approvalRequestedAt:undefined,approvalRequestedBy:undefined}
   const before=po.items.map(i=>`${itemName(s,i.materialId)} ${i.qty}×${i.price}`).join(', '),after=built.lines.map(i=>`${itemName(s,i.materialId)} ${i.qty}×${i.price}`).join(', ')
   const next=logActivity({...s,purchaseOrders:s.purchaseOrders.map(x=>x.id===id?updated:x)},ctx,'PO qoralamasi tahrirlandi','Xaridlar',po.code,'info',before===after?`${wh.name} · ${expectedDate}`:`${before} → ${after}`)
   return ok(next,`${po.code} saqlandi`,id)
 }
 
 /** Header-only PO edits (invoice, payment, expected date). Lines and receipts change only via receiving. */
+const PO_INVOICE_STATUSES=['Kutilmoqda','Qabul qilindi','Tekshirildi','Yo‘q']
+const SALES_PAYMENT_STATUSES=['To‘lanmagan','Qisman','To‘langan']
 export function updatePurchaseMeta(s:S,ctx:Ctx,id:string,patch:{invoiceStatus?:string;paymentStatus?:string;expectedDate?:string}):Outcome{
   const po=s.purchaseOrders.find(x=>x.id===id)
   if(!po)return fail(s,'PO topilmadi')
   if(po.status==='Bekor')return fail(s,'Bekor qilingan PO tahrirlanmaydi')
   if(patch.paymentStatus!==undefined)return fail(s,'To‘lov holati payable ledgerdan hisoblanadi; eski qiymat o‘zgartirilmaydi')
+  // The typed invoice status is only for a PO without registered invoices, and only one of the known values (SEC-09).
+  if(patch.invoiceStatus!==undefined&&patch.invoiceStatus!==po.invoiceStatus){
+    if((s.supplierInvoices||[]).some(x=>x.purchaseOrderId===po.id))return fail(s,'Invoice holati kiritilgan invoice’lardan hisoblanadi')
+    if(!PO_INVOICE_STATUSES.includes(patch.invoiceStatus))return fail(s,'Invoice holati noto‘g‘ri')
+  }
   const badDate=dateProblem(patch.expectedDate,'Kutilgan sana')
   if(badDate)return fail(s,badDate)
   const clean=Object.fromEntries(Object.entries(patch).filter(([,v])=>v!==undefined&&v!==''))
@@ -2514,8 +2571,256 @@ export function setPreferredSupplier(s:S,ctx:Ctx,materialId:string,supplierId:st
   return ok(next,supplierId?`${s.suppliers.find(x=>x.id===supplierId)?.name} — asosiy supplier`:'Asosiy supplier olib tashlandi')
 }
 
-export type SupplierInput=Pick<Supplier,'name'|'phone'|'leadTime'|'rating'|'status'>&{email?:string}
+/* ------------------------------------------------- purchase requests -- */
+
+const requestsOf=(s:S)=>s.purchaseRequests||[]
+const withRequest=(s:S,r:PurchaseRequest):S=>({...s,purchaseRequests:requestsOf(s).some(x=>x.id===r.id)?requestsOf(s).map(x=>x.id===r.id?r:x):[r,...requestsOf(s)]})
+const docEvent=(ctx:Ctx,action:string,note?:string):DocEvent=>({at:stamp(ctx.now),by:ctx.user?.id||'',action,...(note?.trim()?{note:note.trim()}:{})})
+export type PurchaseRequestInput={lines:{materialId:string;qty:number|string}[];neededBy:string;warehouseId:string;note?:string}
+
+function requestLines(s:S,p:PurchaseRequestInput):{lines:PurchaseRequest['lines'];warehouseId:string;neededBy:string}|{error:string}{
+  const wh=s.warehouses.find(w=>w.id===p.warehouseId)
+  if(!wh||wh.status!=='Faol'||!['Raw','Mixed'].includes(wh.type))return {error:'Xomashyo uchun faol Raw yoki Mixed ombor tanlang'}
+  const badDate=dateProblem(p.neededBy,'Kerakli sana')
+  if(badDate||!p.neededBy)return {error:badDate||'Kerakli sanani kiriting'}
+  const lines:PurchaseRequest['lines']=[]
+  for(const l of p.lines||[]){
+    if(!l.materialId&&(l.qty===''||l.qty===undefined))continue
+    const m=s.rawMaterials.find(x=>x.id===l.materialId)
+    if(!m)return {error:'Materialni tanlang'}
+    if(isArchived(m))return {error:`${m.name} arxivlangan`}
+    if(lines.some(x=>x.materialId===m.id))return {error:`${m.name} ikki qatorda — bitta qatorga jamlang`}
+    const q=stockQty(s,m.id,l.qty,`${m.name}: miqdor`)
+    if('error' in q)return {error:q.error}
+    lines.push({materialId:m.id,qty:q.value})
+  }
+  if(!lines.length)return {error:'Kamida bitta material va miqdor kiriting'}
+  return {lines,warehouseId:wh.id,neededBy:p.neededBy}
+}
+
+/** Creates a purchase request as a draft, or submits it at once (`submit`). */
+export function createPurchaseRequest(s:S,ctx:Ctx,p:PurchaseRequestInput&{submit?:boolean}):Outcome{
+  const built=requestLines(s,p)
+  if('error' in built)return fail(s,built.error)
+  const id=ctx.id('pr'),code=nextCode(requestsOf(s).map(x=>x.code),'PR',ctx.now)
+  const history=[docEvent(ctx,'Yaratildi')]
+  if(p.submit)history.push(docEvent(ctx,'Tasdiqlashga yuborildi'))
+  const row:PurchaseRequest={id,code,status:p.submit?'Yuborilgan':'Qoralama',...built,...(p.note?.trim()?{note:p.note.trim()}:{}),createdAt:stamp(ctx.now),createdBy:ctx.user?.id||'',history}
+  let next=withRequest(s,row)
+  if(p.submit)next=notify(next,ctx,'purchase','Xarid so‘rovi tasdiq kutmoqda',`${code}: ${built.lines.map(l=>`${itemName(s,l.materialId)} ${l.qty}`).join(', ')}`,'info',`/purchases?view=requests&id=${id}`,{key:`pr:${id}`})
+  return ok(logActivity(next,ctx,p.submit?'Xarid so‘rovi yuborildi':'Xarid so‘rovi yaratildi','Xaridlar',code,'info',built.lines.map(l=>`${itemName(s,l.materialId)} ${l.qty}`).join(', ')),`${code} ${p.submit?'tasdiqlashga yuborildi':'qoralama sifatida saqlandi'}`,id)
+}
+
+/** Edits a draft or a rejected request (it goes back to draft); a submitted, approved or ordered one is not edited. */
+export function updatePurchaseRequest(s:S,ctx:Ctx,id:string,p:PurchaseRequestInput):Outcome{
+  const r=requestsOf(s).find(x=>x.id===id)
+  if(!r)return fail(s,'Xarid so‘rovi topilmadi')
+  if(r.status!=='Qoralama'&&r.status!=='Rad etilgan')return fail(s,`${r.code}: faqat qoralama yoki rad etilgan so‘rov tahrirlanadi (holat: ${r.status})`)
+  const built=requestLines(s,p)
+  if('error' in built)return fail(s,built.error)
+  const before=r.lines.map(l=>`${itemName(s,l.materialId)} ${l.qty}`).join(', '),after=built.lines.map(l=>`${itemName(s,l.materialId)} ${l.qty}`).join(', ')
+  const updated:PurchaseRequest={...r,...built,status:'Qoralama',note:p.note?.trim()||undefined,history:[...r.history,docEvent(ctx,'Tahrirlandi',before===after?undefined:`${before} → ${after}`)]}
+  return ok(logActivity(withRequest(s,updated),ctx,'Xarid so‘rovi tahrirlandi','Xaridlar',r.code,'info',after),`${r.code} saqlandi`)
+}
+
+export function submitPurchaseRequest(s:S,ctx:Ctx,id:string):Outcome{
+  const r=requestsOf(s).find(x=>x.id===id)
+  if(!r)return fail(s,'Xarid so‘rovi topilmadi')
+  if(r.status!=='Qoralama')return fail(s,`${r.code}: faqat qoralama yuboriladi (holat: ${r.status})`)
+  let next=withRequest(s,{...r,status:'Yuborilgan',history:[...r.history,docEvent(ctx,'Tasdiqlashga yuborildi')]})
+  next=notify(next,ctx,'purchase','Xarid so‘rovi tasdiq kutmoqda',`${r.code}`,'info',`/purchases?view=requests&id=${id}`,{key:`pr:${id}`})
+  return ok(logActivity(next,ctx,'Xarid so‘rovi yuborildi','Xaridlar',r.code),`${r.code} tasdiqlashga yuborildi`)
+}
+
+/** Approves or rejects a submitted request. A reason is required to reject; nobody approves their own request. */
+export function decidePurchaseRequest(s:S,ctx:Ctx,id:string,decision:'approve'|'reject',note=''):Outcome{
+  const r=requestsOf(s).find(x=>x.id===id)
+  if(!r)return fail(s,'Xarid so‘rovi topilmadi')
+  if(r.status!=='Yuborilgan')return fail(s,`${r.code}: faqat yuborilgan so‘rov ko‘rib chiqiladi (holat: ${r.status})`)
+  if(decision!=='approve'&&decision!=='reject')return fail(s,'Qaror noto‘g‘ri')
+  if(r.createdBy&&r.createdBy===ctx.user?.id)return fail(s,`${r.code}: o‘zingiz yaratgan so‘rovni boshqa xodim ko‘rib chiqadi`)
+  const why=note.trim()
+  if(decision==='reject'&&why.length<5)return fail(s,'Rad etish sababini yozing (kamida 5 belgi)')
+  const status=decision==='approve'?'Tasdiqlangan' as const:'Rad etilgan' as const
+  const next=withRequest(s,{...r,status,decidedBy:ctx.user?.id,decidedAt:stamp(ctx.now),...(why?{decisionNote:why}:{}),history:[...r.history,docEvent(ctx,decision==='approve'?'Tasdiqlandi':'Rad etildi',why)]})
+  return ok(logActivity(next,ctx,decision==='approve'?'Xarid so‘rovi tasdiqlandi':'Xarid so‘rovi rad etildi','Xaridlar',r.code,decision==='approve'?'success':'warning',why),`${r.code} ${decision==='approve'?'tasdiqlandi':'rad etildi'}`)
+}
+
+export function cancelPurchaseRequest(s:S,ctx:Ctx,id:string,reason:string):Outcome{
+  const r=requestsOf(s).find(x=>x.id===id)
+  if(!r)return fail(s,'Xarid so‘rovi topilmadi')
+  if(r.status==='Buyurtma qilingan'||r.status==='Bekor')return fail(s,`${r.code}: ${r.status.toLowerCase()} so‘rov bekor qilinmaydi`)
+  if(reason.trim().length<5)return fail(s,'Bekor qilish sababini yozing (kamida 5 belgi)')
+  const next=withRequest(s,{...r,status:'Bekor',history:[...r.history,docEvent(ctx,'Bekor qilindi',reason)]})
+  return ok(logActivity(next,ctx,'Xarid so‘rovi bekor qilindi','Xaridlar',r.code,'warning',reason.trim()),`${r.code} bekor qilindi`)
+}
+
+/**
+ * Raises a PO from an approved request — never from a draft, submitted or rejected one. The PO is created as a
+ * draft (it goes through PO approval); its lines are checked against the supplier's links like any PO.
+ */
+export function purchaseOrderFromRequest(s:S,ctx:Ctx,id:string,p:{supplierId:string;prices?:Record<string,number>;expectedDate?:string}):Outcome{
+  const r=requestsOf(s).find(x=>x.id===id)
+  if(!r)return fail(s,'Xarid so‘rovi topilmadi')
+  if(r.status!=='Tasdiqlangan')return fail(s,`${r.code}: faqat tasdiqlangan so‘rovdan PO yaratiladi (holat: ${r.status})`)
+  const out=createPurchaseOrder(s,ctx,{supplierId:p.supplierId,warehouseId:r.warehouseId,expectedDate:p.expectedDate||r.neededBy,status:'Qoralama',source:`Xarid so‘rovi ${r.code}`,lines:r.lines.map(l=>({materialId:l.materialId,qty:l.qty,price:p.prices?.[l.materialId]}))})
+  if(!out.result.ok)return fail(s,out.result.message)
+  const poId=out.result.id!
+  let next={...out.state,purchaseOrders:out.state.purchaseOrders.map(po=>po.id===poId?{...po,requestIds:[r.id]}:po)}
+  const code=next.purchaseOrders.find(po=>po.id===poId)!.code
+  next=withRequest(next,{...r,status:'Buyurtma qilingan',purchaseOrderIds:[...(r.purchaseOrderIds||[]),poId],history:[...r.history,docEvent(ctx,'PO yaratildi',code)]})
+  return ok(logActivity(next,ctx,'So‘rovdan PO yaratildi','Xaridlar',r.code,'success',code),`${code} qoralama sifatida yaratildi (${r.code})`,poId)
+}
+
+/* --------------------------------------------------- PO approval flow -- */
+
+/** Sends a draft PO for approval (Pending Approval). Editing it afterwards takes it back to draft. */
+export function requestPurchaseApproval(s:S,ctx:Ctx,id:string):Outcome{
+  const po=s.purchaseOrders.find(x=>x.id===id)
+  if(!po||po.status!=='Qoralama')return fail(s,'Faqat qoralama PO tasdiqlashga yuboriladi')
+  if(po.approvalRequestedAt)return fail(s,`${po.code} allaqachon tasdiq kutmoqda`)
+  let next={...s,purchaseOrders:s.purchaseOrders.map(x=>x.id===id?{...x,approvalRequestedAt:stamp(ctx.now),approvalRequestedBy:ctx.user?.id}:x)}
+  next=notify(next,ctx,'purchase','PO tasdiq kutmoqda',`${po.code} · ${po.total} UZS`,'info',`/purchases?view=orders&id=${id}`,{key:`po-approval:${id}`})
+  return ok(logActivity(next,ctx,'PO tasdiqlashga yuborildi','Xaridlar',po.code),`${po.code} tasdiqlashga yuborildi`)
+}
+
+/** Marks an approved PO as sent to the supplier (status stays approved until goods ship). */
+export function markPurchaseSent(s:S,ctx:Ctx,id:string,note=''):Outcome{
+  const po=s.purchaseOrders.find(x=>x.id===id)
+  if(!po||!['Tasdiqlangan','Yo‘lda'].includes(po.status))return fail(s,'Faqat tasdiqlangan PO supplierga yuboriladi')
+  if(po.sentAt)return fail(s,`${po.code} ${po.sentAt.slice(0,10)} da yuborilgan`)
+  const next={...s,purchaseOrders:s.purchaseOrders.map(x=>x.id===id?{...x,sentAt:stamp(ctx.now),sentBy:ctx.user?.id}:x)}
+  return ok(logActivity(next,ctx,'PO supplierga yuborildi','Xaridlar',po.code,'info',note.trim()||undefined),`${po.code} supplierga yuborildi`)
+}
+
+/* --------------------------------------------- supplier invoices (3-way) -- */
+
+const invoicesOf=(s:S)=>s.supplierInvoices||[]
+const withInvoice=(s:S,v:SupplierInvoice):S=>({...s,supplierInvoices:invoicesOf(s).some(x=>x.id===v.id)?invoicesOf(s).map(x=>x.id===v.id?v:x):[v,...invoicesOf(s)]})
+const LIVE_INVOICE:SupplierInvoice['status'][]=['Tekshirilmoqda','Tasdiqlangan']
+
+export type InvoiceMatchLine={materialId:string;ordered:number;poPrice:number;received:number;returned:number;invoicedBefore:number;invoiceable:number;qty:number;price:number;qtyOver:number;priceDiff:number;variance:number}
+/**
+ * Three-way match of an invoice: per material, what the PO ordered and at what price, what goods receipts brought in
+ * (minus what went back to the supplier), what other live invoices already bill, and this invoice's quantity and price.
+ * Billing more than was received is an over-invoice (never approvable); a price other than the PO price is a variance.
+ */
+export function invoiceMatch(s:S,inv:Pick<SupplierInvoice,'id'|'purchaseOrderId'|'lines'>){
+  const po=s.purchaseOrders.find(x=>x.id===inv.purchaseOrderId)
+  const lines:InvoiceMatchLine[]=inv.lines.map(l=>{
+    const item=po?.items.find(i=>i.materialId===l.materialId)
+    const receipts=(po?.receipts||[]).filter(r=>r.materialId===l.materialId)
+    const returned=q3(receipts.reduce((a,r)=>a+receiptQuantities(s,po!,r).returned,0))
+    const received=q3(item?.received||0)
+    const invoicedBefore=q3(invoicesOf(s).filter(x=>x.id!==inv.id&&x.purchaseOrderId===inv.purchaseOrderId&&LIVE_INVOICE.includes(x.status)).reduce((a,x)=>a+x.lines.filter(y=>y.materialId===l.materialId).reduce((b,y)=>b+y.qty,0),0))
+    const invoiceable=q3(Math.max(0,received-returned-invoicedBefore))
+    const poPrice=item?.price??0,priceDiff=r2(l.price-poPrice)
+    return {materialId:l.materialId,ordered:item?.qty||0,poPrice,received,returned,invoicedBefore,invoiceable,qty:l.qty,price:l.price,qtyOver:q3(Math.max(0,l.qty-invoiceable)),priceDiff,variance:r2(l.qty*priceDiff)}
+  })
+  const overBilled=lines.filter(l=>l.qtyOver>1e-6),priced=lines.filter(l=>Math.abs(l.priceDiff)>0.005)
+  return {lines,overBilled,priced,variance:r2(lines.reduce((a,l)=>a+l.variance,0)),matched:!overBilled.length&&!priced.length}
+}
+
+export type SupplierInvoiceInput={purchaseOrderId:string;number:string;date:string;dueDate?:string;lines:{materialId:string;qty:number|string;price:number|string}[];key?:string}
+/** Registers a supplier invoice against a PO for review. It does not change stock or debt. */
+export function registerSupplierInvoice(s:S,ctx:Ctx,p:SupplierInvoiceInput):Outcome{
+  const key=String(p.key||'').trim()
+  if(key&&invoicesOf(s).some(x=>x.key===key))return fail(s,'Bu invoice allaqachon kiritilgan — qayta yozilmadi')
+  const po=s.purchaseOrders.find(x=>x.id===p.purchaseOrderId)
+  if(!po)return fail(s,'PO topilmadi')
+  if(po.status==='Qoralama'||po.status==='Bekor')return fail(s,`${po.code}: ${po.status==='Bekor'?'bekor qilingan':'tasdiqlanmagan'} PO bo‘yicha invoice qabul qilinmaydi`)
+  const number=String(p.number||'').trim()
+  if(!/^[A-Za-z0-9][A-Za-z0-9/._-]{0,39}$/.test(number))return fail(s,'Supplier invoice raqamini kiriting (harf, raqam, / . _ -)')
+  if(invoicesOf(s).some(x=>x.supplierId===po.supplierId&&x.status!=='Bekor'&&x.number.toLowerCase()===number.toLowerCase()))return fail(s,`${number}: bu supplierdan shu raqamli invoice allaqachon kiritilgan`)
+  const badDate=dateProblem(p.date,'Invoice sanasi')||(!p.date?'Invoice sanasini kiriting':null)||dateProblem(p.dueDate,'To‘lov muddati')
+  if(badDate)return fail(s,badDate)
+  if(p.dueDate&&p.dueDate<p.date)return fail(s,'To‘lov muddati invoice sanasidan oldin bo‘lmaydi')
+  const lines:SupplierInvoiceLine[]=[]
+  for(const l of p.lines||[]){
+    if(l.qty===''||Number(l.qty)===0)continue
+    if(!po.items.some(i=>i.materialId===l.materialId))return fail(s,`${itemName(s,l.materialId)}: ${po.code}da bunday qator yo‘q`)
+    const q=stockQty(s,l.materialId,l.qty,`${itemName(s,l.materialId)}: invoice miqdori`)
+    if('error' in q)return fail(s,q.error)
+    const price=checkMoney(l.price,`${itemName(s,l.materialId)}: invoice narxi`)
+    if('error' in price)return fail(s,price.error)
+    if(lines.some(x=>x.materialId===l.materialId))return fail(s,`${itemName(s,l.materialId)} ikki qatorda`)
+    lines.push({materialId:l.materialId,qty:q.value,price:price.value})
+  }
+  if(!lines.length)return fail(s,'Kamida bitta qator miqdorini kiriting')
+  const id=ctx.id('sinv'),code=nextCode(invoicesOf(s).map(x=>x.code),'SINV',ctx.now)
+  const inv:SupplierInvoice={id,code,number,supplierId:po.supplierId,purchaseOrderId:po.id,date:p.date,...(p.dueDate?{dueDate:p.dueDate}:{}),lines,total:r2(lines.reduce((a,l)=>a+l.qty*l.price,0)),status:'Tekshirilmoqda',createdAt:stamp(ctx.now),createdBy:ctx.user?.id||'',history:[docEvent(ctx,'Kiritildi')],...(key?{key}:{})}
+  const m=invoiceMatch(s,inv)
+  const next=withInvoice(s,inv)
+  const verdict=m.matched?'PO va qabul bilan mos':`${m.overBilled.length?`${m.overBilled.length} qatorda qabul qilinmagan miqdor`:''}${m.overBilled.length&&m.priced.length?', ':''}${m.priced.length?`${m.priced.length} qatorda narx farqi (${m.variance})`:''}`
+  return ok(logActivity(next,ctx,'Supplier invoice kiritildi','Xaridlar',code,m.matched?'info':'warning',`${number} · ${po.code} · ${inv.total} · ${verdict}`),`${code} kiritildi · ${verdict}`,id)
+}
+
+/**
+ * Approves an invoice after re-matching it. Billing for goods not received (or already billed) is never approved.
+ * A price difference is approved only as an exception with a reason; the difference is then posted once to the
+ * payable ledger (the single source of supplier debt), so the debt equals what the supplier invoiced.
+ */
+export function approveSupplierInvoice(s:S,ctx:Ctx,id:string,exceptionReason=''):Outcome{
+  const inv=invoicesOf(s).find(x=>x.id===id)
+  if(!inv)return fail(s,'Invoice topilmadi')
+  if(inv.status!=='Tekshirilmoqda')return fail(s,`${inv.code}: ${inv.status.toLowerCase()} — qayta tasdiqlanmaydi`)
+  const m=invoiceMatch(s,inv)
+  if(m.overBilled.length)return fail(s,`${inv.code}: ${m.overBilled.map(l=>`${itemName(s,l.materialId)} — invoice ${l.qty}, invoice qilsa bo‘ladigan qabul ${l.invoiceable}`).join('; ')}. Qabul qilinmagan miqdor uchun invoice tasdiqlanmaydi — rad eting yoki qabulni kuting`)
+  const why=exceptionReason.trim()
+  if(m.priced.length&&why.length<5)return fail(s,`${inv.code}: narx farqi ${m.variance} UZS (${m.priced.map(l=>`${itemName(s,l.materialId)} ${l.poPrice} → ${l.price}`).join('; ')}) — istisno sababini yozing`)
+  let next=s
+  if(Math.abs(m.variance)>0.005){
+    if(m.variance<0&&purchaseBalance(s,inv.purchaseOrderId)+m.variance<-0.005)return fail(s,`${inv.code}: kamaytiruvchi farq (${m.variance}) PO qoldig‘idan oshadi — avval to‘lovlarni tekshiring`)
+    next=postPayable(next,ctx,{key:`invoice-variance:${inv.id}`,supplierId:inv.supplierId,kind:'adjustment',amount:m.variance,purchaseOrderId:inv.purchaseOrderId,invoiceId:inv.id,reason:`${inv.code} (${inv.number}) narx farqi · ${why}`})
+  }
+  const approved:SupplierInvoice={...inv,status:'Tasdiqlangan',approvedBy:ctx.user?.id,approvedAt:stamp(ctx.now),variance:m.variance,...(m.priced.length?{exceptionReason:why}:{}),history:[...inv.history,docEvent(ctx,m.priced.length?'Istisno bilan tasdiqlandi':'Tasdiqlandi',m.priced.length?`${m.variance} · ${why}`:undefined)]}
+  next=withInvoice(next,approved)
+  next={...next,purchaseOrders:next.purchaseOrders.map(po=>po.id===inv.purchaseOrderId?{...po,invoiceStatus:purchaseInvoiceStatus(next,po)}:po)}
+  return ok(logActivity(next,ctx,'Supplier invoice tasdiqlandi','Xaridlar',inv.code,m.priced.length?'warning':'success',`${inv.number} · ${inv.total}${m.priced.length?` · narx farqi ${m.variance} · ${why}`:''}`),`${inv.code} tasdiqlandi${Math.abs(m.variance)>0.005?` · narx farqi ${m.variance} UZS qarzga yozildi`:''}`)
+}
+
+export function rejectSupplierInvoice(s:S,ctx:Ctx,id:string,reason:string):Outcome{
+  const inv=invoicesOf(s).find(x=>x.id===id)
+  if(!inv)return fail(s,'Invoice topilmadi')
+  if(inv.status!=='Tekshirilmoqda')return fail(s,`${inv.code}: faqat tekshirilayotgan invoice rad etiladi`)
+  if(reason.trim().length<5)return fail(s,'Rad etish sababini yozing (kamida 5 belgi)')
+  const next=withInvoice(s,{...inv,status:'Rad etilgan',history:[...inv.history,docEvent(ctx,'Rad etildi',reason)]})
+  return ok(logActivity(next,ctx,'Supplier invoice rad etildi','Xaridlar',inv.code,'warning',reason.trim()),`${inv.code} rad etildi · qarz o‘zgarmadi`)
+}
+
+/** Invoice status of a PO derived from its live invoices against what was received. */
+export function purchaseInvoiceStatus(s:S,po:Pick<PurchaseOrder,'id'|'invoiceStatus'|'items'>){
+  const live=invoicesOf(s).filter(x=>x.purchaseOrderId===po.id&&x.status==='Tasdiqlangan')
+  if(!live.length)return invoicesOf(s).some(x=>x.purchaseOrderId===po.id&&x.status==='Tekshirilmoqda')?'Tekshirilmoqda':po.invoiceStatus
+  const billed=live.reduce((a,x)=>a+x.lines.reduce((b,l)=>b+l.qty,0),0),received=po.items.reduce((a,i)=>a+i.received,0)
+  return billed>=received-1e-6?'Invoice qilingan':'Qisman invoice'
+}
+
+/** What is still to be paid on an approved invoice: its total minus payments made against it. */
+export const invoiceOpen=(s:S,inv:Pick<SupplierInvoice,'id'|'total'|'status'>)=>inv.status!=='Tasdiqlangan'?0:r2(Math.max(0,inv.total+payableLedger(s).filter(e=>e.invoiceId===inv.id&&e.kind==='payment').reduce((a,e)=>a+e.amount,0)))
+
+export type SupplierInput=Pick<Supplier,'name'|'phone'|'leadTime'|'rating'|'status'>&{email?:string;contactPerson?:string;address?:string;inn?:string;bankAccount?:string;mfo?:string}
 export type SupplierLinkRow=Omit<LinkInput,'supplierId'>&{id?:string}
+
+/**
+ * Contact and bank requisites of a supplier: phone with 7–15 digits, valid e-mail, STIR 9 digits (unique), bank
+ * account 20 digits, MFO 5 digits. Empty optional fields are dropped.
+ */
+export function supplierRequisites(s:S,p:SupplierInput,id?:string):{fields:Partial<Supplier>}|{error:string}{
+  const digits=(v?:string)=>String(v||'').replace(/\s/g,'')
+  const phone=digits(p.phone).replace(/[()+-]/g,'')
+  if(!/^\d{7,15}$/.test(phone))return {error:'Telefon raqami 7–15 raqamdan iborat bo‘lsin'}
+  const email=p.email?.trim()
+  if(email&&!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email))return {error:'Email noto‘g‘ri'}
+  const inn=digits(p.inn),account=digits(p.bankAccount),mfo=digits(p.mfo)
+  if(inn&&!/^\d{9}$/.test(inn))return {error:'STIR (INN) 9 ta raqam bo‘lsin'}
+  if(inn&&s.suppliers.some(x=>x.id!==id&&x.inn===inn))return {error:`STIR ${inn} boshqa supplierda ro‘yxatdan o‘tgan`}
+  if(account&&!/^\d{20}$/.test(account))return {error:'Hisob raqami 20 ta raqam bo‘lsin'}
+  if(mfo&&!/^\d{5}$/.test(mfo))return {error:'MFO 5 ta raqam bo‘lsin'}
+  if(account&&!mfo)return {error:'Hisob raqami bilan bankning MFO kodini kiriting'}
+  const text=(v?:string,max=120)=>{const t=String(v||'').trim();return t?t.slice(0,max):undefined}
+  return {fields:{contactPerson:text(p.contactPerson,80),address:text(p.address,200),inn:inn||undefined,bankAccount:account||undefined,mfo:mfo||undefined}}
+}
 
 /** Creates or edits a supplier together with the materials it supplies, in one step (all or nothing). */
 export function saveSupplier(s:S,ctx:Ctx,p:{id?:string;supplier:SupplierInput;links:SupplierLinkRow[]}):Outcome{
@@ -2525,7 +2830,9 @@ export function saveSupplier(s:S,ctx:Ctx,p:{id?:string;supplier:SupplierInput;li
   const existing=p.id?s.suppliers.find(x=>x.id===p.id):undefined
   if(p.id&&!existing)return fail(s,'Supplier topilmadi')
   const supplierId=existing?.id||ctx.id('su')
-  const fields={name,phone:p.supplier.phone.trim(),email:p.supplier.email?.trim()||undefined,leadTime:Math.max(0,Number(p.supplier.leadTime)||0),rating:Math.min(5,Math.max(0,Number(p.supplier.rating)||0)),status:p.supplier.status}
+  const requisites=supplierRequisites(s,p.supplier,existing?.id)
+  if('error' in requisites)return fail(s,requisites.error)
+  const fields={name,phone:p.supplier.phone.trim(),email:p.supplier.email?.trim()||undefined,leadTime:Math.max(0,Number(p.supplier.leadTime)||0),rating:Math.min(5,Math.max(0,Number(p.supplier.rating)||0)),status:p.supplier.status,...requisites.fields}
   let next:S=existing
     ?{...s,suppliers:s.suppliers.map(x=>x.id===supplierId?{...x,...fields}:x)}
     :{...s,suppliers:[{id:supplierId,debt:0,...fields},...s.suppliers]}
@@ -2676,7 +2983,35 @@ export function reserveSalesOrder(s:S,ctx:Ctx,id:string):Outcome{
   return ok(logActivity(r.state,ctx,'Stock rezerv tekshirildi','Sotuv',so.code),r.so.status==='Tayyor'?`${so.code}: to‘liq rezerv qilindi`:`${so.code}: stock hali yetarli emas`)
 }
 
-export function deliverSalesOrder(s:S,ctx:Ctx,id:string,quantities?:Record<string,number>):Outcome{
+export type SellableSerial={code:string;warehouseId:string;reserved:boolean;location?:string;createdAt:string}
+/**
+ * Serial units a sales-order line may ship today: available, unexpired unit records of the line's physical item (its
+ * variant), in an eligible sales store of the actor or a store this line reserved in, and held by no other open
+ * reservation. This order's own pinned units come first. Sold, consumed, QC-held or other orders' units never appear.
+ */
+export function sellableSerials(s:S,actor:Employee|undefined,so:SalesOrder,productId:string,today:string):SellableSerial[]{
+  const item=so.items.find(i=>i.productId===productId)
+  if(!item||!serialTracked(s,productId))return []
+  const key=lineKey(s,item),rows=soRows(item) as {warehouseId:string;qty:number;lots?:LotPin[]}[]
+  const stores=new Set([...salesSources(s,actor),...rows.map(r=>r.warehouseId)])
+  const own=new Set(rows.flatMap(r=>(r.lots||[]).map(p=>pinKey(r.warehouseId,key,p.lot))))
+  const others=lotPins(s,so.code)
+  return serialUnitsInStock(s,key).filter(l=>stores.has(l.warehouseId)&&lotUsable(l,today)&&!((others.get(pinKey(l.warehouseId,key,l.code))||0)>1e-9))
+    .map(l=>({code:l.code,warehouseId:l.warehouseId,reserved:own.has(pinKey(l.warehouseId,key,l.code)),createdAt:l.createdAt,...(l.location?{location:l.location}:{})}))
+    .sort((a,b)=>Number(b.reserved)-Number(a.reserved)||a.createdAt.localeCompare(b.createdAt)||a.code.localeCompare(b.code))
+}
+/** Why one serial number cannot ship on this line now (for a precise refusal). */
+function serialRefusal(s:S,key:string,code:string,today:string,eligible:Set<string>){
+  const st=serialStatus(s,code,key)
+  if(!st)return `${code}: bu mahsulotda bunday serial raqam yo‘q`
+  if(!st.record)return `${code}: ${SERIAL_STATUS_LABEL[st.status].toLowerCase()} — omborda emas, qayta sotib bo‘lmaydi`
+  if(st.record.status&&st.record.status!=='available')return `${code}: ${SERIAL_STATUS_LABEL[st.status]} holatida — sotuvga yaroqsiz`
+  if(!lotUsable(st.record,today))return `${code}: yaroqlilik muddati o‘tgan`
+  if(!eligible.has(st.record.warehouseId))return `${code}: sizga ruxsat etilgan sotuv omborida emas`
+  return `${code}: boshqa buyurtma uchun band qilingan`
+}
+
+export function deliverSalesOrder(s:S,ctx:Ctx,id:string,quantities?:Record<string,number>,serials?:Record<string,string[]|string>):Outcome{
   const so=s.salesOrders.find(x=>x.id===id)
   if(!so)return fail(s,'Buyurtma topilmadi')
   if(['Yetkazildi','Bekor'].includes(so.status))return fail(s,'Buyurtma allaqachon yopilgan')
@@ -2694,7 +3029,37 @@ export function deliverSalesOrder(s:S,ctx:Ctx,id:string,quantities?:Record<strin
   if(!targets.some(x=>x.target>0))return fail(s,'Yetkazish uchun kamida bitta miqdor kiriting')
   // Unreserved quantity ships only from eligible stores inside the actor's scope, and only from usable stock (audit #5).
   const today=isoDate(ctx.now),stores=salesSources(s,ctx.user)
+  // Named serial units: exactly the shipped quantity, each sellable now (in stock, usable, eligible store, not another
+  // order's). The ledger row of each unit carries its number, so the unit is bound to this order and shipment.
+  const picks=new Map<string,SellableSerial[]>()
   for(const {item,target,open} of targets){
+    const given=serials?.[item.productId]
+    if(given===undefined||target<=0)continue
+    if(target>open)return fail(s,`${itemName(s,item.productId)}: maksimum ${open}`)
+    if(!serialTracked(s,item.productId))return fail(s,`${itemName(s,item.productId)}: serial raqam bilan yuritilmaydi`)
+    const parsed=parseSerials(given)
+    if('error' in parsed)return fail(s,parsed.error)
+    if(parsed.serials.length!==target)return fail(s,`${itemName(s,item.productId)}: ${target} ta serial raqam tanlang (${parsed.serials.length} ta tanlandi)`)
+    const sellable=new Map(sellableSerials(s,ctx.user,so,item.productId,today).map(u=>[u.code,u]))
+    const eligible=new Set([...stores,...soRows(item).map(r=>r.warehouseId)])
+    const units:SellableSerial[]=[]
+    for(const code of parsed.serials){
+      const u=sellable.get(code)
+      if(!u)return fail(s,serialRefusal(s,lineKey(s,item),code,today,eligible))
+      units.push(u)
+    }
+    // Units outside this line's reservation in a store must be free stock there.
+    const byStore=new Map<string,number>()
+    for(const u of units)byStore.set(u.warehouseId,(byStore.get(u.warehouseId)||0)+1)
+    for(const [w,n] of byStore){
+      const own=q3(soRows(item).filter(r=>r.warehouseId===w).reduce((a,r)=>a+r.qty,0))
+      const extra=q3(n-own),free=freeIn(s,w,lineKey(s,item),today)
+      if(extra>1e-9&&free<extra-1e-6)return fail(s,`${itemName(s,item.productId)}: ${s.warehouses.find(x=>x.id===w)?.name||w} omborida bo‘sh qoldiq ${free}, rezervdan tashqari ${extra} ta serial tanlandi`)
+    }
+    picks.set(item.productId,units)
+  }
+  for(const {item,target,open} of targets){
+    if(picks.has(item.productId))continue
     if(target>open)return fail(s,`${itemName(s,item.productId)}: maksimum ${open}`)
     const reserved=Math.min(item.reserved||0,target)
     const extra=q3(target-reserved)
@@ -2705,6 +3070,7 @@ export function deliverSalesOrder(s:S,ctx:Ctx,id:string,quantities?:Record<strin
   // and as the very lots it reserved (an expired or blocked reserved lot is never swapped silently, audit #10).
   const fromReserved=new Map<string,{warehouseId:string;productId:string;qty:number}>()
   for(const {item,target} of targets){
+    if(picks.has(item.productId))continue
     let left=target
     for(const r of soRows(item)){
       if(left<=1e-9)break
@@ -2732,15 +3098,44 @@ export function deliverSalesOrder(s:S,ctx:Ctx,id:string,quantities?:Record<strin
     const key=lineKey(s,item)
     const reservations=soRows(item).map(r=>({...r})) as {warehouseId:string;qty:number;lots?:LotPin[];untracked?:number}[]
     // Lots first, then the balance with the locations those lots sat in (audit #17); the exact reserved variant (audit #15).
-    const ship=(warehouseId:string,qty:number,own:{owner:string;pins?:LotPin[];untracked?:number},reserved:number)=>{
+    const ship=(warehouseId:string,qty:number,own:{owner:string;pins?:LotPin[];untracked?:number},reserved:number,lotOnly?:string)=>{
       const before=next
-      const taken=takeLots(next,key,qty,so.code,warehouseId,undefined,today,own)
+      const taken=takeLots(next,key,qty,so.code,warehouseId,lotOnly,today,own)
+      if(lotOnly&&taken.remaining>1e-9)throw new StockError(`${lotOnly}: serial birlik omborda topilmadi — amal bajarilmadi`)
       next=changeBalance(taken.state,ctx,warehouseId,key,{onHand:-qty,reserved:-reserved},undefined,lotBinDraw(before,taken.state,warehouseId,key))
       for(const a of taken.allocations){
         const cost=deliveredLotCost(before,item.productId,a.lot,true)
         next=addMove(next,ctx,{type:'Sale -',itemId:key,itemType:'finished',warehouseId,qty:-a.qty,source:so.code,note:'Sales delivery',lot:a.lot,...(cost?{unitCost:cost.unitCost,costBasis:cost.basis}:{}),...(a.location?{location:a.location}:{})})
       }
       return taken.allocations
+    }
+    const chosen=picks.get(item.productId)
+    if(chosen){
+      // Each named unit leaves its own store: from this line's reservation there when it has one (its pin or, for an
+      // unpinned unit, one reserved place), otherwise as free stock.
+      for(const u of chosen){
+        const r=reservations.find(x=>x.warehouseId===u.warehouseId&&x.qty>1e-9)
+        const allocations=ship(u.warehouseId,1,{owner:so.code,pins:r?.lots},r?releasable(next,u.warehouseId,key,'reserved',1):0,u.code)
+        if(r){
+          r.qty=q3(r.qty-1)
+          const lots=pinsAfter(r.lots,allocations,r.qty)
+          if(lots)r.lots=lots
+          if(r.untracked)r.untracked=untrackedAfter(r.untracked,allocations,r.qty,r.lots)
+        }
+      }
+      // A reservation is never larger than what is still to ship; the rest goes back to free stock.
+      let excess=q3(reservations.reduce((a,r)=>a+r.qty,0)-(item.qty-item.delivered-target))
+      for(const r of [...reservations].reverse()){
+        if(excess<=1e-9)break
+        const x=q3(Math.min(excess,r.qty))
+        next=changeBalance(next,ctx,r.warehouseId,key,{reserved:-releasable(next,r.warehouseId,key,'reserved',x)})
+        r.qty=q3(r.qty-x);excess=q3(excess-x)
+        const lots=pinsAfter(r.lots,[],r.qty)
+        if(lots)r.lots=lots
+        if(r.untracked)r.untracked=untrackedAfter(r.untracked,[],r.qty,r.lots)
+      }
+      const kept=reservations.filter(r=>r.qty>1e-9)
+      return {...item,delivered:q3(item.delivered+target),reserved:q3(kept.reduce((a,r)=>a+r.qty,0)),warehouseId:kept.length===1?kept[0].warehouseId:undefined,reservations:kept}
     }
     // Reserved stock first, as its pinned lots; only then free stock of the eligible stores.
     for(const r of reservations){
@@ -2773,7 +3168,8 @@ export function deliverSalesOrder(s:S,ctx:Ctx,id:string,quantities?:Record<strin
   const shippedBefore=q3(so.items.reduce((a,i)=>a+i.delivered,0)),shippedAfter=q3(shippedBefore+targets.reduce((a,x)=>a+x.target,0))
   const invoice=r2(targets.reduce((a,x)=>a+x.target*x.item.price,0))
   if(invoice>0)next=syncPaymentStatus(postReceivable(next,ctx,{key:`invoice:${so.id}:${shippedBefore}-${shippedAfter}`,customerId:so.customerId,kind:'invoice',amount:invoice,salesOrderId:so.id,note:targets.filter(x=>x.target>0).map(x=>`${itemName(s,x.item.productId)} ${x.target} × ${x.item.price}`).join(', ')}),so.id)
-  next=logActivity(next,ctx,complete?'Sotuv to‘liq yetkazildi':'Sotuv qisman yetkazildi','Sotuv',so.code,'success',`${targets.filter(x=>x.target>0).map(x=>`${itemName(s,x.item.productId)} ${x.target}`).join(', ')}${invoice>0?` · hisob-faktura ${invoice}`:''}`)
+  const serialNote=[...picks].map(([pid,units])=>`${itemName(s,pid)} SN: ${units.map(u=>u.code).join(', ')}`).join('; ')
+  next=logActivity(next,ctx,complete?'Sotuv to‘liq yetkazildi':'Sotuv qisman yetkazildi','Sotuv',so.code,'success',`${targets.filter(x=>x.target>0).map(x=>`${itemName(s,x.item.productId)} ${x.target}`).join(', ')}${invoice>0?` · hisob-faktura ${invoice}`:''}${serialNote?` · ${serialNote}`:''}`)
   return ok(next,complete?`${so.code} to‘liq yetkazildi`:`${so.code}: qisman yetkazildi`)
 }
 
@@ -2785,9 +3181,67 @@ export function updateSalesMeta(s:S,ctx:Ctx,id:string,patch:{paymentStatus?:stri
   if(badDate)return fail(s,badDate)
   if(patch.deliveryDate&&so.status==='Yetkazildi')return fail(s,'Yetkazilgan buyurtma sanasi o‘zgarmaydi')
   if(patch.paymentStatus!==undefined&&patch.paymentStatus!==so.paymentStatus&&orderReceivable(s,so.id).status)return fail(s,'To‘lov holati to‘lovlardan hisoblanadi — “To‘lov qabul qilish” orqali qayd eting')
+  if(patch.paymentStatus!==undefined&&patch.paymentStatus!==so.paymentStatus&&!SALES_PAYMENT_STATUSES.includes(patch.paymentStatus))return fail(s,'To‘lov holati noto‘g‘ri')
   const clean=Object.fromEntries(Object.entries(patch).filter(([,v])=>v!==undefined&&v!==''))
   const next={...s,salesOrders:s.salesOrders.map(x=>x.id===id?{...x,...clean}:x)}
   return ok(logActivity(next,ctx,'Sales Order yangilandi','Sotuv',so.code,'info',Object.entries(clean).map(([k,v])=>`${k}: ${v}`).join(', ')),'Buyurtma yangilandi')
+}
+
+export type SalesLineEdit={productId:string;qty:number|string;price?:number|string}
+/**
+ * Edits the quantities and prices of an open make-to-stock order. A line never drops below what it delivered; a line
+ * that delivered keeps its price (its invoice is posted at that price). Lines are neither added nor removed here.
+ * Reservation above the new open quantity goes back to free stock, a larger open quantity is reserved again (FEFO).
+ */
+export function updateSalesOrderLines(s:S,ctx:Ctx,id:string,edits:SalesLineEdit[]):Outcome{
+  const so=s.salesOrders.find(x=>x.id===id)
+  if(!so)return fail(s,'Buyurtma topilmadi')
+  if(['Yetkazildi','Bekor'].includes(so.status))return fail(s,'Yopilgan buyurtma tahrirlanmaydi')
+  const linked=so.productionOrderIds?.length?so.productionOrderIds:so.productionOrderId?[so.productionOrderId]:[]
+  if(so.mode==='Make-to-order'||linked.length)return fail(s,'MTO buyurtma qatorlari ishlab chiqarish buyurtmasiga bog‘langan — miqdorni MO orqali o‘zgartiring')
+  if(!Array.isArray(edits)||edits.some(e=>!so.items.some(i=>i.productId===e?.productId)))return fail(s,'Yangi mahsulot qo‘shib bo‘lmaydi — yangi buyurtma oching')
+  const changes:string[]=[]
+  const items:SalesOrder['items']=[]
+  for(const item of so.items){
+    const e=edits.find(x=>x.productId===item.productId)
+    if(!e){items.push(item);continue}
+    const name=itemName(s,item.productId)
+    const q=pieces(e.qty,`${name}: miqdor`,itemUnit(s,item.productId))
+    if('error' in q)return fail(s,q.error)
+    if(q.value<item.delivered)return fail(s,`${name}: miqdor yetkazilgan ${item.delivered} dan kam bo‘lmaydi`)
+    const given=e.price!==undefined&&e.price!==null&&String(e.price).trim()!==''
+    const price=given?checkMoney(e.price,`${name}: narx`):{value:item.price}
+    if('error' in price)return fail(s,price.error)
+    if(item.delivered>0&&Math.abs(price.value-item.price)>0.005)return fail(s,`${name}: yetkazilgan qator narxi o‘zgarmaydi — hisob-faktura shu narxda chiqarilgan`)
+    if(q.value!==item.qty)changes.push(`${name} miqdor ${item.qty} → ${q.value}`)
+    if(Math.abs(price.value-item.price)>0.005)changes.push(`${name} narx ${item.price} → ${price.value}`)
+    items.push({...item,qty:q.value,price:price.value})
+  }
+  if(!changes.length)return fail(s,'O‘zgarish yo‘q')
+  let next=s
+  // Reservation above the new open quantity is released (newest rows first) together with its lot pins.
+  const trimmed=items.map(item=>{
+    const key=lineKey(s,item),rows=soRows(item).map(r=>({...r,...('lots' in r&&r.lots?{lots:r.lots.map(p=>({...p}))}:{})})) as {warehouseId:string;qty:number;lots?:LotPin[];untracked?:number}[]
+    let excess=q3(rows.reduce((a,r)=>a+r.qty,0)-Math.max(0,item.qty-item.delivered))
+    for(const r of [...rows].reverse()){
+      if(excess<=1e-9)break
+      const x=q3(Math.min(excess,r.qty))
+      next=changeBalance(next,ctx,r.warehouseId,key,{reserved:-releasable(next,r.warehouseId,key,'reserved',x)})
+      r.qty=q3(r.qty-x);excess=q3(excess-x)
+      const lots=pinsAfter(r.lots,[],r.qty)
+      if(lots)r.lots=lots
+      if(r.untracked)r.untracked=untrackedAfter(r.untracked,[],r.qty,r.lots)
+    }
+    const kept=rows.filter(r=>r.qty>1e-9)
+    return {...item,reserved:q3(kept.reduce((a,r)=>a+r.qty,0)),warehouseId:kept.length===1?kept[0].warehouseId:undefined,reservations:kept}
+  })
+  const complete=trimmed.every(i=>i.delivered>=i.qty)
+  let updated:SalesOrder={...so,items:trimmed,total:r2(trimmed.reduce((a,i)=>a+i.qty*i.price,0)),...(complete?{status:'Yetkazildi' as const,deliveredAt:stamp(ctx.now)}:{})}
+  next={...next,salesOrders:next.salesOrders.map(x=>x.id===id?updated:x)}
+  if(!complete){const r=reserveSales(next,ctx,updated);next=r.state;updated=r.so}
+  next=logActivity(next,ctx,'Sales Order tahrirlandi','Sotuv',so.code,'info',changes.join('; '))
+  const message=complete?`${so.code} yangilandi · barcha qatorlar yetkazilgan, buyurtma yopildi`:updated.status==='Tayyor'?`${so.code} yangilandi · to‘liq rezerv`:`${so.code} yangilandi · stock yetarli emas, qisman rezerv`
+  return ok(next,message)
 }
 
 /* ------------------------------------------------- Receivables (audit #19) -- */
@@ -2817,10 +3271,17 @@ export function recordCustomerPayment(s:S,ctx:Ctx,p:CustomerPaymentInput):Outcom
   if(!c)return fail(s,'Mijoz topilmadi')
   const key=String(p.key||'').trim()
   if(!key)return fail(s,'To‘lov kaliti yo‘q — formani qayta oching')
-  if(ledger(s).some(e=>e.key===`payment:${key}`||e.key.startsWith(`payment:${key}:`)))return ok(s,'Bu to‘lov allaqachon qayd etilgan — qayta yozilmadi')
   const m=checkMoney(p.amount,'To‘lov summasi',false)
   if('error' in m)return fail(s,m.error)
   const amount=m.value
+  // A resent payment (same key) is the same payment: anything else under that key is refused, never reported as saved (SEC-08).
+  const earlier=ledger(s).filter(e=>e.key===`payment:${key}`||e.key.startsWith(`payment:${key}:`))
+  if(earlier.length){
+    const paid=r2(-earlier.reduce((a,e)=>a+e.amount,0))
+    const sameOrder=p.salesOrderId?earlier.every(e=>e.key===`payment:${key}`&&e.salesOrderId===p.salesOrderId):earlier.every(e=>e.key!==`payment:${key}`||!e.salesOrderId)
+    const same=earlier.every(e=>e.customerId===c.id)&&Math.abs(paid-amount)<0.005&&sameOrder
+    return same?ok(s,'Bu to‘lov allaqachon qayd etilgan — qayta yozilmadi'):fail(s,'To‘lov kaliti boshqa to‘lovda ishlatilgan — formani qayta oching')
+  }
   const method=PAYMENT_METHODS.includes(p.method||'')?p.method!:PAYMENT_METHODS[0]
   const note=(p.note||'').trim()||undefined
   const balance=customerBalance(s,c.id)
@@ -3108,32 +3569,35 @@ const locationProblem=(w:S['warehouses'][number],location?:string)=>location&&!w
  * `fromLocation` takes the stock from one location of the source ('' = unassigned), `toLocation` puts it into one of the
  * target (audit #17); lots keep their origin and expiry, and transfer-out equals transfer-in row by row.
  */
-export function transferStock(s:S,ctx:Ctx,itemId:string,from:string,to:string,qty:number,lots?:LotPin[],opts:{fromLocation?:string;toLocation?:string;unit?:string}={}):Outcome{
-  if(!itemId||!from||!to)return fail(s,'Item va omborlarni tanlang')
-  if(from===to)return fail(s,'Manba va qabul qiluvchi ombor bir xil bo‘lmasin — ombor ichida joy almashtirish uchun “Joy almashtirish”dan foydalaning')
+type TransferPlan={amount:number;plan:LotPin[];origin:S['warehouses'][number];target:S['warehouses'][number];source:S['stockBalances'][number];fromLocation?:string;toLocation?:string;today:string;unit:string}
+/** Every check of a transfer (item, stores, kinds, locations, free stock) and the lots it takes — shared by the immediate and the two-step transfer. */
+function planTransfer(s:S,ctx:Ctx,itemId:string,from:string,to:string,qty:number,lots?:LotPin[],opts:{fromLocation?:string;toLocation?:string;unit?:string}={}):TransferPlan|{error:string}{
+  const err=(error:string)=>({error})
+  if(!itemId||!from||!to)return err('Item va omborlarni tanlang')
+  if(from===to)return err('Manba va qabul qiluvchi ombor bir xil bo‘lmasin — ombor ichida joy almashtirish uchun “Joy almashtirish”dan foydalaning')
   const item=stockItem(s,itemId)
-  if('error' in item)return fail(s,item.error)
+  if('error' in item)return err(item.error)
   const origin=s.warehouses.find(w=>w.id===from)
-  if(!origin)return fail(s,'Manba ombor topilmadi')
+  if(!origin)return err('Manba ombor topilmadi')
   const entered=enteredQty(s,itemId,qty,opts.unit)
-  if('error' in entered)return fail(s,entered.error)
+  if('error' in entered)return err(entered.error)
   const q=stockQty(s,itemId,entered.value)
-  if('error' in q)return fail(s,q.error)
+  if('error' in q)return err(q.error)
   const amount=q.value
   const target=s.warehouses.find(w=>w.id===to)
   // Only into an existing, active warehouse that stores this kind of item (N-21 / B3-11).
-  if(!target||target.status!=='Faol')return fail(s,'Qabul qiluvchi ombor mavjud emas yoki arxivlangan')
+  if(!target||target.status!=='Faol')return err('Qabul qiluvchi ombor mavjud emas yoki arxivlangan')
   const raw=!isProductItem(s,itemId)
-  if(raw?!['Raw','Mixed','WIP'].includes(target.type):!['Finished','Mixed','WIP'].includes(target.type))return fail(s,`${target.name} (${target.type}) bu turdagi itemni saqlamaydi`)
+  if(raw?!['Raw','Mixed','WIP'].includes(target.type):!['Finished','Mixed','WIP'].includes(target.type))return err(`${target.name} (${target.type}) bu turdagi itemni saqlamaydi`)
   const fromLocation=opts.fromLocation===undefined?undefined:opts.fromLocation.trim()
   const toLocation=opts.toLocation?.trim()||undefined
   const badLocation=locationProblem(origin,fromLocation)||locationProblem(target,toLocation)
-  if(badLocation)return fail(s,badLocation)
+  if(badLocation)return err(badLocation)
   const today=isoDate(ctx.now),unit=itemUnit(s,itemId)
   const source=s.stockBalances.find(b=>b.warehouseId===from&&keyOf(b)===itemId)
   const free=freeIn(s,from,itemId,today)
-  if(!source||free<amount-1e-6)return fail(s,`Available qoldiq yetarli emas (${q3(free)} ${unit})`)
-  if(fromLocation!==undefined&&binQty(source,fromLocation)<amount-1e-6)return fail(s,`${fromLocation||'Joysiz qoldiq'}: ${q3(binQty(source,fromLocation))} ${unit} bor, ${amount} ko‘chirib bo‘lmaydi`)
+  if(!source||free<amount-1e-6)return err(`Available qoldiq yetarli emas (${q3(free)} ${unit})`)
+  if(fromLocation!==undefined&&binQty(source,fromLocation)<amount-1e-6)return err(`${fromLocation||'Joysiz qoldiq'}: ${q3(binQty(source,fromLocation))} ${unit} bor, ${amount} ko‘chirib bo‘lmaydi`)
   // Which lots move: given and checked one by one, or FEFO from the usable, unreserved lots of the source store.
   const plan:LotPin[]=[]
   if(lotTracked(s,itemId)){
@@ -3142,24 +3606,45 @@ export function transferStock(s:S,ctx:Ctx,itemId:string,from:string,to:string,qt
       const seen=new Set<string>()
       for(const p of lots){
         const lq=stockQty(s,itemId,p.qty,`LOT ${p.lot||'—'} miqdori`)
-        if('error' in lq)return fail(s,lq.error)
-        if(!p.lot||seen.has(p.lot))return fail(s,p.lot?`LOT ${p.lot} ikki marta tanlangan`:'LOT tanlanmagan')
+        if('error' in lq)return err(lq.error)
+        if(!p.lot||seen.has(p.lot))return err(p.lot?`LOT ${p.lot} ikki marta tanlangan`:'LOT tanlanmagan')
         seen.add(p.lot)
         const avail=open.get(p.lot)||0
-        if(avail<lq.value-1e-6)return fail(s,`LOT ${p.lot}: ${origin.name} omborida${fromLocation?` (${fromLocation})`:''} bu item uchun ishlatsa bo‘ladigan qoldiq ${q3(avail)} ${unit} (yo‘q, boshqa itemniki, muddati o‘tgan, karantinda yoki rezervda)`)
+        if(avail<lq.value-1e-6)return err(`LOT ${p.lot}: ${origin.name} omborida${fromLocation?` (${fromLocation})`:''} bu item uchun ishlatsa bo‘ladigan qoldiq ${q3(avail)} ${unit} (yo‘q, boshqa itemniki, muddati o‘tgan, karantinda yoki rezervda)`)
         plan.push({lot:p.lot,qty:lq.value})
       }
       const sum=q3(plan.reduce((a,p)=>a+p.qty,0))
-      if(Math.abs(sum-amount)>1e-6)return fail(s,`LOT miqdorlari yig‘indisi (${sum}) transfer miqdoriga (${amount} ${unit}) teng emas`)
+      if(Math.abs(sum-amount)>1e-6)return err(`LOT miqdorlari yig‘indisi (${sum}) transfer miqdoriga (${amount} ${unit}) teng emas`)
     }else{
       let left=amount
       for(const [lot,avail] of open){if(left<=1e-9)break;const t=q3(Math.min(left,avail));plan.push({lot,qty:t});left=q3(left-t)}
       if(left>1e-6){
         const recorded=q3(s.lots.filter(l=>keyOf(l)===itemId&&l.warehouseId===from).reduce((a,l)=>a+Math.max(0,l.qty),0))
-        return fail(s,`${itemName(s,itemId)} LOT bilan kuzatiladi: ${origin.name} omborida ko‘chirsa bo‘ladigan LOT ${q3(amount-left)} ${unit}, kerak ${amount} (ombor qoldig‘i ${q3(source.onHand)}, LOT yozuvlari jami ${recorded}). Qoldiq va LOT yozuvlari mos emas — inventarizatsiya bilan tuzating; transfer bajarilmadi`)
+        return err(`${itemName(s,itemId)} LOT bilan kuzatiladi: ${origin.name} omborida ko‘chirsa bo‘ladigan LOT ${q3(amount-left)} ${unit}, kerak ${amount} (ombor qoldig‘i ${q3(source.onHand)}, LOT yozuvlari jami ${recorded}). Qoldiq va LOT yozuvlari mos emas — inventarizatsiya bilan tuzating; transfer bajarilmadi`)
       }
     }
   }
+  // A code can occur in multiple receipts. A transfer line stores one origin per code, so differing
+  // origins must be reconciled before dispatch or the target would inherit the wrong provenance.
+  for(const pin of plan){
+    const records=s.lots.filter(l=>keyOf(l)===itemId&&l.warehouseId===from&&l.code===pin.lot&&lotUsable(l,today)
+      &&(fromLocation===undefined||(l.location||'')===fromLocation))
+    if(new Set(records.map(l=>JSON.stringify(lotSnapshot(l)))).size>1)
+      return err(`LOT ${pin.lot}: bir xil kodning kelib chiqishi har xil — transferdan oldin LOT yozuvlarini muvofiqlashtiring`)
+  }
+  return {amount,plan,origin,target,source,fromLocation,toLocation,today,unit}
+}
+
+export function transferStock(s:S,ctx:Ctx,itemId:string,from:string,to:string,qty:number,lots?:LotPin[],opts:{fromLocation?:string;toLocation?:string;unit?:string;reason?:string;key?:string}={}):Outcome{
+  const blocked=commandBlocker(s,ctx.user,'transferStock',[itemId,from,to,qty,lots,opts])
+  if(blocked)return fail(s,blocked)
+  const key=String(opts.key||'').trim()
+  if(key&&(s.stockTransfers||[]).some(t=>t.key===key))return fail(s,'Bu transfer allaqachon qayd etilgan — qayta yozilmadi')
+  const planned=planTransfer(s,ctx,itemId,from,to,qty,lots,opts)
+  if('error' in planned)return fail(s,planned.error)
+  const reason=String(opts.reason||'').trim()
+  if(reason.length<5)return fail(s,'Transfer sababini yozing (kamida 5 belgi)')
+  const {amount,plan,origin,target,source,fromLocation,toLocation,today}=planned
   const ref=nextRef(s,'TR',ctx.now)
   let next=s
   const allocations:Allocation[]=[]
@@ -3179,9 +3664,13 @@ export function transferStock(s:S,ctx:Ctx,itemId:string,from:string,to:string,qt
   if(fromLocation&&loose>0)draw[fromLocation]=q3((draw[fromLocation]||0)-loose)
   next=changeBalance(next,ctx,from,itemId,{onHand:-amount},undefined,draw)
   next=changeBalance(next,ctx,to,itemId,{onHand:amount},source.lot,toLocation?{[toLocation]:amount}:undefined)
+  const lines:StockTransferLine[]=[]
   for(const a of allocations){
+    const src=a.lot?s.lots.find(l=>l.code===a.lot&&keyOf(l)===itemId&&l.warehouseId===from&&(l.location||'')===(a.location||'')&&lotUsable(l,today))||s.lots.find(l=>l.code===a.lot&&keyOf(l)===itemId&&l.warehouseId===from):undefined
+    const sameLine=lines.find(l=>(l.lot||'')===(a.lot||''))
+    if(sameLine)sameLine.qty=q3(sameLine.qty+a.qty)
+    else lines.push({...(a.lot?{lot:a.lot}:{}),qty:a.qty,received:a.qty,returned:0,...(src?{record:lotSnapshot(src)}:{})})
     if(a.lot){
-      const src=s.lots.find(l=>l.code===a.lot&&keyOf(l)===itemId&&l.warehouseId===from&&(l.location||'')===(a.location||'')&&lotUsable(l,today))||s.lots.find(l=>l.code===a.lot&&keyOf(l)===itemId&&l.warehouseId===from)
       // The copy keeps where the lot came from (PO / MO / return) and its expiry, so traceability and unbuild still
       // find it (P1-29/30); a usable copy already in the target location of the same origin grows instead of a duplicate.
       const same=src&&next.lots.find(l=>l.code===a.lot&&keyOf(l)===itemId&&l.warehouseId===to&&(l.location||'')===(toLocation||'')&&(l.status||'available')==='available'&&l.sourceType===src.sourceType&&l.sourceId===src.sourceId&&(l.expiry||'')===(src.expiry||''))
@@ -3192,11 +3681,265 @@ export function transferStock(s:S,ctx:Ctx,itemId:string,from:string,to:string,qt
       }
     }
     const fromAt=a.location||(a.lot?undefined:fromLocation||undefined)
-    next=addMove(next,ctx,{type:'Transfer -',itemId,itemType:source.itemType,warehouseId:from,qty:-a.qty,source:ref,note:`→ ${target.name}${toLocation?` · ${toLocation}`:''}`,lot:a.lot,...(fromAt?{location:fromAt}:{})})
-    next=addMove(next,ctx,{type:'Transfer +',itemId,itemType:source.itemType,warehouseId:to,qty:a.qty,source:ref,note:`← ${origin.name}${fromAt?` · ${fromAt}`:''}`,lot:a.lot,...(toLocation?{location:toLocation}:{})})
+    next=addMove(next,ctx,{type:'Transfer -',itemId,itemType:source.itemType,warehouseId:from,qty:-a.qty,source:ref,note:`→ ${target.name}${toLocation?` · ${toLocation}`:''} · ${reason}`,lot:a.lot,...(fromAt?{location:fromAt}:{})})
+    next=addMove(next,ctx,{type:'Transfer +',itemId,itemType:source.itemType,warehouseId:to,qty:a.qty,source:ref,note:`← ${origin.name}${fromAt?` · ${fromAt}`:''} · ${reason}`,lot:a.lot,...(toLocation?{location:toLocation}:{})})
   }
+  const at=stamp(ctx.now)
+  const transfer:StockTransfer={id:ctx.id('tr'),ref,itemId,itemType:source.itemType,from,to,fromBranchId:origin.branchId,toBranchId:target.branchId,mode:'immediate',...(fromLocation!==undefined?{fromLocation}:{}),...(toLocation?{toLocation}:{}),qty:amount,status:'Qabul qilindi',lines,receipts:[{id:ctx.id('trr'),at,by:ctx.user.id,qty:amount,kind:'receipt',lots:lines.map(l=>({...(l.lot?{lot:l.lot}:{}),qty:l.qty}))}],createdAt:at,closedAt:at,createdBy:ctx.user.id,reason,...(key?{key}:{})}
+  next=withTransfer(next,transfer)
   next=retryWaitingOrders(next,ctx)
-  return ok(logActivity(next,ctx,'Ombor transferi','Ombor',ref,'info',`${itemName(s,itemId)} ${amount}`),`${ref}: transfer yakunlandi`)
+  return ok(logActivity(next,ctx,'Ombor transferi','Ombor',ref,'info',`${itemName(s,itemId)} ${amount} · ${origin.name} → ${target.name} · ${reason}`),`${ref}: transfer yakunlandi`)
+}
+
+/* ------------------------------------------- two-step transfers (in transit) -- */
+
+const transfersOf=(s:S)=>s.stockTransfers||[]
+export const transferOpen=(t:Pick<StockTransfer,'qty'|'lines'|'status'>)=>q3(t.lines.reduce((a,l)=>a+l.qty-l.received-l.returned,0))
+const withTransfer=(s:S,t:StockTransfer):S=>({...s,stockTransfers:transfersOf(s).some(x=>x.id===t.id)?transfersOf(s).map(x=>x.id===t.id?t:x):[t,...transfersOf(s)]})
+type LotSnapshot=NonNullable<StockTransferLine['record']>
+function lotSnapshot(l:LotRecord):LotSnapshot{const {id:_i,qty:_q,originalQty:_o,warehouseId:_w,location:_l,status:_s,createdAt:_c,consumedBy:_b,...rest}=l;return rest}
+
+export type TransferDispatch={itemId:string;from:string;to:string;qty:number|string;lots?:LotPin[];fromLocation?:string;toLocation?:string;unit?:string;reason?:string;note?:string;key?:string}
+/**
+ * Dispatches stock to another store (step 1 of 2). The stock leaves the source at once (on hand, its lots, "Transfer −"
+ * rows) and is booked in the target only as `incoming`: in transit it is not available anywhere, so it cannot be
+ * reserved, shipped, issued or counted twice. The same checks as an immediate transfer apply (free, usable lots).
+ */
+export function dispatchTransfer(s:S,ctx:Ctx,p:TransferDispatch):Outcome{
+  const blocked=commandBlocker(s,ctx.user,'dispatchTransfer',[p])
+  if(blocked)return fail(s,blocked)
+  const key=String(p.key||'').trim()
+  if(key&&transfersOf(s).some(t=>t.key===key))return fail(s,'Bu transfer allaqachon jo‘natilgan — qayta yozilmadi')
+  const planned=planTransfer(s,ctx,p.itemId,p.from,p.to,Number(p.qty),p.lots,{fromLocation:p.fromLocation,toLocation:p.toLocation,unit:p.unit})
+  if('error' in planned)return fail(s,planned.error)
+  const reason=String(p.reason??p.note??'').trim()
+  if(reason.length<5)return fail(s,'Transfer sababini yozing (kamida 5 belgi)')
+  const {amount,plan,origin,target,source,fromLocation,toLocation,today,unit}=planned
+  const itemId=p.itemId,ref=nextRef(s,'TR',ctx.now)
+  let next=s
+  const allocations:Allocation[]=[]
+  for(const part of plan.length?plan:[{lot:'',qty:amount}]){
+    const taken=takeLots(next,itemId,part.qty,ref,p.from,part.lot||undefined,today,undefined,fromLocation)
+    if(part.lot&&taken.remaining>1e-6)throw new StockError(`LOT ${part.lot}: jo‘natish uchun yetarli emas — amal bajarilmadi`)
+    next=taken.state;allocations.push(...taken.allocations)
+  }
+  const draw=lotBinDraw(s,next,p.from,itemId)
+  const loose=q3(allocations.filter(a=>!a.lot).reduce((a,x)=>a+x.qty,0))
+  if(fromLocation&&loose>0)draw[fromLocation]=q3((draw[fromLocation]||0)-loose)
+  next=changeBalance(next,ctx,p.from,itemId,{onHand:-amount},undefined,draw)
+  next=changeBalance(next,ctx,p.to,itemId,{incoming:amount})
+  const lines:StockTransferLine[]=[]
+  for(const a of allocations){
+    const src=a.lot?s.lots.find(l=>l.code===a.lot&&keyOf(l)===itemId&&l.warehouseId===p.from&&(l.location||'')===(a.location||'')&&lotUsable(l,today))||s.lots.find(l=>l.code===a.lot&&keyOf(l)===itemId&&l.warehouseId===p.from):undefined
+    const same=lines.find(l=>(l.lot||'')===(a.lot||''))
+    if(same)same.qty=q3(same.qty+a.qty)
+    else lines.push({...(a.lot?{lot:a.lot}:{}),qty:a.qty,received:0,returned:0,...(src?{record:lotSnapshot(src)}:{})})
+    const fromAt=a.location||(a.lot?undefined:fromLocation||undefined)
+    next=addMove(next,ctx,{type:'Transfer -',itemId,itemType:source.itemType,warehouseId:p.from,qty:-a.qty,source:ref,note:`→ ${target.name} · yo‘lda · ${reason}`,lot:a.lot,...(fromAt?{location:fromAt}:{})})
+  }
+  const t:StockTransfer={id:ctx.id('tr'),ref,itemId,itemType:source.itemType,from:p.from,to:p.to,fromBranchId:origin.branchId,toBranchId:target.branchId,mode:'two-step',...(fromLocation!==undefined?{fromLocation}:{}),...(toLocation?{toLocation}:{}),qty:amount,status:'Yo‘lda',lines,receipts:[],createdAt:stamp(ctx.now),createdBy:ctx.user.id,reason,...(key?{key}:{})}
+  next=withTransfer(next,t)
+  next=notify(next,ctx,'warehouse','Transfer yo‘lda',`${ref}: ${itemName(s,itemId)} ${amount} ${unit} · ${origin.name} → ${target.name}. Qabul qilishni kutmoqda.`,'info',`/warehouse?view=transfers&id=${t.id}`,{key:`transfer:${t.id}`})
+  return ok(logActivity(next,ctx,'Transfer jo‘natildi','Ombor',ref,'info',`${itemName(s,itemId)} ${amount} ${unit} · ${origin.name} → ${target.name} · ${reason}`),`${ref}: ${amount} ${unit} yo‘lga chiqdi — ${target.name} qabul qilishi kerak`,t.id)
+}
+
+/** Lot portions for `qty` of a transfer: the named lots exactly, else in dispatch order. */
+function transferPick(s:S,t:StockTransfer,qty:number,lots?:{lot?:string;qty:number|string}[]):{lot?:string;qty:number}[]|{error:string}{
+  const out:{lot?:string;qty:number}[]=[]
+  if(lots?.length){
+    const seen=new Set<string>()
+    for(const p of lots){
+      const code=p.lot||''
+      if(seen.has(code))return {error:`LOT ${code||'(LOT’siz)'} ikki marta tanlangan`}
+      seen.add(code)
+      const q=stockQty(s,t.itemId,p.qty,`LOT ${code||'—'} miqdori`)
+      if('error' in q)return {error:q.error}
+      const line=t.lines.find(l=>(l.lot||'')===code)
+      const left=line?q3(line.qty-line.received-line.returned):0
+      if(!line||left<q.value-1e-6)return {error:`${code?`LOT ${code}`:'LOT’siz qism'}: transferda qabul qilinmagan ${q3(left)} ${itemUnit(s,t.itemId)}, kiritildi ${q.value}`}
+      if(q.value>0)out.push({...(code?{lot:code}:{}),qty:q.value})
+    }
+    const sum=q3(out.reduce((a,x)=>a+x.qty,0))
+    if(Math.abs(sum-qty)>1e-6)return {error:`LOT miqdorlari yig‘indisi (${sum}) qabul miqdoriga (${qty}) teng emas`}
+    return out
+  }
+  let left=qty
+  for(const l of t.lines){
+    if(left<=1e-9)break
+    const take=q3(Math.min(left,l.qty-l.received-l.returned))
+    if(take>1e-9){out.push({...(l.lot?{lot:l.lot}:{}),qty:take});left=q3(left-take)}
+  }
+  return out
+}
+
+/** Books arrived lot portions into a store: lot records with the dispatched provenance, available, in `location`. */
+function landTransfer(s:S,ctx:Ctx,t:StockTransfer,warehouseId:string,location:string|undefined,parts:{lot?:string;qty:number}[],note:string):S{
+  let next=s
+  for(const part of parts){
+    const line=t.lines.find(l=>(l.lot||'')===(part.lot||''))
+    if(part.lot&&line?.record){
+      // Serial units stay one record each; a lot portion becomes one record of its origin in this store.
+      next={...next,lots:[{...line.record,id:ctx.id('lot'),qty:part.qty,originalQty:part.qty,warehouseId,...(location?{location}:{}),status:'available',createdAt:stamp(ctx.now),consumedBy:[]},...next.lots]}
+    }
+    next=addMove(next,ctx,{type:'Transfer +',itemId:t.itemId,itemType:t.itemType,warehouseId,qty:part.qty,source:t.ref,note,lot:part.lot,...(location?{location}:{})})
+  }
+  return next
+}
+
+/**
+ * Receives a dispatched transfer (step 2), in full or in part. Only what is still in transit can arrive: never more
+ * than dispatched, and the same receipt (`key`) is booked once. Arrived stock becomes on hand and available in the
+ * target with its lots' origin and expiry; the rest stays in transit.
+ */
+export function receiveTransfer(s:S,ctx:Ctx,id:string,p:{qty:number|string;lots?:{lot?:string;qty:number|string}[];toLocation?:string;key?:string;note?:string}):Outcome{
+  const blocked=commandBlocker(s,ctx.user,'receiveTransfer',[id,p])
+  if(blocked)return fail(s,blocked)
+  const t=transfersOf(s).find(x=>x.id===id)
+  if(!t)return fail(s,'Transfer topilmadi')
+  const key=String(p.key||'').trim()
+  const previous=key?t.receipts.find(r=>r.key===key):undefined
+  if(previous){
+    const repeated=stockQty(s,t.itemId,p.qty,'Qabul miqdori')
+    if('error' in repeated)return fail(s,repeated.error)
+    return Math.abs(previous.qty-repeated.value)<=1e-6
+      ?ok(s,'Bu qabul allaqachon qayd etilgan — qoldiq qayta oshirilmadi')
+      :fail(s,'Qabul kaliti boshqa miqdor uchun ishlatilgan')
+  }
+  if(t.status==='Qabul qilindi'||t.status==='Yopildi')return fail(s,`${t.ref} yopilgan — qabul qilinadigan qoldiq yo‘q`)
+  const target=s.warehouses.find(w=>w.id===t.to)
+  if(!target||target.status!=='Faol')return fail(s,'Qabul qiluvchi ombor faol emas — transferni manbaga qaytaring')
+  const q=stockQty(s,t.itemId,p.qty,'Qabul miqdori')
+  if('error' in q)return fail(s,q.error)
+  const open=transferOpen(t),unit=itemUnit(s,t.itemId)
+  if(q.value>open+1e-6)return fail(s,`${t.ref}: yo‘lda ${open} ${unit} qolgan — ${q.value} qabul qilib bo‘lmaydi`)
+  const location=(p.toLocation??t.toLocation)?.trim()||undefined
+  const badLocation=locationProblem(target,location)
+  if(badLocation)return fail(s,badLocation)
+  const parts=transferPick(s,t,q.value,p.lots)
+  if('error' in parts)return fail(s,parts.error)
+  let next=changeBalance(s,ctx,t.to,t.itemId,{onHand:q.value,incoming:-releasable(s,t.to,t.itemId,'incoming',q.value)},undefined,location?{[location]:q.value}:undefined)
+  const origin=s.warehouses.find(w=>w.id===t.from)
+  next=landTransfer(next,ctx,t,t.to,location,parts,`← ${origin?.name||t.from} · qabul · ${t.reason||t.note||'legacy transfer'}`)
+  const lines=t.lines.map(l=>{const got=parts.filter(x=>(x.lot||'')===(l.lot||'')).reduce((a,x)=>a+x.qty,0);return got?{...l,received:q3(l.received+got)}:l})
+  const left=transferOpen({...t,lines})
+  const updated:StockTransfer={...t,lines,status:left<=1e-9?'Qabul qilindi':'Qisman qabul qilindi',...(left<=1e-9?{closedAt:stamp(ctx.now)}:{}),
+    receipts:[...t.receipts,{id:ctx.id('trr'),at:stamp(ctx.now),by:ctx.user?.id||'',qty:q.value,kind:'receipt',lots:parts,...(key?{key}:{}),...(p.note?.trim()?{note:p.note.trim()}:{})}]}
+  next=retryWaitingOrders(withTransfer(next,updated),ctx)
+  return ok(logActivity(next,ctx,left<=1e-9?'Transfer to‘liq qabul qilindi':'Transfer qisman qabul qilindi','Ombor',t.ref,'success',`${itemName(s,t.itemId)} ${q.value} ${unit} · ${target.name}${left>1e-9?` · yo‘lda qoldi ${left}`:''} · ${t.reason||t.note||'legacy transfer'}`),
+    left<=1e-9?`${t.ref}: to‘liq qabul qilindi`:`${t.ref}: ${q.value} ${unit} qabul qilindi · yo‘lda ${left} ${unit} qoldi`)
+}
+
+/**
+ * Closes a transfer whose rest will not arrive: everything still in transit goes back to the source store (as it
+ * left, with its lots), the target's incoming is released, and the transfer is closed with the reason.
+ */
+export function returnTransfer(s:S,ctx:Ctx,id:string,reason:string):Outcome{
+  const blocked=commandBlocker(s,ctx.user,'returnTransfer',[id,reason])
+  if(blocked)return fail(s,blocked)
+  const t=transfersOf(s).find(x=>x.id===id)
+  if(!t)return fail(s,'Transfer topilmadi')
+  if(t.status==='Qabul qilindi'||t.status==='Yopildi')return fail(s,`${t.ref} allaqachon yopilgan`)
+  const why=String(reason||'').trim()
+  if(why.length<5)return fail(s,'Qaytarish sababini yozing (kamida 5 belgi)')
+  const open=transferOpen(t)
+  if(open<=1e-9)return fail(s,'Yo‘lda qoldiq yo‘q')
+  const parts=t.lines.map(l=>({...(l.lot?{lot:l.lot}:{}),qty:q3(l.qty-l.received-l.returned)})).filter(x=>x.qty>1e-9)
+  const source=s.warehouses.find(w=>w.id===t.from)
+  // Back to where it was taken from when that location still exists, else unassigned.
+  const location=source&&t.fromLocation&&source.locations.includes(t.fromLocation)?t.fromLocation:undefined
+  let next=changeBalance(s,ctx,t.to,t.itemId,{incoming:-releasable(s,t.to,t.itemId,'incoming',open)})
+  next=changeBalance(next,ctx,t.from,t.itemId,{onHand:open},undefined,location?{[location]:open}:undefined)
+  next=landTransfer(next,ctx,t,t.from,location,parts,`↩ yo‘ldan qaytdi · ${why}`)
+  const updated:StockTransfer={...t,status:'Yopildi',closedAt:stamp(ctx.now),lines:t.lines.map(l=>({...l,returned:q3(l.qty-l.received)})),
+    receipts:[...t.receipts,{id:ctx.id('trr'),at:stamp(ctx.now),by:ctx.user?.id||'',qty:open,kind:'return',lots:parts,note:why}]}
+  next=retryWaitingOrders(withTransfer(next,updated),ctx)
+  return ok(logActivity(next,ctx,'Transfer manbaga qaytarildi','Ombor',t.ref,'warning',`${itemName(s,t.itemId)} ${open} ${itemUnit(s,t.itemId)} · ${why}`),`${t.ref}: yo‘ldagi ${open} ${itemUnit(s,t.itemId)} ${source?.name||t.from} omboriga qaytarildi`)
+}
+
+/* ------------------------------------------------------ stocktaking -- */
+
+const countsOf=(s:S)=>s.stockCounts||[]
+const withCount=(s:S,c:StockCount):S=>({...s,stockCounts:countsOf(s).some(x=>x.id===c.id)?countsOf(s).map(x=>x.id===c.id?c:x):[c,...countsOf(s)]})
+
+/** Opens a stocktaking session for one store: every stock line (or the chosen ones), system quantity noted per line. */
+export function createStockCount(s:S,ctx:Ctx,p:{warehouseId:string;balanceIds?:string[];note?:string}):Outcome{
+  const w=s.warehouses.find(x=>x.id===p.warehouseId)
+  if(!w)return fail(s,'Ombor topilmadi')
+  if(w.status!=='Faol')return fail(s,`${w.name} arxivlangan`)
+  const busy=countsOf(s).find(c=>c.warehouseId===w.id&&c.status==='Ochiq')
+  if(busy)return fail(s,`${w.name} uchun ${busy.ref} inventarizatsiyasi ochiq — avval uni tasdiqlang yoki bekor qiling`)
+  const rows=s.stockBalances.filter(b=>b.warehouseId===w.id&&(!p.balanceIds?.length||p.balanceIds.includes(b.id)))
+  if(!rows.length)return fail(s,`${w.name}da sanaladigan qoldiq qatori yo‘q`)
+  const lines:StockCountLine[]=rows.map(b=>({balanceId:b.id,itemKey:keyOf(b),expected:q3(b.onHand)}))
+  const c:StockCount={id:ctx.id('cnt'),ref:nextCode(countsOf(s).map(x=>x.ref),'INV',ctx.now),warehouseId:w.id,status:'Ochiq',lines,createdAt:stamp(ctx.now),createdBy:ctx.user?.id||'',...(p.note?.trim()?{note:p.note.trim()}:{})}
+  return ok(logActivity(withCount(s,c),ctx,'Inventarizatsiya ochildi','Ombor',c.ref,'info',`${w.name} · ${lines.length} qator`),`${c.ref} ochildi · ${lines.length} qator`,c.id)
+}
+
+/**
+ * Records the physical count of one line. The system quantity is taken again at this moment, so the difference is
+ * what was counted against what the system held when counting; `counted: null` clears the line.
+ */
+export function recordStockCount(s:S,ctx:Ctx,id:string,balanceId:string,counted:number|string|null,note?:string):Outcome{
+  const c=countsOf(s).find(x=>x.id===id)
+  if(!c)return fail(s,'Inventarizatsiya topilmadi')
+  if(c.status!=='Ochiq')return fail(s,`${c.ref} yopilgan — sanoq o‘zgartirilmaydi`)
+  const line=c.lines.find(l=>l.balanceId===balanceId)
+  const b=s.stockBalances.find(x=>x.id===balanceId)
+  if(!line||!b)return fail(s,'Sanoq qatori topilmadi')
+  if(counted===null||counted===''){
+    const cleared={...c,lines:c.lines.map(l=>l===line?{balanceId:l.balanceId,itemKey:l.itemKey,expected:q3(b.onHand)}:l)}
+    return ok(withCount(s,cleared),'Sanoq tozalandi')
+  }
+  const v=checkQuantity(counted,{label:'Sanalgan miqdor',unit:itemUnit(s,line.itemKey),decimals:itemDecimals(s,line.itemKey),allowZero:true})
+  if('error' in v)return fail(s,v.error)
+  const updated={...c,lines:c.lines.map(l=>l===line?{...l,expected:q3(b.onHand),counted:v.value,countedAt:stamp(ctx.now),countedBy:ctx.user?.id||'',...(note?.trim()?{note:note.trim()}:{})}:l)}
+  return ok(withCount(s,updated),`${itemName(s,line.itemKey)}: ${v.value} sanaldi · farq ${q3(v.value-b.onHand)>0?'+':''}${q3(v.value-b.onHand)}`)
+}
+
+/** Difference of a counted line (counted − system at count time); undefined while not counted. */
+export const countDelta=(l:StockCountLine)=>l.counted===undefined?undefined:q3(l.counted-l.expected)
+
+/**
+ * Approves a stocktaking session: every counted line with a difference is posted as one inventory adjustment (lot
+ * rules, reservations and quarantine are enforced as for any adjustment). All or nothing: a line whose stock moved
+ * after it was counted, or an adjustment the stock rules refuse, stops the whole approval with the reason.
+ */
+export function approveStockCount(s:S,ctx:Ctx,id:string,reason:string):Outcome{
+  const c=countsOf(s).find(x=>x.id===id)
+  if(!c)return fail(s,'Inventarizatsiya topilmadi')
+  if(c.status!=='Ochiq')return fail(s,`${c.ref} allaqachon ${c.status.toLowerCase()}`)
+  const why=String(reason||'').trim()
+  if(why.length<5)return fail(s,'Tasdiqlash izohini yozing (kamida 5 belgi)')
+  const counted=c.lines.filter(l=>l.counted!==undefined)
+  if(!counted.length)return fail(s,'Hech bir qator sanalmagan')
+  const moved=counted.filter(l=>{const b=s.stockBalances.find(x=>x.id===l.balanceId);return !b||Math.abs(b.onHand-l.expected)>1e-6})
+  if(moved.length)return fail(s,`Sanoqdan keyin qoldiq o‘zgargan: ${moved.map(l=>itemName(s,l.itemKey)).join(', ')} — shu qatorlarni qayta sanang`)
+  let next=s
+  const refs:string[]=[]
+  for(const l of counted){
+    const d=countDelta(l)!
+    if(Math.abs(d)<=1e-9)continue
+    const out=adjustStock(next,ctx,l.itemKey,c.warehouseId,d,`${c.ref}: inventarizatsiya · ${why}`,{key:`${c.id}:${l.balanceId}`})
+    if(!out.result.ok)return fail(s,`${itemName(s,l.itemKey)}: ${out.result.message} — inventarizatsiya tasdiqlanmadi`)
+    next=out.state
+    const ref=next.stockMovements[0]?.source
+    if(ref&&!refs.includes(ref))refs.push(ref)
+  }
+  const done:StockCount={...c,status:'Tasdiqlangan',approvedAt:stamp(ctx.now),approvedBy:ctx.user?.id||'',reason:why,adjustments:refs}
+  next=withCount(next,done)
+  const skipped=c.lines.length-counted.length
+  return ok(logActivity(next,ctx,'Inventarizatsiya tasdiqlandi','Ombor',c.ref,'warning',`${counted.length} qator sanaldi · ${refs.length} ta adjustment${skipped?` · ${skipped} qator sanalmadi (o‘zgarishsiz)`:''} · ${why}`),
+    `${c.ref} tasdiqlandi · ${refs.length?`${refs.length} ta adjustment yozildi`:'farq yo‘q'}${skipped?` · ${skipped} qator sanalmagan`:''}`)
+}
+
+export function cancelStockCount(s:S,ctx:Ctx,id:string,reason:string):Outcome{
+  const c=countsOf(s).find(x=>x.id===id)
+  if(!c)return fail(s,'Inventarizatsiya topilmadi')
+  if(c.status!=='Ochiq')return fail(s,`${c.ref} allaqachon ${c.status.toLowerCase()}`)
+  const why=String(reason||'').trim()
+  if(why.length<5)return fail(s,'Bekor qilish sababini yozing (kamida 5 belgi)')
+  const next=withCount(s,{...c,status:'Bekor qilingan',cancelledAt:stamp(ctx.now),reason:why})
+  return ok(logActivity(next,ctx,'Inventarizatsiya bekor qilindi','Ombor',c.ref,'warning',why),`${c.ref} bekor qilindi · qoldiq o‘zgarmadi`)
 }
 
 /**
@@ -3617,6 +4360,8 @@ export function completeMaintenance(s:S,ctx:Ctx,id:string,cost?:number,note=''):
   const stopMinutes=next.downtimeEvents.filter(d=>d.sourceId===m.id).reduce((a,d)=>a+d.minutes,0)
   const today=isoDate(ctx.now)
   const preventive=m.type==='Preventive'
+  // Spare parts were valued at issue; they join the cost once, here, next to the labour / service cost typed now.
+  const parts=partsCost(m),totalCost=r2(finalCost+parts)
   next=withMaintEvent(next,id,{status:'Yakunlangan',completed:stamp(ctx.now),cost:finalCost,downtimeMinutes:stopMinutes},maintEvent(ctx,'Yakunlandi',note.trim()||undefined))
   next={...next,
     maintenanceRequests:next.maintenanceRequests.map(r=>r.id===m.requestId?{...r,status:'Yakunlangan' as const}:r),
@@ -3625,19 +4370,183 @@ export function completeMaintenance(s:S,ctx:Ctx,id:string,cost?:number,note=''):
       const plan=planOf(e)
       // Corrective work fixes a failure; it does not move the preventive plan.
       return preventive
-        ?{...e,status:'Ishlamoqda' as const,lastMaintenance:today,nextMaintenance:nextDueDate(plan,today)||(plan?.unit==='runtime'?'':e.nextMaintenance),runtimeAtService:e.runtimeHours??e.runtimeAtService,maintenanceCost:e.maintenanceCost+finalCost}
-        :{...e,status:'Ishlamoqda' as const,lastMaintenance:today,maintenanceCost:e.maintenanceCost+finalCost}
+        ?{...e,status:'Ishlamoqda' as const,lastMaintenance:today,nextMaintenance:nextDueDate(plan,today)||(plan?.unit==='runtime'?'':e.nextMaintenance),runtimeAtService:e.runtimeHours??e.runtimeAtService,maintenanceCost:e.maintenanceCost+totalCost}
+        :{...e,status:'Ishlamoqda' as const,lastMaintenance:today,maintenanceCost:e.maintenanceCost+totalCost}
     }),
   }
-  if(finalCost>0)next={...next,expenses:[{id:ctx.id('ex'),date:today,type:'Maintenance',sourceId:m.equipmentId,amount:finalCost,note:`${m.code} · ${eq?.name||''}`},...next.expenses]}
-  return ok(logActivity(next,ctx,'Maintenance yakunlandi','Uskunalar',m.code,'success',`${stopMinutes} min to‘xtash${finalCost?` · ${finalCost}`:''}`),`${m.code} yakunlandi`)
+  if(totalCost>0)next={...next,expenses:[{id:ctx.id('ex'),date:today,type:'Maintenance',sourceId:m.equipmentId,amount:totalCost,note:`${m.code} · ${eq?.name||''}${parts?` · ish ${finalCost} + ehtiyot qism ${parts}`:''}`},...next.expenses]}
+  return ok(logActivity(next,ctx,'Maintenance yakunlandi','Uskunalar',m.code,'success',`${stopMinutes} min to‘xtash${totalCost?` · ${totalCost}${parts?` (ehtiyot qism ${parts})`:''}`:''}`),`${m.code} yakunlandi`)
 }
 
 export function cancelMaintenance(s:S,ctx:Ctx,id:string,reason=''):Outcome{
   const m=s.maintenanceOrders.find(x=>x.id===id)
   if(!m||m.status!=='Rejada')return fail(s,'Faqat rejalashtirilgan maintenance bekor qilinadi')
+  if((m.parts||[]).some(p=>p.qty-p.returned>1e-9))return fail(s,`${m.code}: berilgan ehtiyot qismlar avval omborga qaytarilsin`)
   const next=withMaintEvent(s,id,{status:'Bekor'},maintEvent(ctx,'Bekor qilindi',reason.trim()||undefined))
   return ok(logActivity(next,ctx,'Maintenance bekor qilindi','Uskunalar',m.code,'warning',reason.trim()),`${m.code} bekor qilindi`)
+}
+
+/* ------------------------------------------------------------- CAPA -- */
+
+const capaEvent=(ctx:Ctx,action:string,note?:string)=>({at:stamp(ctx.now),by:ctx.user?.id||'',action,...(note?.trim()?{note:note.trim()}:{})})
+function withCapa(s:S,alertId:string,f:(a:QualityAlert)=>QualityAlert):S{return {...s,qualityAlerts:s.qualityAlerts.map(a=>a.id===alertId?f(a):a)}}
+/** CAPA actions past their deadline and not yet verified (today = local ISO date). */
+export function capaOverdue(s:Pick<S,'qualityAlerts'>,today:string){
+  return s.qualityAlerts.flatMap(a=>(a.capa||[]).filter(c=>(c.status==='Ochiq'||c.status==='Bajarildi')&&c.dueDate<today).map(c=>({alert:a,action:c})))
+}
+/** Why an NCR cannot close yet: a CAPA action that is not verified (cancelled ones do not count). */
+export function capaCloseBlocker(a:Pick<QualityAlert,'capa'>){
+  const open=(a.capa||[]).filter(c=>c.status==='Ochiq'||c.status==='Bajarildi')
+  return open.length?`NCR’ni yopishdan oldin barcha CAPA amallari tasdiqlanishi kerak (${open.length} ta: ${open.map(c=>c.status==='Ochiq'?'bajarilmagan':'tekshirilmagan').join(', ')})`:null
+}
+
+export function addCapaAction(s:S,ctx:Ctx,alertId:string,p:{kind:CapaAction['kind'];description:string;ownerId:string;dueDate:string}):Outcome{
+  const a=s.qualityAlerts.find(x=>x.id===alertId)
+  if(!a)return fail(s,'NCR topilmadi')
+  if(a.status==='Yopilgan')return fail(s,'Yopilgan NCR’ga amal qo‘shilmaydi')
+  if(p.kind!=='Tuzatuvchi'&&p.kind!=='Oldini oluvchi')return fail(s,'Amal turi noto‘g‘ri')
+  const text=String(p.description||'').trim()
+  if(text.length<5)return fail(s,'Amal tavsifini yozing (kamida 5 belgi)')
+  if(!s.employees.some(e=>e.id===p.ownerId&&e.status!=='Arxiv'))return fail(s,'Mas’ul xodimni tanlang')
+  const badDate=dateProblem(p.dueDate,'Muddat')||(!p.dueDate?'Muddatni kiriting':null)
+  if(badDate)return fail(s,badDate)
+  if(p.dueDate<isoDate(ctx.now))return fail(s,'Muddat o‘tgan sana bo‘lmasin')
+  const action:CapaAction={id:ctx.id('capa'),kind:p.kind,description:text,ownerId:p.ownerId,dueDate:p.dueDate,status:'Ochiq',history:[capaEvent(ctx,'Yaratildi')]}
+  let next=withCapa(s,alertId,x=>({...x,status:x.status==='Ochiq'?'Jarayonda':x.status,capa:[...(x.capa||[]),action]}))
+  next=notify(next,ctx,'quality','CAPA amali tayinlandi',`${a.title}: ${text} · muddat ${p.dueDate}`,'info',`/quality?view=alerts&id=${alertId}`,{key:`capa:${action.id}`})
+  return ok(logActivity(next,ctx,`CAPA amali: ${p.kind}`,'Sifat',a.title,'info',`${text} · ${p.dueDate}`),'CAPA amali qo‘shildi',action.id)
+}
+
+function capaStep(s:S,ctx:Ctx,alertId:string,actionId:string):{a:QualityAlert;c:CapaAction}|{error:string}{
+  const a=s.qualityAlerts.find(x=>x.id===alertId)
+  const c=a?.capa?.find(x=>x.id===actionId)
+  if(!a||!c)return {error:'CAPA amali topilmadi'}
+  if(a.status==='Yopilgan')return {error:'NCR yopilgan'}
+  return {a,c}
+}
+/** Marks an action done with its evidence (what was changed, document, photo reference). */
+export function completeCapaAction(s:S,ctx:Ctx,alertId:string,actionId:string,evidence:string):Outcome{
+  const found=capaStep(s,ctx,alertId,actionId)
+  if('error' in found)return fail(s,found.error)
+  if(found.c.status!=='Ochiq')return fail(s,`Amal ${found.c.status.toLowerCase()} — qayta bajarilmaydi`)
+  const ev=String(evidence||'').trim()
+  if(ev.length<5)return fail(s,'Bajarilganini tasdiqlovchi dalilni yozing (kamida 5 belgi)')
+  const next=withCapa(s,alertId,x=>({...x,capa:(x.capa||[]).map(c=>c.id===actionId?{...c,status:'Bajarildi' as const,evidence:ev,doneAt:stamp(ctx.now),doneBy:ctx.user?.id,history:[...c.history,capaEvent(ctx,'Bajarildi',ev)]}:c)}))
+  return ok(logActivity(next,ctx,'CAPA amali bajarildi','Sifat',found.a.title,'info',ev),'Amal bajarildi — tekshirish (verification) kutilmoqda')
+}
+/**
+ * Verifies a done action: someone other than the person who did it confirms it worked (effective) — or sends it back
+ * to open with the finding. Only verified actions let the NCR close.
+ */
+export function verifyCapaAction(s:S,ctx:Ctx,alertId:string,actionId:string,effective:boolean,note:string):Outcome{
+  const found=capaStep(s,ctx,alertId,actionId)
+  if('error' in found)return fail(s,found.error)
+  if(found.c.status!=='Bajarildi')return fail(s,'Faqat bajarilgan amal tekshiriladi')
+  if(found.c.doneBy&&found.c.doneBy===ctx.user?.id)return fail(s,'O‘zingiz bajargan amalni boshqa xodim tekshiradi')
+  const why=String(note||'').trim()
+  if(why.length<5)return fail(s,'Tekshiruv natijasini yozing (kamida 5 belgi)')
+  const next=withCapa(s,alertId,x=>({...x,capa:(x.capa||[]).map(c=>c.id!==actionId?c:effective
+    ?{...c,status:'Tasdiqlandi' as const,verifiedAt:stamp(ctx.now),verifiedBy:ctx.user?.id,verificationNote:why,history:[...c.history,capaEvent(ctx,'Samarali deb tasdiqlandi',why)]}
+    :{...c,status:'Ochiq' as const,history:[...c.history,capaEvent(ctx,'Samarasiz — qayta ochildi',why)]})}))
+  return ok(logActivity(next,ctx,effective?'CAPA tasdiqlandi':'CAPA samarasiz','Sifat',found.a.title,effective?'success':'warning',why),effective?'Amal tasdiqlandi':'Amal qayta ochildi')
+}
+export function cancelCapaAction(s:S,ctx:Ctx,alertId:string,actionId:string,reason:string):Outcome{
+  const found=capaStep(s,ctx,alertId,actionId)
+  if('error' in found)return fail(s,found.error)
+  if(found.c.status==='Tasdiqlandi'||found.c.status==='Bekor')return fail(s,`Amal ${found.c.status.toLowerCase()}`)
+  if(String(reason||'').trim().length<5)return fail(s,'Bekor qilish sababini yozing (kamida 5 belgi)')
+  const next=withCapa(s,alertId,x=>({...x,capa:(x.capa||[]).map(c=>c.id===actionId?{...c,status:'Bekor' as const,history:[...c.history,capaEvent(ctx,'Bekor qilindi',reason)]}:c)}))
+  return ok(logActivity(next,ctx,'CAPA amali bekor qilindi','Sifat',found.a.title,'warning',reason.trim()),'Amal bekor qilindi')
+}
+
+/* -------------------------------------------- maintenance additions -- */
+
+export function rejectMaintenanceRequest(s:S,ctx:Ctx,id:string,reason:string):Outcome{
+  const r=s.maintenanceRequests.find(x=>x.id===id)
+  if(!r||r.status!=='Yangi')return fail(s,'Faqat yangi so‘rov rad etiladi')
+  const why=String(reason||'').trim()
+  if(why.length<5)return fail(s,'Rad etish sababini yozing (kamida 5 belgi)')
+  const next={...s,maintenanceRequests:s.maintenanceRequests.map(x=>x.id===id?{...x,status:'Rad etilgan' as const,decidedBy:ctx.user?.id,decisionNote:why}:x)}
+  return ok(logActivity(next,ctx,'Maintenance so‘rovi rad etildi','Uskunalar',r.code,'warning',why),`${r.code} rad etildi`)
+}
+
+const partsCost=(m:Pick<MaintenanceOrder,'parts'>)=>r2((m.parts||[]).reduce((sum,p)=>{
+  // A returned unit comes back from the original LOT order. Preserve each LOT's frozen issue price;
+  // the average unitCost on older records remains the fallback for data saved before this field existed.
+  if(!p.lots?.length)return sum+(p.qty-p.returned)*p.unitCost
+  let returned=p.returned
+  return sum+p.lots.reduce((value,l)=>{const fromLot=Math.min(returned,l.qty);returned-=fromLot;return value+(l.qty-fromLot)*(l.unitCost??p.unitCost)},0)
+},0))
+export const maintenancePartsCost=partsCost
+/**
+ * Issues a spare part from stock to a planned or running maintenance work: free, usable stock only (never another
+ * order's reservation or QC-held stock), lot-tracked parts as lot records (FEFO). The same issue key books once.
+ */
+export function issueMaintenancePart(s:S,ctx:Ctx,orderId:string,p:{materialId:string;warehouseId:string;qty:number|string;key:string}):Outcome{
+  const blocked=commandBlocker(s,ctx.user,'issueMaintenancePart',[orderId,p])
+  if(blocked)return fail(s,blocked)
+  const m=s.maintenanceOrders.find(x=>x.id===orderId)
+  if(!m)return fail(s,'Maintenance topilmadi')
+  if(m.status!=='Rejada'&&m.status!=='Jarayonda')return fail(s,`${m.code} ${m.status.toLowerCase()} — ehtiyot qism berilmaydi`)
+  const key=String(p.key||'').trim()
+  if(!key)return fail(s,'Chiqim kaliti yo‘q — formani qayta oching')
+  if((m.parts||[]).some(x=>x.key===key))return ok(s,'Bu ehtiyot qism allaqachon berilgan — qayta yozilmadi')
+  const material=s.rawMaterials.find(x=>x.id===p.materialId)
+  if(!material)return fail(s,'Ehtiyot qism (material) topilmadi')
+  const wh=s.warehouses.find(w=>w.id===p.warehouseId)
+  if(!wh||wh.status!=='Faol')return fail(s,'Faol omborni tanlang')
+  const q=stockQty(s,material.id,p.qty,`${material.name}: miqdor`)
+  if('error' in q)return fail(s,q.error)
+  const today=isoDate(ctx.now),free=freeIn(s,wh.id,material.id,today)
+  if(free<q.value-1e-6)return fail(s,`${material.name}: ${wh.name}da bo‘sh qoldiq ${free} ${material.unit}, kerak ${q.value}`)
+  const taken=takeLots(s,material.id,q.value,m.code,wh.id,undefined,today)
+  const untracked=q3(taken.allocations.filter(a=>!a.lot).reduce((a,x)=>a+x.qty,0))
+  if(lotTracked(s,material.id)&&untracked>1e-6)return fail(s,`${material.name} LOT bilan kuzatiladi: ${wh.name}da ishlatsa bo‘ladigan LOT ${q3(q.value-untracked)} ${material.unit} — LOT’siz qoldiq berilmaydi`)
+  let next=changeBalance(taken.state,ctx,wh.id,material.id,{onHand:-q.value},undefined,lotBinDraw(s,taken.state,wh.id,material.id))
+  for(const a of taken.allocations)next=addMove(next,ctx,{type:'Maintenance Issue -',itemId:material.id,itemType:'raw',warehouseId:wh.id,qty:-a.qty,source:m.code,note:`Ehtiyot qism · ${s.equipment.find(e=>e.id===m.equipmentId)?.name||''}`,lot:a.lot,...(a.location?{location:a.location}:{})})
+  // Valued like a production issue: each drawn lot at its own cost (purchase price), not the standard price.
+  const partValue=taken.allocations.reduce((n,a)=>n+a.qty*issueUnitCost(s,material.id,a.lot),0)
+  const unitCost=q.value>0?Math.round(partValue/q.value*100)/100:material.standardCost||0
+  const part:MaintenancePart={id:ctx.id('mp'),materialId:material.id,warehouseId:wh.id,qty:q.value,returned:0,unitCost,lots:taken.allocations.map(a=>({...(a.lot?{lot:a.lot}:{}),qty:a.qty,unitCost:issueUnitCost(s,material.id,a.lot)})),at:stamp(ctx.now),by:ctx.user?.id||'',key}
+  next=withMaintEvent(next,orderId,{parts:[...(m.parts||[]),part]},maintEvent(ctx,'Ehtiyot qism berildi',`${material.name} ${q.value} ${material.unit}`))
+  next=lowStockSignals(next,ctx)
+  return ok(logActivity(next,ctx,'Ehtiyot qism berildi','Uskunalar',m.code,'info',`${material.name} ${q.value} ${material.unit} · ${wh.name}`),`${material.name}: ${q.value} ${material.unit} berildi`)
+}
+
+/** Returns unused spare parts to the store they came from, as the lots they left; the same return key books once. */
+export function returnMaintenancePart(s:S,ctx:Ctx,orderId:string,partId:string,qty:number|string,key:string):Outcome{
+  const blocked=commandBlocker(s,ctx.user,'returnMaintenancePart',[orderId,partId,qty,key])
+  if(blocked)return fail(s,blocked)
+  const m=s.maintenanceOrders.find(x=>x.id===orderId)
+  const part=m?.parts?.find(x=>x.id===partId)
+  if(!m||!part)return fail(s,'Ehtiyot qism chiqimi topilmadi')
+  const k=String(key||'').trim()
+  if(!k)return fail(s,'Qaytarish kaliti yo‘q')
+  if((part.returnKeys||[]).includes(k))return ok(s,'Bu qaytarish allaqachon qayd etilgan')
+  if(m.status==='Yakunlangan'||m.status==='Bekor')return fail(s,`${m.code} yopilgan — qaytarish yozilmaydi`)
+  const q=stockQty(s,part.materialId,qty,'Qaytarish miqdori')
+  if('error' in q)return fail(s,q.error)
+  const open=q3(part.qty-part.returned)
+  if(q.value>open+1e-6)return fail(s,`Qaytarish berilgan ${open} dan oshmasin`)
+  let next=changeBalance(s,ctx,part.warehouseId,part.materialId,{onHand:q.value})
+  // Back in the original issue allocation order.
+  let left=q.value
+  const already=part.returned
+  let skip=already
+  for(const l of [...part.lots]){
+    const avail=Math.max(0,l.qty-skip);skip=Math.max(0,skip-l.qty)
+    const t=q3(Math.min(left,avail))
+    if(t<=1e-9)continue
+    if(l.lot){
+      const origin=s.lots.find(x=>x.code===l.lot&&x.itemId===part.materialId)
+      if(origin){const {id:_i,qty:_q,originalQty:_o,warehouseId:_w,location:_l,status:_s,createdAt:_c,consumedBy:_b,...rest}=origin;next={...next,lots:[{...rest,id:ctx.id('lot'),qty:t,originalQty:t,warehouseId:part.warehouseId,status:'available',createdAt:stamp(ctx.now),consumedBy:[]},...next.lots]}}
+    }
+    next=addMove(next,ctx,{type:'Maintenance Return +',itemId:part.materialId,itemType:'raw',warehouseId:part.warehouseId,qty:t,source:m.code,note:'Ishlatilmagan ehtiyot qism qaytdi',lot:l.lot})
+    left=q3(left-t)
+  }
+  next={...next,maintenanceOrders:next.maintenanceOrders.map(x=>x.id!==orderId?x:{...x,parts:(x.parts||[]).map(pp=>pp.id===partId?{...pp,returned:q3(pp.returned+q.value),returnKeys:[...(pp.returnKeys||[]),k]}:pp)})}
+  next=withMaintEvent(next,orderId,{},maintEvent(ctx,'Ehtiyot qism qaytarildi',`${itemName(s,part.materialId)} ${q.value}`))
+  return ok(logActivity(next,ctx,'Ehtiyot qism qaytarildi','Uskunalar',m.code,'info',`${itemName(s,part.materialId)} ${q.value}`),`${q.value} ${itemUnit(s,part.materialId)} qaytarildi`)
 }
 
 /**
@@ -3683,11 +4592,14 @@ export function recordEquipmentRuntime(s:S,ctx:Ctx,equipmentId:string,hours:numb
  * Preventive orders for every machine whose plan falls due within the horizon (overdue ones are planned for today);
  * machines without a plan or without the data a plan needs are reported, not guessed.
  */
-export function planPreventiveMaintenance(s:S,ctx:Ctx,horizonDays=14):Outcome{
+export function planPreventiveMaintenance(s:S,ctx:Ctx,horizonDays=14,equipmentIds?:string[]):Outcome{
   const today=isoDate(ctx.now),until=addDays(today,horizonDays)
   let next=s,created=0
   const skipped:string[]=[]
+  // A site-bound planner names the machines it may plan (its own branch); the gate checks each one (SEC-06).
+  const only=equipmentIds?new Set(equipmentIds):null
   for(const e of s.equipment){
+    if(only&&!only.has(e.id))continue
     if(next.maintenanceOrders.some(m=>m.equipmentId===e.id&&m.type==='Preventive'&&['Rejada','Jarayonda'].includes(m.status)))continue
     const due=maintenanceDue(e,today)
     if(due.state==='no-plan'||due.state==='no-data'){skipped.push(`${e.name}: ${due.reason}`);continue}
@@ -4324,7 +5236,30 @@ const ENTITY_RULES:Partial<Record<EntityKey,(s:S,row:Row,before?:Row)=>string|nu
     }
     return null
   },
-  qualityAlerts:(_s,row,before)=>before&&row.status==='Yopilgan'&&before.status!=='Yopilgan'&&!norm(row.rootCause)?'NCR’ni yopish uchun asosiy sabab (root cause) kiritilishi shart':null,
+  // Workflow records change state only through their own actions (SEC-05): a generic write is checked like a form field
+  // edit, so it cannot plant verified CAPA actions, move an NCR to another document, or approve / finish work.
+  qualityAlerts:(s,row,before)=>{
+    const changed=(k:string)=>!before||JSON.stringify(row[k]??null)!==JSON.stringify(before[k]??null)
+    if(changed('status')&&!NCR_STATUSES.includes(row.status as QualityAlert['status']))return 'NCR holati noto‘g‘ri'
+    if(changed('severity')&&!NCR_SEVERITIES.includes(row.severity as QualityAlert['severity']))return 'NCR darajasi noto‘g‘ri'
+    if(!before){
+      if(row.status!=='Ochiq'||(Array.isArray(row.capa)&&row.capa.length))return 'NCR “Ochiq” holatda, CAPA amallarisiz yaratiladi'
+      return qualitySourceExists(s,row.sourceId)?null:'NCR manbasi (buyurtma yoki hujjat) topilmadi'
+    }
+    if(changed('capa'))return 'CAPA amallari faqat CAPA amallari orqali qo‘shiladi, bajariladi va tekshiriladi'
+    if(changed('sourceId'))return 'NCR manbasi o‘zgartirilmaydi — boshqa hujjat uchun yangi NCR oching'
+    if(changed('createdAt'))return 'NCR yaratilgan sanasi o‘zgartirilmaydi'
+    return row.status==='Yopilgan'&&before.status!=='Yopilgan'?(!norm(row.rootCause)?'NCR’ni yopish uchun asosiy sabab (root cause) kiritilishi shart':capaCloseBlocker(row as unknown as QualityAlert)):null
+  },
+  maintenanceRequests:(_s,row,before)=>!before?(row.status==='Yangi'?null:'Maintenance so‘rovi “Yangi” holatda yaratiladi')
+    :row.status!==before.status?'So‘rov holati faqat tasdiqlash yoki rad etish amali bilan o‘zgaradi':null,
+  repairOrders:(_s,row,before)=>!before?(row.status==='Yangi'?null:'Ta’mir buyurtmasi “Yangi” holatda yaratiladi')
+    :row.status!==before.status?'Ta’mir holati faqat “Keyingi bosqich” amali bilan o‘zgaradi':null,
+  maintenanceOrders:(_s,row,before)=>{
+    if(!before)return row.status==='Rejada'&&!(Array.isArray(row.parts)&&row.parts.length)?null:'Maintenance buyurtmasi “Rejada” holatda, ehtiyot qismsiz yaratiladi'
+    const locked=['status','cost','parts','completed','startedAt','requestId'].find(k=>JSON.stringify(row[k]??null)!==JSON.stringify(before[k]??null))
+    return locked?`Maintenance “${locked}” maydoni faqat boshlash, qism berish yoki yakunlash amallari bilan o‘zgaradi`:null
+  },
 }
 
 /**
@@ -4373,6 +5308,20 @@ function entityProblem(s:S,key:EntityKey,row:Row,before?:Row):string|null{
   return null
 }
 
+/**
+ * The document that posted an expense automatically (FN-002): a completed maintenance or repair order (note starts with
+ * its code, source = its equipment) or a subcontract QC scrap (source = the subcontract). Such an expense is the one
+ * cost record of that document — equipment maintenance cost was raised with it — so it is not edited or deleted by hand.
+ */
+export function expenseOrigin(s:Pick<S,'maintenanceOrders'|'repairOrders'|'subcontractOrders'>,e:Pick<Expense,'type'|'sourceId'|'note'>):string|null{
+  const sc=s.subcontractOrders.find(o=>o.id===e.sourceId)
+  if(sc)return sc.code
+  if(e.type!=='Maintenance')return null
+  const code=String(e.note||'').split(' · ')[0].trim()
+  const doc=s.maintenanceOrders.find(m=>m.code===code&&m.equipmentId===e.sourceId&&m.status==='Yakunlangan')||s.repairOrders.find(r=>r.code===code&&r.equipmentId===e.sourceId)
+  return doc?doc.code:null
+}
+
 export function createEntity(s:S,ctx:Ctx,key:EntityKey,payload:Record<string,unknown>,label:string=key):Outcome{
   // A new customer's starting debt becomes its opening ledger entry; the stored debt is the ledger's balance (audit #19).
   let opening=0
@@ -4386,6 +5335,8 @@ export function createEntity(s:S,ctx:Ctx,key:EntityKey,payload:Record<string,unk
     if(n===null||n<0)return fail(s,'Supplier boshlang‘ich qarzi noto‘g‘ri')
     opening=n;payload={...payload,debt:0}
   }
+  // A maintenance request is numbered like the rest of its family (MR-yymmdd-NN, unique), not by the client.
+  if(key==='maintenanceRequests'&&!String(payload.code??'').trim())payload={...payload,code:nextCode(s.maintenanceRequests.map(r=>r.code),'MR',ctx.now,2)}
   const invalid=entityProblem(s,key,payload)||ENTITY_RULES[key]?.(s,{...payload,id:undefined})||(key==='employees'?employeeWriteBlocker(s,ctx.user,payload):null)
   if(invalid)return fail(s,invalid)
   const id=ctx.id(key.slice(0,2))
@@ -4404,6 +5355,10 @@ export function updateEntity(s:S,ctx:Ctx,key:EntityKey,id:string,patch:Record<st
     if(readNumber(patch.debt)!==row.debt)return fail(s,'Qarz qo‘lda o‘zgartirilmaydi — to‘lov, qaytarish yoki tasdiqlangan tuzatish orqali')
     const {debt:_d,...rest}=patch;patch=rest
   }
+  if(key==='expenses'){
+    const origin=expenseOrigin(s,row as unknown as Expense)
+    if(origin)return fail(s,`Bu xarajat ${origin} hujjatidan avtomatik yozilgan — qo‘lda tahrirlanmaydi`)
+  }
   // Role and blocking changes of people are checked against who is acting (A-C2 / A-H2).
   const invalid=entityProblem(s,key,{...row,...patch,id},row)||ENTITY_RULES[key]?.(s,{...row,...patch,id},row)||(key==='employees'?employeeWriteBlocker(s,ctx.user,{...row,...patch},row as unknown as Employee):null)
   if(invalid)return fail(s,invalid)
@@ -4421,6 +5376,10 @@ export function deleteEntity(s:S,ctx:Ctx,key:EntityKey,id:string,label:string=ke
     if(!hasPermission(roleOf(s,ctx.user?.id),'users','delete'))return fail(s,'Xodimni o‘chirish huquqi yo‘q')
     const blocked=scopeBlocker(s,ctx.user,'deleteEntity',['employees',id])||employeeRemovalBlocker(s,ctx.user,id)
     if(blocked)return fail(s,blocked)
+  }
+  if(key==='expenses'){
+    const origin=expenseOrigin(s,row as unknown as Expense)
+    if(origin)return fail(s,`Bu xarajat ${origin} hujjatidan avtomatik yozilgan — o‘chirilmaydi`)
   }
   const reference=REFERENCE_CHECKS[key]?.(s,id)
   if(reference)return fail(s,`O‘chirib bo‘lmaydi: ${reference}. Arxivlashdan foydalaning.`)
@@ -4442,6 +5401,8 @@ export function duplicateEntity(s:S,ctx:Ctx,key:EntityKey,id:string,label:string
     const sourceScope=scopeBlocker(s,ctx.user,'duplicateEntity',['employees',id])
     if(sourceScope)return fail(s,sourceScope)
   }
+  // A copy of an automatically posted expense would count that document's cost twice.
+  if(key==='expenses'&&expenseOrigin(s,row as unknown as Expense))return fail(s,'Avtomatik yozilgan xarajatdan nusxa olinmaydi')
   const copyId=ctx.id(key.slice(0,2))
   // Codes and SKUs of copies stay unique: -COPY, -COPY2, … (N-16).
   const taken=new Set([...rows.map(x=>norm(x.code)),...s.products.map(x=>norm(x.sku)),...s.rawMaterials.map(x=>norm(x.sku)),...s.products.flatMap(p=>p.variants.map(v=>norm(v.code)))])

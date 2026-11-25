@@ -122,7 +122,7 @@ function baseState():ManufacturingState{
       {id:'qcp5',title:'Po‘lat list qalinlik sertifikati',scope:'Incoming',productId:'rm2',frequency:'Every time',sampleRate:100,checkType:'Pass-Fail',instructions:'Mill certificate va 1.5 mm ±0.05 qalinlikni tekshiring.',active:true},
     ],
     maintenanceRequests:[],subcontractOrders:[],repairOrders:[],notifications:[],activity:[],currentEmployeeId:'em1',schemaVersion:SCHEMA_VERSION,
-    timeLogs:[],downtimeEvents:[],lots:[],forecasts:[],returns:[],attachments:[],receivables:[],payables:[],supplierReplacements:[],receivableReconciliations:[],
+    timeLogs:[],downtimeEvents:[],lots:[],forecasts:[],returns:[],attachments:[],receivables:[],payables:[],supplierReplacements:[],receivableReconciliations:[],stockTransfers:[],stockCounts:[],purchaseRequests:[],supplierInvoices:[],
   }
   // Demo customers' balances are opening ledger entries, so the balance shown is the ledger's (audit #19).
   return {...s,receivables:openingEntries(s.customers,stamp(new Date(2026,0,1)))}
@@ -146,7 +146,7 @@ export function createEmptyTenantState(company:string,ownerName:string):Manufact
     suppliers:[],supplierMaterials:[],purchaseOrders:[],customers:[],salesOrders:[],qualityChecks:[],qualityAlerts:[],equipment:[],maintenanceOrders:[],
     employees:[{...owner,name:ownerName.trim(),workCenterId:'',attendance:0,efficiency:0,hourlyCost:0}],
     expenses:[],engineeringChanges:[],qualityControlPoints:[],maintenanceRequests:[],subcontractOrders:[],repairOrders:[],notifications:[],activity:[],
-    timeLogs:[],downtimeEvents:[],lots:[],forecasts:[],returns:[],attachments:[],receivables:[],payables:[],supplierReplacements:[],receivableReconciliations:[],
+    timeLogs:[],downtimeEvents:[],lots:[],forecasts:[],returns:[],attachments:[],receivables:[],payables:[],supplierReplacements:[],receivableReconciliations:[],stockTransfers:[],stockCounts:[],purchaseRequests:[],supplierInvoices:[],
   }
 }
 

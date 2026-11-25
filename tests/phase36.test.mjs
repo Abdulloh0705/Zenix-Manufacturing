@@ -121,9 +121,18 @@ test('temporary employee credentials expire unused and a reissue restores the ch
 test('an existing scoped account loses sign-in when its assigned site is removed',()=>{
   const s=fresh(),store=Auth.emptyAuthStore(),created=Auth.createAccount(store,s,authCtx(s),{employeeId:'em2',username:'worker.site',credential})
   assert.equal(created.error,undefined,created.error)
+  const account=created.store.accounts[0],asOf=new Date(account.createdAt)
   const invalid={...s,employees:s.employees.map(e=>e.id==='em2'?{...e,workCenterId:'',warehouseId:undefined,branchId:undefined,branchIds:undefined}:e)}
-  assert.match(Auth.signInBlocker(invalid,created.store.accounts[0]),/filial|ish markazi|ombor/)
-  assert.equal(Auth.sessionProblem(Auth.recordSuccess(created.store,authCtx(s),created.store.accounts[0],false).session,created.store,invalid,new Date('2026-11-09T12:00:00Z')),'blocked')
+  assert.match(Auth.signInBlocker(invalid,account,account.employeeId,asOf),/filial|ish markazi|ombor/)
+  assert.equal(Auth.sessionProblem(Auth.recordSuccess(created.store,authCtx(s),account,false).session,created.store,invalid,asOf),'blocked')
+})
+
+test('temporary credential expiry uses the supplied clock at its UTC boundary',()=>{
+  const s=fresh(),created=Auth.createAccount(Auth.emptyAuthStore(),s,authCtx(s),{employeeId:'em2',username:'worker.boundary',credential})
+  assert.equal(created.error,undefined,created.error)
+  const account=created.store.accounts[0],expiry=new Date(account.temporaryExpiresAt)
+  assert.equal(Auth.signInBlocker(s,account,account.employeeId,new Date(expiry.getTime()-1)),null)
+  assert.match(Auth.signInBlocker(s,account,account.employeeId,expiry),/muddati/)
 })
 
 test('ZA-005: consumed ticket fingerprints survive auth-store reload normalization',()=>{

@@ -18,6 +18,8 @@ export type Checked={value:number}|{error:string}
 export function readNumber(v:unknown):number|null{
   if(typeof v==='number')return Number.isFinite(v)?v:null
   if(typeof v!=='string'||!v.trim())return null
+  // Decimal text only: Number() also reads "0x10", "0b11" and "0o7", which would store a value nobody typed (SEC-10).
+  if(!/^[+-]?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?$/i.test(v.trim()))return null
   const n=Number(v.trim())
   return Number.isFinite(n)?n:null
 }

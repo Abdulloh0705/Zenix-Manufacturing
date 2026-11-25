@@ -25,3 +25,6 @@ e2e/.auth/
 # Phase 4 local test credentials and browser data
 docs/audits/evidence/phase4/TEST_ACCOUNTS.md
 docs/audits/evidence/phase4/*.storage.json
+
+# Local audit captures may contain account details or browser data.
+docs/audits/evidence/

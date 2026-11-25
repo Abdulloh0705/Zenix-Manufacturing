@@ -40,6 +40,9 @@ const entries={
   serials:'src/domain/serials.ts',
   notifications:'src/domain/notifications.ts',
   format:'src/utils/format.ts',
+  employeeForm:'src/domain/employeeForm.ts',
+  helpContent:'src/features/help/helpContent.ts',
+  helpContext:'src/features/help/helpContext.ts',
 }
 for(const [name,file] of Object.entries(entries)){
   if(!fs.existsSync(path.join(root,file))){console.error(`Missing source under test: ${file}`);process.exit(1)}

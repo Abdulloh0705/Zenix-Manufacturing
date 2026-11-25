@@ -25,7 +25,7 @@ export const TICKET_CATEGORIES=['account','subscription','billing','technical','
 export type TicketStatus=typeof TICKET_STATUSES[number]
 export type TicketPriority=typeof TICKET_PRIORITIES[number]
 export type TicketCategory=typeof TICKET_CATEGORIES[number]
-export type TicketNote={id:string;at:string;actor:string;kind:'note'|'status'|'assign'|'create';text:string}
+export type TicketNote={id:string;at:string;actor:string;kind:'note'|'status'|'assign'|'priority'|'create';text:string}
 export type SupportTicket={id:string;number:number;tenantId:string|null;subject:string;category:TicketCategory;priority:TicketPriority;status:TicketStatus;assignee:string;createdAt:string;createdBy:string;updatedAt:string;notes:TicketNote[]}
 
 export type PlatformStore={version:1;settings:PlatformSettings;audit:PlatformAuditEntry[];tickets:SupportTicket[]}
@@ -118,7 +118,7 @@ export type Snapshot={saas:SaaSStore;platform:PlatformStore}
 export type OpResult={ok:true;next:Snapshot;message:string}|{ok:false;error:string}
 const fail=(error:string):OpResult=>({ok:false,error})
 const audit=(p:PlatformStore,e:Omit<PlatformAuditEntry,'id'|'outcome'>&{outcome?:AuditOutcome}):PlatformStore=>({...p,audit:[{id:uid('platform-audit'),outcome:'success' as AuditOutcome,...e},...p.audit].slice(0,PLATFORM_AUDIT_LIMIT)})
-const guard=(actor:string,reason?:string)=>!validActor(actor)?'Operator identifikatori noto‘g‘ri':reason!==undefined&&reason.trim().length<5?'Sabab kamida 5 belgidan iborat bo‘lishi kerak':null
+const guard=(actor:string,reason?:string)=>!validActor(actor)?'Operator identifikatori noto‘g‘ri':reason!==undefined?platformReasonProblem(reason):null
 
 export function opTenantStatus(snap:Snapshot,actor:string,tenantId:string,status:Tenant['status'],reason:string,now:Date):OpResult{
   const bad=guard(actor,reason);if(bad)return fail(bad)
@@ -129,6 +129,26 @@ export function opTenantStatus(snap:Snapshot,actor:string,tenantId:string,status
   if(!saas)return fail('Holat o‘zgarmadi')
   const action=status==='suspended'?'tenant.suspend':'tenant.reactivate'
   return {ok:true,next:{saas,platform:audit(snap.platform,{at:now.toISOString(),actor,action,targetType:'tenant',targetId:tenantId,tenantId,reason:reason.trim(),saasEventId:saas.events[0].id,detail:`${tenant.status} → ${status}`})},message:status==='suspended'?`${tenant.name} to‘xtatildi. Ma’lumotlari saqlanadi.`:`${tenant.name} qayta faollashtirildi`}
+}
+
+export const TENANT_NAME_MIN=2,TENANT_NAME_MAX=80
+/** Problem with a proposed platform display name, or null. Names are unique (case-insensitive) across companies. */
+export function tenantNameProblem(saas:SaaSStore,tenantId:string,name:string):string|null{
+  const clean=name.trim()
+  if(clean.length<TENANT_NAME_MIN||clean.length>TENANT_NAME_MAX)return `Nom ${TENANT_NAME_MIN}–${TENANT_NAME_MAX} belgidan iborat bo‘lishi kerak`
+  if(SECRET.test(clean))return 'Nomda maxfiy kalitga o‘xshash qiymat bor'
+  if(saas.tenants.some(t=>t.id!==tenantId&&t.name.trim().toLowerCase()===clean.toLowerCase()))return 'Bu nom boshqa kompaniyada ishlatilgan'
+  return null
+}
+export function opTenantRename(snap:Snapshot,actor:string,tenantId:string,name:string,reason:string,now:Date):OpResult{
+  const bad=guard(actor,reason);if(bad)return fail(bad)
+  const tenant=snap.saas.tenants.find(t=>t.id===tenantId)
+  if(!tenant)return fail('Kompaniya topilmadi')
+  const problem=tenantNameProblem(snap.saas,tenantId,name);if(problem)return fail(problem)
+  if(name.trim()===tenant.name)return fail('O‘zgarish yo‘q')
+  const saas=SaaS.renameTenant(snap.saas,tenantId,name,actor,reason,now)
+  if(!saas)return fail('Nom o‘zgarmadi')
+  return {ok:true,next:{saas,platform:audit(snap.platform,{at:now.toISOString(),actor,action:'tenant.rename',targetType:'tenant',targetId:tenantId,tenantId,reason:reason.trim(),saasEventId:saas.events[0].id,detail:`${tenant.name} → ${name.trim()}`})},message:`Kompaniya nomi yangilandi: ${name.trim()}`}
 }
 
 export const OVERRIDE_STATUSES=['active','grace','expired','suspended'] as const
@@ -164,6 +184,7 @@ export function settingsDiff(before:PlatformSettings,after:PlatformSettings){
 }
 export function opSettings(snap:Snapshot,actor:string,next:PlatformSettings,reason:string,now:Date):OpResult{
   const bad=guard(actor);if(bad)return fail(bad)
+  if(reason.trim()){const reasonProblem=platformReasonProblem(reason);if(reasonProblem)return fail(reasonProblem)}
   const clean:PlatformSettings={...next,brandName:next.brandName.trim(),supportEmail:next.supportEmail.trim(),supportPhone:next.supportPhone.trim()}
   const errors=validateSettings(clean)
   if(Object.keys(errors).length)return fail(Object.values(errors)[0]!)
@@ -175,7 +196,11 @@ export function opSettings(snap:Snapshot,actor:string,next:PlatformSettings,reas
   return {ok:true,next:{saas:snap.saas,platform},message:'Platforma sozlamalari saqlandi'}
 }
 
-const SECRET=/ZXR1\.\d{10,16}\.|-----BEGIN|"d"\s*:\s*"|parol\s*[:=]|password\s*[:=]/i
+const SECRET=/ZXR1\.\d{10,16}\.|-----BEGIN|"d"\s*:\s*"|(?:parol|password|api[_ -]?key|access[_ -]?token|token|secret|bearer)\s*[:=]|\bBearer\s+\S+|\bsk-[A-Za-z0-9_-]{12,}|\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|\bAKIA[0-9A-Z]{16}\b|\bgh[pousr]_[A-Za-z0-9]{20,}/i
+export function platformReasonProblem(reason:string):string|null{
+  const problem=ticketTextProblem(reason,5,500)
+  return problem?problem.replace(/^Matn /,'Sabab '):null
+}
 export function ticketTextProblem(text:string,min=1,max=2000){
   const t=text.trim()
   if(t.length<min)return `Matn kamida ${min} belgi bo‘lishi kerak`
@@ -201,7 +226,7 @@ export function opTicketCreate(snap:Snapshot,actor:string,input:TicketInput,now:
 
 const TRANSITIONS:Record<TicketStatus,TicketStatus[]>={open:['in_progress','waiting','resolved','closed'],in_progress:['waiting','resolved','closed','open'],waiting:['in_progress','resolved','closed'],resolved:['closed','open'],closed:[]}
 export const canTransition=(from:TicketStatus,to:TicketStatus)=>TRANSITIONS[from].includes(to)
-export function opTicketUpdate(snap:Snapshot,actor:string,ticketId:string,change:{status?:TicketStatus;assignee?:string;note?:string},now:Date):OpResult{
+export function opTicketUpdate(snap:Snapshot,actor:string,ticketId:string,change:{status?:TicketStatus;assignee?:string;priority?:TicketPriority;note?:string},now:Date):OpResult{
   const bad=guard(actor);if(bad)return fail(bad)
   const ticket=snap.platform.tickets.find(t=>t.id===ticketId)
   if(!ticket)return fail('Murojaat topilmadi')
@@ -215,6 +240,10 @@ export function opTicketUpdate(snap:Snapshot,actor:string,ticketId:string,change
   if(change.assignee!==undefined&&change.assignee.trim()!==ticket.assignee){
     if(!validActor(change.assignee.trim()))return fail('Mas’ul operator ID noto‘g‘ri')
     next={...next,assignee:change.assignee.trim()};notes.push({id:uid('note'),at,actor,kind:'assign',text:`${ticket.assignee} → ${change.assignee.trim()}`})
+  }
+  if(change.priority&&change.priority!==ticket.priority){
+    if(!TICKET_PRIORITIES.includes(change.priority))return fail('Ustuvorlik noto‘g‘ri')
+    next={...next,priority:change.priority};notes.push({id:uid('note'),at,actor,kind:'priority',text:`${ticket.priority} → ${change.priority}`})
   }
   if(change.note?.trim()){const p=ticketTextProblem(change.note);if(p)return fail(p);notes.push({id:uid('note'),at,actor,kind:'note',text:change.note.trim()})}
   if(!notes.length)return fail('O‘zgarish yo‘q')
@@ -232,6 +261,112 @@ export function sessionAudit(platform:PlatformStore,actor:string,action:'session
 export function registrationPolicy(raw:unknown){
   const store=normalizePlatformStore(raw)
   return {open:(store?.settings.registration||'open')==='open',trialDays:store?.settings.defaultTrialDays||SaaS.DEFAULT_TRIAL_DAYS}
+}
+
+// ---------------------------------------------------------------- display safety
+export const REDACTED_TEXT='[maxfiy qiymat yashirildi]'
+/** Stored platform data is browser-editable: secret-looking text is never rendered or searchable, even if it was planted. */
+export function safeText(text:string|undefined|null):string{
+  if(!text)return ''
+  return SECRET.test(text)?REDACTED_TEXT:text
+}
+
+// ---------------------------------------------------------------- audit query
+export type AuditSort='newest'|'oldest'
+export type AuditFilter={query?:string;type?:string;outcome?:string;actor?:string;from?:string;to?:string;sort?:AuditSort}
+const dayStart=(d:string)=>{const t=new Date(`${d}T00:00:00`).getTime();return Number.isNaN(t)?null:t}
+/** `from`/`to` are inclusive local calendar dates (YYYY-MM-DD). A reversed range is reported, not silently swapped. */
+export function auditRangeProblem(from?:string,to?:string){
+  const a=from?dayStart(from):null,b=to?dayStart(to):null
+  if(from&&a===null||to&&b===null)return 'Sana formati noto‘g‘ri'
+  if(a!==null&&b!==null&&a>b)return '“Dan” sanasi “gacha” sanasidan keyin bo‘lmasin'
+  return null
+}
+export function auditQuery(entries:PlatformAuditEntry[],f:AuditFilter,tenantLabel:(id?:string)=>string=id=>id||''):PlatformAuditEntry[]{
+  if(auditRangeProblem(f.from,f.to))return []
+  const q=(f.query||'').trim().toLowerCase(),from=f.from?dayStart(f.from):null,to=f.to?dayStart(f.to)!+DAY:null
+  const rows=entries.filter(a=>{
+    if(f.type&&f.type!=='all'&&a.targetType!==f.type)return false
+    if(f.outcome&&f.outcome!=='all'&&a.outcome!==f.outcome)return false
+    if(f.actor&&f.actor!=='all'&&a.actor!==f.actor)return false
+    const at=Date.parse(a.at)
+    if(from!==null&&at<from||to!==null&&at>=to)return false
+    return !q||[a.actor,a.action,a.targetId,a.targetType,safeText(a.reason),safeText(a.detail),a.tenantId?tenantLabel(a.tenantId):''].join(' ').toLowerCase().includes(q)
+  })
+  return rows.sort((a,b)=>f.sort==='oldest'?a.at.localeCompare(b.at):b.at.localeCompare(a.at))
+}
+
+// ---------------------------------------------------------------- security
+export type OperatorSummary={actor:string;actions:number;sessions:number;problems:number;firstAt:string;lastAt:string;lastAction:string}
+/** Operators seen in the platform audit (who used this workspace in this browser). Not an identity directory. */
+export function platformOperators(platform:PlatformStore):OperatorSummary[]{
+  const map=new Map<string,OperatorSummary>()
+  for(const a of platform.audit){
+    const cur=map.get(a.actor)||{actor:a.actor,actions:0,sessions:0,problems:0,firstAt:a.at,lastAt:a.at,lastAction:a.action}
+    if(a.targetType==='session'){if(a.action==='session.start')cur.sessions++}else cur.actions++
+    if(a.outcome!=='success')cur.problems++
+    if(a.at<cur.firstAt)cur.firstAt=a.at
+    if(a.at>=cur.lastAt){cur.lastAt=a.at;cur.lastAction=a.action}
+    map.set(a.actor,cur)
+  }
+  return [...map.values()].sort((a,b)=>b.lastAt.localeCompare(a.lastAt))
+}
+const SECURITY_ACTIONS=new Set(['session.start','session.end','session.expired','tenant.suspend','tenant.reactivate','settings.update','feature.disable'])
+/** Security-relevant subset of the trail: sessions, refused or failed actions, access-changing operations. */
+export function securityEvents(trail:PlatformAuditEntry[],limit=25){
+  return trail.filter(a=>SECURITY_ACTIONS.has(a.action)||a.outcome!=='success').slice(0,limit)
+}
+
+// ---------------------------------------------------------------- monitoring alerts
+export type AlertSeverity='danger'|'warning'|'info'
+export type PlatformAlert={id:string;severity:AlertSeverity;title:string;detail:string;link:string;tenantId?:string}
+export const STALE_TICKET_DAYS=7,ALERT_DAYS=3
+const SEVERITY_ORDER:Record<AlertSeverity,number>={danger:0,warning:1,info:2}
+/** Alerts derived only from stored records. No server, uptime or payment signal is implied. */
+export function platformAlerts(saas:SaaSStore|null,platform:PlatformStore,now:Date):PlatformAlert[]{
+  const out:PlatformAlert[]=[]
+  if(saas){
+    const rows=companyRows(saas,now)
+    for(const r of rows){
+      if(r.status!=='active')continue
+      const base={tenantId:r.id,link:`/platform/subscriptions?tenant=${encodeURIComponent(r.id)}`}
+      if(r.subStatus==='none')out.push({...base,id:`sub-none-${r.id}`,severity:'danger',title:`${r.name}: obuna yo‘q`,detail:'Faol kompaniyada obuna yozuvi topilmadi; faqat asosiy modullar ochiq.'})
+      else if(r.subStatus==='expired')out.push({...base,id:`sub-expired-${r.id}`,severity:'danger',title:`${r.name}: obuna muddati o‘tgan`,detail:`${r.endsAt?r.endsAt.slice(0,10)+' da tugagan. ':''}Reja modullari yopiq.`})
+      else if(r.subStatus==='suspended')out.push({...base,id:`sub-suspended-${r.id}`,severity:'warning',title:`${r.name}: obuna to‘xtatilgan`,detail:'Kompaniya faol, lekin obuna to‘xtatilgan.'})
+      else if((r.subStatus==='trial'||r.subStatus==='grace')&&r.daysLeft!==null&&r.daysLeft<=ALERT_DAYS)out.push({...base,id:`sub-ending-${r.id}`,severity:'warning',title:`${r.name}: ${r.subStatus==='trial'?'sinov':'imtiyoz davri'} ${r.daysLeft} kunda tugaydi`,detail:`${r.endsAt?.slice(0,10)} gacha.`})
+    }
+    const suspended=rows.filter(r=>r.status==='suspended').length
+    if(suspended)out.push({id:'tenants-suspended',severity:'info',title:`${suspended} ta kompaniya to‘xtatilgan`,detail:'A’zolari tizimga kira olmaydi; yozuvlar saqlanadi.',link:'/platform/companies'})
+  }
+  const open=platform.tickets.filter(t=>t.status!=='resolved'&&t.status!=='closed')
+  const urgent=open.filter(t=>t.priority==='urgent').length,high=open.filter(t=>t.priority==='high').length
+  if(urgent)out.push({id:'tickets-urgent',severity:'danger',title:`${urgent} ta shoshilinch murojaat ochiq`,detail:'Support markazida hal qilinmagan.',link:'/platform/support'})
+  if(high)out.push({id:'tickets-high',severity:'warning',title:`${high} ta yuqori ustuvorlikdagi murojaat ochiq`,detail:'Support markazida hal qilinmagan.',link:'/platform/support'})
+  const stale=open.filter(t=>now.getTime()-Date.parse(t.updatedAt)>STALE_TICKET_DAYS*DAY).length
+  if(stale)out.push({id:'tickets-stale',severity:'warning',title:`${stale} ta murojaat ${STALE_TICKET_DAYS} kundan beri yangilanmagan`,detail:'Javobsiz qolgan murojaatlarni tekshiring.',link:'/platform/support'})
+  const problems=platform.audit.filter(a=>a.outcome!=='success'&&now.getTime()-Date.parse(a.at)<=DAY).length
+  if(problems)out.push({id:'audit-problems',severity:'warning',title:`So‘nggi 24 soatda ${problems} ta rad etilgan yoki xato amal`,detail:'Audit jurnalida natija filtri bilan ko‘ring.',link:'/platform/audit'})
+  if(platform.audit.length>=PLATFORM_AUDIT_LIMIT*.9)out.push({id:'audit-capacity',severity:'warning',title:`Demo audit hajmi ${platform.audit.length}/${PLATFORM_AUDIT_LIMIT}`,detail:'Chegaradan keyin eng eski yozuvlar tushib qoladi; doimiy audit ombori backendda.',link:'/platform/audit'})
+  if(platform.tickets.length>=PLATFORM_TICKET_LIMIT*.9)out.push({id:'ticket-capacity',severity:'warning',title:`Demo murojaatlar hajmi ${platform.tickets.length}/${PLATFORM_TICKET_LIMIT}`,detail:'Chegaraga yetganda yangi murojaat yaratilmaydi.',link:'/platform/support'})
+  return out.sort((a,b)=>SEVERITY_ORDER[a.severity]-SEVERITY_ORDER[b.severity]||a.title.localeCompare(b.title))
+}
+
+// ---------------------------------------------------------------- trends
+/** Company registrations per calendar month (UTC), oldest first, including the current month. */
+export function registrationsByMonth(saas:SaaSStore,now:Date,months=6){
+  const out:{key:string;count:number}[]=[]
+  for(let i=months-1;i>=0;i--){
+    const d=new Date(Date.UTC(now.getUTCFullYear(),now.getUTCMonth()-i,1))
+    out.push({key:`${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}`,count:0})
+  }
+  const index=new Map(out.map((m,i)=>[m.key,i]))
+  for(const t of saas.tenants){const i=index.get(t.createdAt.slice(0,7));if(i!==undefined)out[i].count++}
+  return out
+}
+export function ticketCounts(platform:PlatformStore){
+  const by=Object.fromEntries(TICKET_STATUSES.map(s=>[s,0])) as Record<TicketStatus,number>
+  for(const t of platform.tickets)by[t.status]++
+  return {...by,open_total:by.open+by.in_progress+by.waiting}
 }
 
 // ---------------------------------------------------------------- future backend contracts (types only)

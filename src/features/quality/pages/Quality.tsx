@@ -3,7 +3,8 @@ import {useNavigate,useSearchParams} from 'react-router-dom'
 import {useApp} from '../../../app/providers/AppProvider/AppContext'
 import {Card,Confirm,Drawer,Empty,Field,FilterSelect,Icon,Input,KPI,Modal,PageHeader,ResourceTable,SectionTitle,Select,StatusBadge,Textarea,Toggle,positive,required,useForm,useRecordParam,useSearchParamState} from '../../../shared/ui'
 import type {QualityAlert,QualityCheck,QualityControlPoint} from '../../../types'
-import {sourceLabel} from '../../../domain/actions'
+import {capaCloseBlocker,capaOverdue,sourceLabel} from '../../../domain/actions'
+import {CapaPanel,capaLate} from '../components/Capa'
 import {awaitsRework,isDefect,outputByDay,reworkOrders,scrapEvents} from '../../../domain/manufacturingEngine'
 import {addDays,periodStart,todayISO} from '../../../utils/dates'
 import {compactMoney,num} from '../../../utils/format'
@@ -241,6 +242,7 @@ function CapaDrawer({alert,onClose}:{alert:QualityAlert;onClose:()=>void}){
   return <Drawer open onClose={onClose} title={alert.title} eyebrow="NCR / CAPA" icon="shield" subtitle={`${sourceLabel(s,alert.sourceId)} · ochilgan ${alert.createdAt}`} size="lg" headerExtra={<><StatusBadge>{alert.status}</StatusBadge><StatusBadge>{alert.severity}</StatusBadge></>}
     actions={canEdit?closed?<button type="button" className="secondary-glass-btn" onClick={()=>app.updateEntity('qualityAlerts',alert.id,{status:'Jarayonda'})}><Icon name="undo" size={15}/>Qayta ochish</button>:<><button type="button" className="secondary-glass-btn" disabled={!form.dirty} onClick={save}>Saqlash</button><span className="spacer"/><button type="button" className="primary-glass-btn" onClick={()=>form.submit(()=>{setConfirmClose(true);return true})}><Icon name="check" size={16}/>CAPA’ni yopish</button></>:undefined}>
     <div className="inline-note warning"><Icon name="warning"/>{alert.reason}</div>
+    <CapaPanel alert={alert}/>
     <div className="form-grid">
       <Field label="Mas’ul"><Select value={form.values.ownerId} disabled={!canEdit||closed} onChange={v=>form.set('ownerId',v)}>{s.employees.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}</Select></Field>
       <Field label="Severity"><Select value={form.values.severity} disabled={!canEdit||closed} onChange={v=>form.set('severity',v as QualityAlert['severity'])}>{['Past','O‘rta','Yuqori'].map(x=><option key={x} value={x}>{x}</option>)}</Select></Field>
@@ -250,7 +252,7 @@ function CapaDrawer({alert,onClose}:{alert:QualityAlert;onClose:()=>void}){
       <Field className="span-2" label="4. Verification / effectiveness" required error={form.error('resolution')}><Textarea disabled={!canEdit||closed} {...form.input('resolution')}/></Field>
     </div>
     <SectionTitle title="Audit tarixi"/><ActivityPanel sources={[alert.title,sourceLabel(s,alert.sourceId)]}/>
-    <Confirm open={confirmClose} onClose={()=>setConfirmClose(false)} onConfirm={()=>{const v=form.values;if(app.updateEntity('qualityAlerts',alert.id,{...v,status:'Yopilgan'}).ok)onClose()}} title="CAPA yopilsinmi?" text="NCR “Yopilgan” holatiga o‘tadi. Kerak bo‘lsa keyin qayta ochish mumkin." confirmText="Yopish"/>
+    <Confirm open={confirmClose} onClose={()=>setConfirmClose(false)} onConfirm={()=>{const v=form.values;if(app.updateEntity('qualityAlerts',alert.id,{...v,status:'Yopilgan'}).ok)onClose()}} title="CAPA yopilsinmi?" text={capaCloseBlocker(alert)||"NCR “Yopilgan” holatiga o‘tadi. Kerak bo‘lsa keyin qayta ochish mumkin."} confirmText="Yopish"/>
   </Drawer>
 }
 
@@ -258,10 +260,12 @@ function CapaBoard(){
   const s=useApp().state,navigate=useNavigate()
   const cols:QualityAlert['status'][]=['Ochiq','Jarayonda','Yopilgan']
   const steps=(a:QualityAlert)=>[a.rootCause,a.correctiveAction,a.preventiveAction,a.resolution].filter(Boolean).length
+  const overdue=capaOverdue(s,todayISO())
   return <div className="page-stack">
     <PageHeader title="CAPA" subtitle="NCR’lar bosqich bo‘yicha"/>
+    {overdue.length>0&&<div className="inline-note danger" role="alert"><Icon name="warning"/><span><b>{overdue.length} ta CAPA amali muddati o‘tgan:</b> {overdue.slice(0,4).map(o=>`${o.action.description} (${o.action.dueDate})`).join('; ')}{overdue.length>4?' …':''}</span></div>}
     <div className="kanban">{cols.map(c=>{const items=s.qualityAlerts.filter(a=>a.status===c);return <section key={c} className="kanban-col"><header><b>{c}</b><span className="tab-count">{items.length}</span></header>
-      {items.length?items.map(a=><button type="button" key={a.id} className="kanban-card" onClick={()=>navigate(`/quality?view=alerts&id=${a.id}`)}><b>{a.title}</b><small>{a.reason}</small><div className="kanban-meta"><StatusBadge>{a.severity}</StatusBadge><span className="soft-meta">CAPA {steps(a)}/4</span></div><div className="capa-steps" aria-label={`CAPA ${steps(a)} / 4`}>{[0,1,2,3].map(i=><i key={i} className={i<steps(a)?'done':''}/>)}</div></button>):<Empty compact title="Bo‘sh"/>}
+      {items.length?items.map(a=><button type="button" key={a.id} className="kanban-card" onClick={()=>navigate(`/quality?view=alerts&id=${a.id}`)}><b>{a.title}</b><small>{a.reason}</small><div className="kanban-meta">{(a.capa||[]).some(c=>capaLate(c))&&<StatusBadge tone="danger">Muddati o‘tgan</StatusBadge>}<StatusBadge>{a.severity}</StatusBadge><span className="soft-meta">CAPA {steps(a)}/4</span></div><div className="capa-steps" aria-label={`CAPA ${steps(a)} / 4`}>{[0,1,2,3].map(i=><i key={i} className={i<steps(a)?'done':''}/>)}</div></button>):<Empty compact title="Bo‘sh"/>}
     </section>})}</div>
   </div>
 }

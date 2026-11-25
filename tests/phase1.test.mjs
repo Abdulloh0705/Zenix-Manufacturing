@@ -469,7 +469,7 @@ test('P1-30: unbuild of a transferred lot uses the BOM snapshot of the order tha
   const mo=orderOf(s,id)
   // Other p1 lots are on hold, so FEFO moves exactly this order's lot.
   s={...s,lots:s.lots.map(l=>l.itemId==='p1'&&l.code!==mo.lot?{...l,status:'hold'}:l)}
-  s=ok(A.transferStock(s,ctx(s),'p1','w3','w4',10))
+  s=ok(A.transferStock(s,ctx(s),'p1','w3','w4',10,undefined,{reason:'Tayyor mahsulot zaxirasini ko‘chirish'}))
   const copy=s.lots.find(l=>l.code===mo.lot&&l.warehouseId==='w4')
   assert.equal(copy.sourceType,'production','the transferred copy keeps its origin')
   assert.equal(findTraceOrder(s,mo.lot).id,id)

@@ -1,4 +1,4 @@
-import {useMemo,useState} from 'react'
+import {useMemo,useRef,useState} from 'react'
 import {useNavigate,useSearchParams} from 'react-router-dom'
 import {useApp} from '../../../app/providers/AppProvider/AppContext'
 import {Card,Confirm,Drawer,Empty,ExportPermission,Field,FilterSelect,Icon,InfoGrid,Input,KPI,Modal,PageHeader,ResourceTable,Select,StatusBadge,Tabs,Textarea,Toggle,required,useForm,useRecordParam,useSearchParamState} from '../../../shared/ui'
@@ -9,6 +9,7 @@ import {assignRoleBlocker,employeeBranchIds,homeOf,employeeRemovalBlocker,isSupe
 import {SCHEMA_VERSION} from '../../../domain/migrations'
 import {ACTIVITY_LIMIT} from '../../../domain/actions'
 import {AUTH_EVENT_LIMIT} from '../../../domain/auth'
+import {employeeWorkCenterOptions,usesWorkCenter,workCenterError} from '../../../domain/employeeForm'
 import {TIMEZONE_HINT,stamp,timeZoneOptions} from '../../../utils/dates'
 import {fileSize,initials} from '../../../utils/format'
 import {PermissionMatrix} from '../components/PermissionMatrix'
@@ -132,53 +133,56 @@ function CreateUserModal({onClose,onCreated}:{onClose:()=>void;onCreated:(employ
   const myScope=roleOf(s,me.id)?.scope
   const activeBranches=s.branches.filter(b=>b.status!=='Arxiv')
   const branchOptions=myScope==='all'?activeBranches:activeBranches.filter(b=>employeeBranchIds(s,me).includes(b.id))
-  const siteIn=(branchId:string)=>({workCenters:s.workCenters.filter(w=>!branchId||!w.branchId||w.branchId===branchId),warehouses:s.warehouses.filter(w=>w.status==='Faol'&&(!branchId||w.branchId===branchId))})
-  const initialBranch=branchOptions.find(b=>b.id===homeOf(s,me).branchId)?.id||branchOptions[0]?.id||''
+  const siteIn=(branchId:string)=>({workCenters:s.workCenters.filter(w=>w.status!=='Arxiv'&&w.branchId===branchId),warehouses:s.warehouses.filter(w=>w.status==='Faol'&&w.branchId===branchId)})
+  // Own branch first, then the company default branch — never “whichever branch was created last” (P4-U-01).
+  const initialBranch=branchOptions.find(b=>b.id===homeOf(s,me).branchId)?.id||branchOptions.find(b=>b.id===s.settings.defaultBranchId)?.id||branchOptions[0]?.id||''
   const [mode,setMode]=useState<'existing'|'new'>(free.length?'existing':'new')
   const [busy,setBusy]=useState(false),[error,setError]=useState('')
+  const busyRef=useRef(false)
   const [created,setCreated]=useState<{employeeId:string;username:string;password:string}|null>(null)
-  const [pendingEmployeeId,setPendingEmployeeId]=useState<string|null>(null)
-  const form=useForm({employeeId:free[0]?.id||'',name:'',department:'Production',roleId:roles.find(r=>r.key==='operator')?.id||roles[0]?.id||'',branchId:initialBranch,workCenterId:siteIn(initialBranch).workCenters.find(w=>w.id===me.workCenterId)?.id||siteIn(initialBranch).workCenters[0]?.id||'',warehouseId:siteIn(initialBranch).warehouses.find(w=>w.id===me.warehouseId)?.id||'',username:'',email:'',password:tempPassword()},v=>({
+  const pendingEmployeeIdRef=useRef<string|null>(null)
+  const form=useForm({employeeId:free[0]?.id||'',name:'',department:'Production',roleId:roles.find(r=>r.key==='operator')?.id||roles[0]?.id||'',branchId:initialBranch,workCenterId:'',warehouseId:siteIn(initialBranch).warehouses.find(w=>w.id===me.warehouseId)?.id||'',username:'',email:'',password:tempPassword()},v=>({
     employeeId:mode==='existing'&&!v.employeeId?'Xodimni tanlang':undefined,
     name:mode==='new'?(required(v.name,'F.I.Sh')||(v.name.trim().split(/\s+/).length<2?'Ism va familiyani kiriting':undefined)):undefined,
     roleId:mode==='new'&&!v.roleId?'Rolni tanlang':undefined,
     branchId:mode==='new'&&branchOptions.length&&!v.branchId?'Filialni tanlang':undefined,
+    workCenterId:mode==='new'?workCenterError(s,{department:v.department,roleId:v.roleId,branchIds:[v.branchId].filter(Boolean),workCenterId:v.workCenterId}):undefined,
     username:required(v.username,'Login'),password:required(v.password,'Parol'),
   }))
   const submit=()=>form.submit(v=>{
-    if(busy)return false
+    if(busyRef.current)return false
     if(!app.can('users','create')||mode==='new'&&!app.can('employees','create')){setError('Xodim va akkaunt yaratish huquqi kerak');return false}
     const invalid=validateUsername(v.username)||validatePassword(app.auth.policy,v.password)
     if(invalid){setError(invalid);return false}
     if(findAccount({version:1,accounts:app.auth.accounts,policy:app.auth.policy,events:[],attempts:{}},v.username)||v.email&&findAccount({version:1,accounts:app.auth.accounts,policy:app.auth.policy,events:[],attempts:{}},v.email)){setError('Bu login yoki e-pochta band');return false}
     void (async()=>{
-      setBusy(true);setError('')
+      busyRef.current=true;setBusy(true);setError('')
       try{
-        let employeeId=mode==='new'?pendingEmployeeId||'':v.employeeId
+        let employeeId=mode==='new'?pendingEmployeeIdRef.current||'':v.employeeId
         if(mode==='new'&&!employeeId){
           const created=app.createEntity('employees',{name:v.name.trim(),department:v.department,roleId:v.roleId,...(v.branchId?{branchId:v.branchId}:{}),workCenterId:v.workCenterId,warehouseId:v.warehouseId||undefined,shift:'A',status:'Faol',hourlyCost:0,attendance:100,efficiency:0})
           if(!created.ok||!created.id){setError(created.message);return}
           employeeId=created.id
-          setPendingEmployeeId(employeeId)
+          pendingEmployeeIdRef.current=employeeId
         }
         const r=await app.createUser({employeeId,username:v.username.trim(),email:v.email.trim()||undefined,password:v.password,mustChangePassword:true})
         if(r.ok)setCreated({employeeId,username:v.username.trim(),password:v.password});else setError(mode==='new'?`${r.message}. Xodim profili saqlandi; shu oynada qayta urinishingiz mumkin`:r.message)
-      }finally{setBusy(false)}
+      }finally{busyRef.current=false;setBusy(false)}
     })()
     return false
   })
   if(created)return <Modal open onClose={()=>onCreated(created.employeeId)} title="Kirish ma’lumotlari" size="sm" footer={<button type="button" className="primary-glass-btn" onClick={()=>onCreated(created.employeeId)}>Yopish</button>}><div className="form-stack"><p>Bu vaqtinchalik parolni xodimga xavfsiz yo‘l bilan bering. Bu oynadan chiqqach parol qayta ko‘rsatilmaydi.</p><InfoGrid items={[{label:'Login',value:created.username},{label:'Vaqtinchalik parol',value:created.password}]}/></div></Modal>
   return <Modal open onClose={onClose} title="Foydalanuvchi qo‘shish" size="md"
-    footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Bekor qilish</button><button type="button" className="primary-glass-btn" disabled={busy} onClick={submit}>{busy?'Saqlanmoqda…':<><Icon name="check" size={16}/>Yaratish</>}</button></>}>
+    footer={<><button type="button" className="secondary-glass-btn" disabled={busy} onClick={onClose}>Bekor qilish</button><button type="button" className="primary-glass-btn" disabled={busy} onClick={submit}>{busy?'Saqlanmoqda…':<><Icon name="check" size={16}/>Yaratish</>}</button></>}>
     <div className="form-stack">
       <Tabs items={[{value:'existing',label:'Mavjud xodim',count:free.length},{value:'new',label:'Yangi xodim'}]} active={mode} onChange={v=>setMode(v as 'existing'|'new')} ariaLabel="Xodim manbai"/>
       {mode==='existing'?(free.length?<Field label="Xodim" required error={form.error('employeeId')} hint="Akkaunti yo‘q va siz boshqara oladigan xodimlar"><Select value={form.values.employeeId} onChange={v=>form.set('employeeId',v)}>{free.map(e=><option key={e.id} value={e.id}>{e.name} · {roleOf(s,e.id)?.name||'rolsiz'}</option>)}</Select></Field>:<div className="inline-note"><Icon name="info"/><span>Akkauntsiz xodim yo‘q — “Yangi xodim”ni tanlang.</span></div>)
         :<div className="form-grid">
           <Field label="F.I.Sh" required error={form.error('name')}><Input {...form.input('name')} autoFocus/></Field>
-          <Field label="Bo‘lim"><Select value={form.values.department} onChange={v=>form.set('department',v)}>{['Production','Quality','Maintenance','Warehouse','Procurement','Sales','Management'].map(x=><option key={x} value={x}>{x}</option>)}</Select></Field>
-          <Field className="span-2" label="Rol" required error={form.error('roleId')} hint="Faqat o‘zingizdan past darajadagi rollar"><Select value={form.values.roleId} onChange={v=>form.set('roleId',v)}>{roles.map(r=><option key={r.id} value={r.id}>{r.name}</option>)}</Select></Field>
-          <Field label="Filial" required error={form.error('branchId')} hint="Faqat o‘zingiz boshqaradigan filiallar"><Select value={form.values.branchId} onChange={v=>{const site=siteIn(v);form.set('branchId',v);form.set('workCenterId',site.workCenters.find(w=>w.id===form.values.workCenterId)?.id||site.workCenters[0]?.id||'');if(!site.warehouses.some(w=>w.id===form.values.warehouseId))form.set('warehouseId','')}}>{branchOptions.map(b=><option key={b.id} value={b.id}>{b.name}</option>)}</Select></Field>
-          <Field label="Ish markazi" hint={siteIn(form.values.branchId).workCenters.length?'Operator roli uchun majburiy':'Bu filialda ish markazi yo‘q — operator uchun avval Uskunalar bo‘limida yarating'}><Select value={form.values.workCenterId} onChange={v=>form.set('workCenterId',v)}><option value="">Tanlanmagan</option>{siteIn(form.values.branchId).workCenters.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</Select></Field>
+          <Field label="Bo‘lim"><Select value={form.values.department} onChange={v=>{form.set('department',v);if(!usesWorkCenter(s,{department:v,roleId:form.values.roleId}))form.set('workCenterId','')}}>{['Production','Quality','Maintenance','Warehouse','Procurement','Sales','Management'].map(x=><option key={x} value={x}>{x}</option>)}</Select></Field>
+          <Field className="span-2" label="Rol" required error={form.error('roleId')} hint="Faqat o‘zingizdan past darajadagi rollar"><Select value={form.values.roleId} onChange={v=>{form.set('roleId',v);if(!usesWorkCenter(s,{department:form.values.department,roleId:v}))form.set('workCenterId','')}}>{roles.map(r=><option key={r.id} value={r.id}>{r.name}</option>)}</Select></Field>
+          <Field label="Filial" required error={form.error('branchId')} hint="Faqat o‘zingiz boshqaradigan filiallar"><Select value={form.values.branchId} onChange={v=>{const site=siteIn(v);form.set('branchId',v);if(!site.workCenters.some(w=>w.id===form.values.workCenterId))form.set('workCenterId','');if(!site.warehouses.some(w=>w.id===form.values.warehouseId))form.set('warehouseId','')}}>{branchOptions.map(b=><option key={b.id} value={b.id}>{b.name}</option>)}</Select></Field>
+          <Field label="Ish markazi" required={s.roles.find(r=>r.id===form.values.roleId)?.scope==='workcenter'} error={form.error('workCenterId')} hint={siteIn(form.values.branchId).workCenters.length?'Operator roli uchun majburiy':'Bu filialda ish markazi yo‘q — operator uchun avval Uskunalar bo‘limida yarating'}><Select value={form.values.workCenterId} disabled={!usesWorkCenter(s,form.values)} onChange={v=>form.set('workCenterId',v)}><option value="">Tanlanmagan</option>{employeeWorkCenterOptions(s,{...form.values,branchIds:[form.values.branchId].filter(Boolean)}).filter(w=>siteIn(form.values.branchId).workCenters.some(x=>x.id===w.id)).map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</Select></Field>
           <Field label="Ish ombori"><Select value={form.values.warehouseId} onChange={v=>form.set('warehouseId',v)}><option value="">Filial bo‘yicha</option>{siteIn(form.values.branchId).warehouses.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</Select></Field>
         </div>}
       <div className="form-grid">
@@ -260,17 +264,35 @@ function ResetPasswordModal({account,onClose}:{account:Account;onClose:()=>void}
   </Modal>
 }
 
-export function CreateAccountForEmployee({employee,onClose}:{employee:Employee;onClose:()=>void}){
+export function CreateAccountForEmployee({employee,onClose,afterCreate=false}:{employee:Employee;onClose:()=>void;
+  /** Opened right after the employee profile was saved ("Saqlash va login yaratish"): say the profile is already kept. */
+  afterCreate?:boolean}){
   const app=useApp()
-  const [username,setUsername]=useState(''),[email,setEmail]=useState(''),[password,setPassword]=useState(tempPassword()),[busy,setBusy]=useState(false),[error,setError]=useState('')
+  const [username,setUsername]=useState(''),[email,setEmail]=useState(''),[password,setPassword]=useState(tempPassword()),[busy,setBusy]=useState(false),[error,setError]=useState(''),[tried,setTried]=useState(false)
   const [created,setCreated]=useState<{username:string;password:string}|null>(null)
-  const submit=async()=>{setBusy(true);setError('');try{const r=await app.createUser({employeeId:employee.id,username:username.trim(),email:email.trim()||undefined,password,mustChangePassword:true});if(r.ok)setCreated({username:username.trim(),password});else setError(r.message)}finally{setBusy(false)}}
+  const busyRef=useRef(false)
+  // The same checks createUser makes, shown beside each field before anything is sent.
+  const store={version:1 as const,accounts:app.auth.accounts,policy:app.auth.policy,events:[],attempts:{}}
+  const errors={
+    username:!username.trim()?'Login majburiy':validateUsername(username)||(findAccount(store,username)?'Bu login band':undefined),
+    email:email.trim()&&!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())?'E-pochta noto‘g‘ri':email.trim()&&findAccount(store,email.trim())?'Bu e-pochta boshqa akkauntda':undefined,
+    password:validatePassword(app.auth.policy,password)||undefined,
+  }
+  const show=(key:keyof typeof errors)=>tried?errors[key]:undefined
+  const submit=async()=>{
+    setTried(true)
+    if(busyRef.current||Object.values(errors).some(Boolean))return
+    busyRef.current=true;setBusy(true);setError('')
+    try{const r=await app.createUser({employeeId:employee.id,username:username.trim(),email:email.trim()||undefined,password,mustChangePassword:true});if(r.ok)setCreated({username:username.trim(),password});else setError(r.message)}
+    finally{busyRef.current=false;setBusy(false)}
+  }
   if(created)return <Modal open onClose={onClose} title="Kirish ma’lumotlari" subtitle={employee.name} size="sm" footer={<button type="button" className="primary-glass-btn" onClick={onClose}>Yopish</button>}><div className="form-stack"><p>Bu vaqtinchalik parolni xodimga xavfsiz yo‘l bilan bering. Bu oynadan chiqqach parol qayta ko‘rsatilmaydi.</p><InfoGrid items={[{label:'Login',value:created.username},{label:'Vaqtinchalik parol',value:created.password}]}/></div></Modal>
-  return <Modal open onClose={onClose} title="Akkaunt ochish" subtitle={employee.name} size="sm" footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Bekor qilish</button><button type="button" className="primary-glass-btn" disabled={busy||!username.trim()} onClick={()=>void submit()}><Icon name="check" size={15}/>Yaratish</button></>}>
+  return <Modal open onClose={onClose} title="Akkaunt ochish" subtitle={employee.name} size="sm" footer={<><button type="button" className="secondary-glass-btn" disabled={busy} onClick={onClose}>{afterCreate?'Keyinroq':'Bekor qilish'}</button><button type="button" className="primary-glass-btn" disabled={busy} aria-busy={busy||undefined} onClick={()=>void submit()}>{busy?'Yaratilmoqda…':<><Icon name="check" size={15}/>Yaratish</>}</button></>}>
     <div className="form-stack">
-      <Field label="Login" required><Input value={username} onChange={e=>setUsername(e.target.value)} autoFocus spellCheck={false} autoComplete="off"/></Field>
-      <Field label="E-pochta"><Input type="email" value={email} onChange={e=>setEmail(e.target.value)} autoComplete="off"/></Field>
-      <Field label="Vaqtinchalik parol"><div className="input-affix"><input className="ui-input mono" value={password} onChange={e=>setPassword(e.target.value)} spellCheck={false} autoComplete="new-password"/><button type="button" className="password-toggle" onClick={()=>setPassword(tempPassword())} aria-label="Yangi parol yaratish"><Icon name="refresh" size={15}/></button></div></Field>
+      {afterCreate&&<div className="inline-note"><Icon name="check"/><span>Xodim profili saqlandi. Login keyinroq ham “Akkaunt ochish” orqali yaratilishi mumkin.</span></div>}
+      <Field label="Login" required error={show('username')} hint="Telefon (+998…) yoki 3–32 lotin belgi"><Input value={username} onChange={e=>setUsername(e.target.value)} autoFocus spellCheck={false} autoComplete="off"/></Field>
+      <Field label="E-pochta" error={show('email')}><Input type="email" value={email} onChange={e=>setEmail(e.target.value)} autoComplete="off"/></Field>
+      <Field label="Vaqtinchalik parol" required error={show('password')} hint={`Kamida ${app.auth.policy.minPasswordLength} belgi`}><div className="input-affix"><input className="ui-input mono" value={password} onChange={e=>setPassword(e.target.value)} spellCheck={false} autoComplete="new-password"/><button type="button" className="password-toggle" onClick={()=>setPassword(tempPassword())} aria-label="Yangi parol yaratish"><Icon name="refresh" size={15}/></button></div></Field>
       {error&&<div className="inline-note danger" role="alert"><Icon name="warning"/><span>{error}</span></div>}
     </div>
   </Modal>

@@ -1,11 +1,11 @@
 import {cleanup,flush,key} from './helpers'
-import {mountApp} from './appFixture'
+import {mountApp,seedState} from './appFixture'
 import test,{afterEach} from 'node:test'
 import assert from 'node:assert/strict'
 import {DOCK_H,BOTTOM_SAFE,TOP_SAFE,DOCK_POSITION_KEY,dockBounds,ratioFromTop,readRatio,topFromRatio} from '../../src/layout/AppLayout/aiDock'
 import {buildSearchIndex,searchRecords} from '../../src/layout/AppLayout/searchIndex'
 import {notificationModule,visibleNotifications,unreadCount} from '../../src/layout/AppLayout/notificationsView'
-import {createInitialState} from '../../src/data/mockData'
+import {createSeedState} from '../../src/data/mockData'
 import type {NotificationItem} from '../../src/types'
 
 afterEach(cleanup)
@@ -44,7 +44,7 @@ test('AI dock: keyboard moves it (persisted), Enter opens the panel above it, Es
 })
 
 test('search index: real records with deep links; serials only from serial lots; permissions respected',()=>{
-  const s=createInitialState()
+  const s=createSeedState()
   const all=buildSearchIndex(s,()=>true)
   const types=new Set(all.map(r=>r.type))
   for(const t of ['Mahsulot','Xomashyo','Ombor','Yetkazib beruvchi','Mijoz','Uskuna','Xodim'])assert.ok(types.has(t),`${t} indexed`)
@@ -52,9 +52,28 @@ test('search index: real records with deep links; serials only from serial lots;
   assert.equal(all.filter(r=>r.type==='Serial').length,s.lots.filter(l=>l.kind==='serial').length,'no invented serials')
   const onlyMaterials=buildSearchIndex(s,m=>m==='materials')
   assert.ok(onlyMaterials.length>0&&onlyMaterials.every(r=>r.path.startsWith('/materials')))
+  const warehouseOnly=buildSearchIndex(s,m=>m==='warehouse')
+  assert.ok(warehouseOnly.some(r=>r.type==='Lot'))
+  assert.ok(warehouseOnly.every(r=>r.path.startsWith('/warehouse')),'search results never lead to a forbidden Reports route')
   assert.deepEqual(searchRecords(all,'  '),[])
   const hit=searchRecords(all,s.rawMaterials[0].sku)
   assert.equal(hit[0].path,`/materials?view=all&id=${s.rawMaterials[0].id}`)
+})
+
+test('warehouse lot and serial rows do not link into Reports without Reports permission',async()=>{
+  const onlyWarehouse=()=>{const s=createSeedState();return {...s,roles:s.roles.map(r=>r.id==='role2'?{...r,permissions:{warehouse:{view:true}}}:r)}}
+  seedState(onlyWarehouse)
+  await mountApp('/warehouse?view=lots','em2')
+  assert.equal(document.querySelector('.table-scroll table.is-interactive'),null)
+  assert.ok(document.querySelector('.table-scroll tbody tr'))
+  await cleanup()
+  seedState(onlyWarehouse)
+  await mountApp('/warehouse?view=serials','em2')
+  assert.equal(document.querySelector('.table-scroll table.is-interactive'),null)
+  await cleanup()
+  seedState(onlyWarehouse)
+  await mountApp('/reports','em2')
+  assert.match(document.body.textContent||'',/Ruxsat mavjud emas/,'direct Reports route is denied without Reports permission')
 })
 
 const n=(o:Partial<NotificationItem>):NotificationItem=>({id:'n',type:'production',title:'t',text:'x',severity:'info',read:false,date:'2026-10-26 10:00',...o})

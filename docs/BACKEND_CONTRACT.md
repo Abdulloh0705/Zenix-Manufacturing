@@ -51,9 +51,11 @@ The `/platform` workspace calls these operations locally today; a server must ow
 | --- | --- |
 | `GET /platform/v1/overview` | Aggregated from tenant, membership, subscription and verified invoice tables; MRR only from verified payments. |
 | `POST /platform/v1/tenants/:id/status` | Platform RBAC, reason ≥ 5 chars, idempotency key, tenant + audit row in one transaction; revoke tenant sessions on suspension. |
+| `PATCH /platform/v1/tenants/:id` | Platform display name only (2–80 chars, unique case-insensitive, secret-like text rejected), reason ≥ 5 chars, tenant + audit row in one transaction. The tenant's own ERP company profile is not changed. Company creation stays owner self-registration (or a server-issued invite); no hard delete without a retention policy. |
 | `POST /platform/v1/tenants/:id/subscription-overrides` | Plan version, status (`active`/`grace`/`expired`/`suspended`, never `trial`), server-computed grace end, reason, audit. Not a payment. |
 | `POST /platform/v1/tenants/:id/feature-restrictions` | Restrict or restore a plan module only; entitlement check = plan ∧ ¬restriction ∧ RBAC on every request. |
 | `PUT /platform/v1/settings` | Versioned, validated policy (trial days 1–60, grace days 1–30, registration open/closed); applies to future registrations. |
 | `/platform/v1/support/tickets` | Tickets linked to inbound channel messages; notes redact secrets; support access to tenant data needs consent, purpose, expiry and audit. |
 | `GET /platform/v1/audit` | Append-only, hash-chained rows with server timestamp, authenticated actor, correlation ID and permitted IP/device metadata. |
 | `GET /platform/v1/health` | Monitoring-agent data (API, DB, workers, error rate, uptime); never computed in the browser. |
+| `GET /platform/v1/alerts` | Server-side equivalent of `platformAlerts` (subscription expiry, missing subscription, urgent/stale tickets, refused actions, storage capacity) plus infrastructure alerts from monitoring. |

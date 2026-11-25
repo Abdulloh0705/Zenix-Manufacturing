@@ -3,20 +3,85 @@ import {useEffect,useMemo,useState} from 'react'
 import * as SaaS from '../../../domain/saas'
 import * as Platform from '../../../domain/platform'
 import {storage} from '../../../shared/lib/storage'
-import {Card,Confirm,Drawer,Empty,Field,InfoGrid,Input,Modal,SearchBox,StatusBadge,Textarea,Timeline} from '../../../shared/ui'
+import {Card,Confirm,Drawer,Empty,Field,Icon,InfoGrid,Input,KPI,Modal,SearchBox,StatusBadge,Textarea,Timeline} from '../../../shared/ui'
 import type {Tone} from '../../../shared/ui'
-import {MODULE_LABELS,ReasonDialog,Table,Unavailable,actionLabel,fmtTime,usePlatform} from '../platformShared'
+import {AlertList,MODULE_LABELS,Pager,ReasonDialog,Table,Unavailable,actionLabel,fmtTime,safe,usePaged,usePlatform} from '../platformShared'
 
 declare const __ZENIX_VERSION__:string|undefined
 const tenantName=(saas:SaaS.SaaSStore,id?:string|null)=>id?saas.tenants.find(t=>t.id===id)?.name||id:'—'
 
 // ---------------------------------------------------------------- security & audit
 const OUTCOME_TONE:Record<Platform.AuditOutcome,Tone>={success:'success',denied:'danger',failed:'warning'}
+const OUTCOME_LABEL:Record<Platform.AuditOutcome,string>={success:'Muvaffaqiyatli',denied:'Rad etilgan',failed:'Xato'}
+const TYPE_LABEL:Record<Platform.AuditTargetType,string>={tenant:'Kompaniya',subscription:'Obuna',feature:'Funksiya',settings:'Sozlamalar',ticket:'Support',session:'Sessiya'}
+const typeLabel=(t:string)=>TYPE_LABEL[t as Platform.AuditTargetType]||t
+const EMPTY_AUDIT_FILTER:Required<Platform.AuditFilter>={query:'',type:'all',outcome:'all',actor:'all',from:'',to:'',sort:'newest'}
+
+export function AuditSection(){
+  const {saas,platform}=usePlatform()
+  const [f,setF]=useState(EMPTY_AUDIT_FILTER),[openId,setOpenId]=useState('')
+  const trail=useMemo(()=>Platform.auditTrail(saas,platform),[saas,platform])
+  const actors=useMemo(()=>[...new Set(trail.map(a=>a.actor))].sort(),[trail])
+  const rangeProblem=Platform.auditRangeProblem(f.from||undefined,f.to||undefined)
+  const rows=useMemo(()=>Platform.auditQuery(trail,f,id=>tenantName(saas,id)),[trail,f,saas])
+  const pg=usePaged(rows,JSON.stringify(f),25)
+  const set=<K extends keyof Platform.AuditFilter>(k:K,v:Platform.AuditFilter[K])=>setF(x=>({...x,[k]:v}))
+  const active=JSON.stringify({...f,sort:'newest'})!==JSON.stringify(EMPTY_AUDIT_FILTER)
+  const open=trail.find(a=>a.id===openId)
+  return <div className="page-stack">
+    <p className="inline-note warning" role="note">Bu audit tarixi brauzer xotirasida saqlanadi va brauzer egasi tomonidan o‘zgartirilishi mumkin. U yuridik dalil yoki ishonchli audit hisoblanmaydi. Parollar, hashlar, tiklash chiptalari va maxfiy kalitlar hech qachon yozilmaydi; maxfiyga o‘xshash matn ko‘rsatilmaydi.</p>
+    <Card title="Platforma audit jurnali" subtitle="Kompaniyalarning ichki operatsion auditi bu yerda ko‘rsatilmaydi">
+      <div className="pf-toolbar">
+        <SearchBox value={f.query} onChange={v=>set('query',v)} placeholder="Operator, amal, kompaniya, sabab" ariaLabel="Auditni qidirish"/>
+        <select className="ui-input" aria-label="Obyekt turi" value={f.type} onChange={e=>set('type',e.target.value)}><option value="all">Barcha obyektlar</option>{(Object.keys(TYPE_LABEL) as Platform.AuditTargetType[]).map(t=><option key={t} value={t}>{TYPE_LABEL[t]}</option>)}</select>
+        <select className="ui-input" aria-label="Natija" value={f.outcome} onChange={e=>set('outcome',e.target.value)}><option value="all">Barcha natijalar</option>{(Object.keys(OUTCOME_LABEL) as Platform.AuditOutcome[]).map(o=><option key={o} value={o}>{OUTCOME_LABEL[o]}</option>)}</select>
+        <select className="ui-input" aria-label="Operator filtri" value={f.actor} onChange={e=>set('actor',e.target.value)}><option value="all">Barcha operatorlar</option>{actors.map(a=><option key={a} value={a}>{a}</option>)}</select>
+        <input type="date" className="ui-input" aria-label="Sanadan" value={f.from} onChange={e=>set('from',e.target.value)}/>
+        <input type="date" className="ui-input" aria-label="Sanagacha" value={f.to} onChange={e=>set('to',e.target.value)}/>
+        <select className="ui-input" aria-label="Audit tartibi" value={f.sort} onChange={e=>set('sort',e.target.value as Platform.AuditSort)}><option value="newest">Yangi avval</option><option value="oldest">Eski avval</option></select>
+        {active&&<button type="button" className="ghost-btn" onClick={()=>setF(EMPTY_AUDIT_FILTER)}>Filtrlarni tozalash</button>}
+      </div>
+      {rangeProblem&&<p className="inline-note danger" role="alert">{rangeProblem}</p>}
+      <p className="pf-muted" role="status">{rows.length} / {trail.length} ta yozuv</p>
+      {rows.length?<Table label="Platforma audit jurnali" head={['Vaqt','Operator','Amal','Obyekt','Kompaniya','Sabab','Natija']}>
+        {pg.slice.map(a=><tr key={a.id}><td>{fmtTime(a.at)}</td><td>{a.actor}</td><td><button type="button" className="pf-link" onClick={()=>setOpenId(a.id)}><b>{actionLabel(a.action)}</b>{a.detail&&<small>{safe(a.detail)}</small>}</button></td><td>{typeLabel(a.targetType)}</td><td>{tenantName(saas,a.tenantId)}</td><td>{safe(a.reason)}</td><td><StatusBadge tone={OUTCOME_TONE[a.outcome]}>{OUTCOME_LABEL[a.outcome]}</StatusBadge></td></tr>)}
+      </Table>:<Empty compact icon="shield" title={trail.length?'Mos yozuv yo‘q':'Audit hali bo‘sh'} text={trail.length?'Qidiruv, sana yoki filtrlarni o‘zgartiring.':'Platforma amallari bajarilgach shu yerda ko‘rinadi.'}/>}
+      <Pager pg={pg} label="Platforma audit jurnali"/>
+    </Card>
+    {open&&<Drawer open onClose={()=>setOpenId('')} title={actionLabel(open.action)} eyebrow="Audit yozuvi" icon="shield" size="md" actions={<button type="button" className="secondary-glass-btn" onClick={()=>{setF({...EMPTY_AUDIT_FILTER,actor:open.actor});setOpenId('')}}>Shu operator amallari</button>}>
+      <div className="page-stack">
+        <InfoGrid columns={2} items={[
+          {label:'Vaqt',value:fmtTime(open.at)},{label:'Natija',value:<StatusBadge tone={OUTCOME_TONE[open.outcome]}>{OUTCOME_LABEL[open.outcome]}</StatusBadge>},
+          {label:'Operator',value:open.actor},{label:'Amal kodi',value:<code>{open.action}</code>},
+          {label:'Obyekt turi',value:typeLabel(open.targetType)},{label:'Obyekt ID',value:<code>{open.targetId}</code>},
+          {label:'Kompaniya',value:tenantName(saas,open.tenantId)},{label:'Manba',value:platform.audit.some(a=>a.id===open.id)?'Platforma audit jurnali':'Kompaniya metama’lumotidagi eski yozuv'},
+          {label:'Sabab',value:safe(open.reason)},{label:'Tafsilot',value:safe(open.detail)},
+          open.saasEventId?{label:'Bog‘langan kompaniya hodisasi',value:<code>{open.saasEventId}</code>}:null,
+          {label:'Yozuv ID',value:<code>{open.id}</code>},
+        ]}/>
+        <p className="pf-muted">Server vaqt belgisi, IP, qurilma va xesh zanjiri backend audit omborida qo‘shiladi.</p>
+      </div>
+    </Drawer>}
+  </div>
+}
+
+const PLATFORM_CAPABILITIES:[string,boolean][]=[
+  ['Kompaniyalarni ko‘rish, qidirish, saralash',true],
+  ['Kompaniya nomini tahrirlash, to‘xtatish, qayta faollashtirish',true],
+  ['Obuna override (reja va holat)',true],
+  ['Rejadagi modulni cheklash / qaytarish',true],
+  ['Support murojaatlarini yuritish',true],
+  ['Platforma sozlamalarini o‘zgartirish',true],
+  ['Platforma auditi va xavfsizlik jurnali',true],
+  ['Kompaniya ERP ma’lumotini ko‘rish yoki o‘zgartirish',false],
+  ['Kompaniya foydalanuvchisi nomidan kirish (impersonation)',false],
+  ['Parol, hash yoki tiklash chiptasini ko‘rish',false],
+]
 export function SecuritySection(){
   const {saas,platform,actor,expiresAt,now}=usePlatform()
-  const [query,setQuery]=useState(''),[type,setType]=useState('all'),[outcome,setOutcome]=useState('all'),[limit,setLimit]=useState(50)
   const trail=useMemo(()=>Platform.auditTrail(saas,platform),[saas,platform])
-  const rows=trail.filter(a=>(type==='all'||a.targetType===type)&&(outcome==='all'||a.outcome===outcome)&&(!query.trim()||[a.actor,a.action,actionLabel(a.action),a.targetId,a.reason,a.detail,tenantName(saas,a.tenantId)].join(' ').toLowerCase().includes(query.trim().toLowerCase())))
+  const events=useMemo(()=>Platform.securityEvents(trail),[trail])
+  const operators=useMemo(()=>Platform.platformOperators(platform),[platform])
   return <div className="page-stack">
     <div className="pf-grid-2">
       <Card title="Joriy platforma sessiyasi">
@@ -31,17 +96,21 @@ export function SecuritySection(){
         </ul>
       </Card>
     </div>
-    <p className="inline-note warning" role="note">Bu audit tarixi brauzer xotirasida saqlanadi va brauzer egasi tomonidan o‘zgartirilishi mumkin. U yuridik dalil yoki ishonchli audit hisoblanmaydi. Parollar, hashlar, tiklash chiptalari va maxfiy kalitlar hech qachon yozilmaydi.</p>
-    <Card title="Platforma audit jurnali" subtitle="Kompaniyalarning ichki operatsion auditi bu yerda ko‘rsatilmaydi">
-      <div className="pf-toolbar">
-        <SearchBox value={query} onChange={setQuery} placeholder="Operator, amal, kompaniya, sabab" ariaLabel="Auditni qidirish"/>
-        <select className="ui-input" aria-label="Obyekt turi" value={type} onChange={e=>setType(e.target.value)}><option value="all">Barcha obyektlar</option><option value="tenant">Kompaniya</option><option value="subscription">Obuna</option><option value="feature">Funksiya</option><option value="settings">Sozlamalar</option><option value="ticket">Support</option><option value="session">Sessiya</option></select>
-        <select className="ui-input" aria-label="Natija" value={outcome} onChange={e=>setOutcome(e.target.value)}><option value="all">Barcha natijalar</option><option value="success">Muvaffaqiyatli</option><option value="denied">Rad etilgan</option><option value="failed">Xato</option></select>
-      </div>
-      <p className="pf-muted" role="status">{rows.length} ta yozuv</p>
-      {rows.length?<><Table label="Platforma audit jurnali" head={['Vaqt','Operator','Amal','Obyekt','Kompaniya','Sabab','Natija']}>
-        {rows.slice(0,limit).map(a=><tr key={a.id}><td>{fmtTime(a.at)}</td><td>{a.actor}</td><td>{actionLabel(a.action)}{a.detail&&<small className="pf-muted pf-block">{a.detail}</small>}</td><td>{a.targetType}</td><td>{tenantName(saas,a.tenantId)}</td><td>{a.reason||'—'}</td><td><StatusBadge tone={OUTCOME_TONE[a.outcome]}>{a.outcome}</StatusBadge></td></tr>)}
-      </Table>{rows.length>limit&&<button type="button" className="ghost-btn" onClick={()=>setLimit(l=>l+50)}>Yana 50 ta</button>}</>:<Empty compact icon="shield" title={trail.length?'Mos yozuv yo‘q':'Audit hali bo‘sh'}/>}
+    <Card title="Platforma rollari va ruxsatlari" subtitle="Platforma huquqi kompaniya RBAC tizimidan butunlay alohida">
+      <Table label="Platforma ruxsatlari matritsasi" head={['Imkoniyat','Platforma operatori (demo chipta)','Biznes egasi','Menejer / xodim']}>
+        {PLATFORM_CAPABILITIES.map(([label,operator])=><tr key={label}><td>{label}</td><td>{operator?<StatusBadge tone="success">Ruxsat</StatusBadge>:<StatusBadge tone="neutral">Yo‘q</StatusBadge>}</td><td><StatusBadge tone="neutral">Yo‘q</StatusBadge></td><td><StatusBadge tone="neutral">Yo‘q</StatusBadge></td></tr>)}
+      </Table>
+      <div className="stack-list pf-plan-note"><Unavailable title="Alohida platforma rollari (support agenti, billing, faqat o‘qish)" text="Server platforma identifikatori va platforma RBAC talab qiladi; demo chipta egasi barcha platforma amallarini bajaradi."/></div>
+    </Card>
+    <Card title="Xavfsizlik hodisalari" subtitle="Sessiyalar, rad etilgan yoki xato amallar va kirishni o‘zgartiruvchi amallar (so‘nggi 25 ta)">
+      {events.length?<Table label="Xavfsizlik hodisalari" head={['Vaqt','Operator','Hodisa','Kompaniya','Natija']}>
+        {events.map(a=><tr key={a.id}><td>{fmtTime(a.at)}</td><td>{a.actor}</td><td>{actionLabel(a.action)}{a.detail&&<small>{safe(a.detail)}</small>}</td><td>{tenantName(saas,a.tenantId)}</td><td><StatusBadge tone={OUTCOME_TONE[a.outcome]}>{OUTCOME_LABEL[a.outcome]}</StatusBadge></td></tr>)}
+      </Table>:<Empty compact icon="shield" title="Xavfsizlik hodisasi yo‘q"/>}
+    </Card>
+    <Card title="Platforma operatorlari" subtitle="Shu brauzerdagi audit asosida; identifikatsiya katalogi emas">
+      {operators.length?<Table label="Platforma operatorlari" head={['Operator','Kirishlar','Amallar','Rad / xato','Birinchi faollik','Oxirgi faollik']}>
+        {operators.map(o=><tr key={o.actor}><td><b>{o.actor}</b>{o.actor===actor&&<small className="pf-muted"> · siz</small>}</td><td>{o.sessions}</td><td>{o.actions}</td><td>{o.problems}</td><td>{fmtTime(o.firstAt)}</td><td>{fmtTime(o.lastAt)}<small>{actionLabel(o.lastAction)}</small></td></tr>)}
+      </Table>:<Empty compact icon="users" title="Operator faolligi yozilmagan"/>}
     </Card>
     <Card title="Backend talablari">
       <div className="stack-list">
@@ -58,22 +127,37 @@ const STATUS_LABEL:Record<Platform.TicketStatus,string>={open:'Ochiq',in_progres
 const STATUS_TONE:Record<Platform.TicketStatus,Tone>={open:'info',in_progress:'warning',waiting:'neutral',resolved:'success',closed:'neutral'}
 const PRIORITY_LABEL:Record<Platform.TicketPriority,string>={low:'Past',normal:'Oddiy',high:'Yuqori',urgent:'Shoshilinch'}
 const CATEGORY_LABEL:Record<Platform.TicketCategory,string>={account:'Akkaunt',subscription:'Obuna',billing:'Billing',technical:'Texnik',data:'Ma’lumot',other:'Boshqa'}
+const PRIORITY_RANK:Record<Platform.TicketPriority,number>={urgent:0,high:1,normal:2,low:3}
 export function SupportSection(){
   const {saas,platform,busy}=usePlatform()
-  const [status,setStatus]=useState('active'),[priority,setPriority]=useState('all'),[query,setQuery]=useState('')
+  const [status,setStatus]=useState('active'),[priority,setPriority]=useState('all'),[category,setCategory]=useState('all'),[sort,setSort]=useState('updated'),[query,setQuery]=useState('')
   const [creating,setCreating]=useState(false),[openId,setOpenId]=useState('')
-  const rows=platform.tickets.filter(t=>(status==='all'||(status==='active'?!['resolved','closed'].includes(t.status):t.status===status))&&(priority==='all'||t.priority===priority)&&(!query.trim()||`#${t.number} ${t.subject} ${tenantName(saas,t.tenantId)}`.toLowerCase().includes(query.trim().toLowerCase())))
+  const counts=Platform.ticketCounts(platform)
+  const rows=platform.tickets.filter(t=>(status==='all'||(status==='active'?!['resolved','closed'].includes(t.status):t.status===status))&&(priority==='all'||t.priority===priority)&&(category==='all'||t.category===category)&&(!query.trim()||`#${t.number} ${safe(t.subject,'')} ${tenantName(saas,t.tenantId)}`.toLowerCase().includes(query.trim().toLowerCase())))
+    .sort((a,b)=>sort==='priority'?PRIORITY_RANK[a.priority]-PRIORITY_RANK[b.priority]||b.updatedAt.localeCompare(a.updatedAt):sort==='created'?b.createdAt.localeCompare(a.createdAt):sort==='number'?a.number-b.number:b.updatedAt.localeCompare(a.updatedAt))
+  const pg=usePaged(rows,`${status}|${priority}|${category}|${sort}|${query}`)
+  const filtered=query||status!=='active'||priority!=='all'||category!=='all'
   return <div className="page-stack">
     <p className="inline-note" role="note">Demo support jurnali: murojaatlar operator tomonidan qo‘lda kiritiladi. E-pochta, chat yoki telefon integratsiyasi yo‘q. Kompaniyaning ERP yozuvlari ko‘rsatilmaydi va akkauntga “impersonation” qilinmaydi.</p>
+    <div className="kpi-grid">
+      <KPI label="Ochiq" value={counts.open} icon={<Icon name="bell"/>} onClick={()=>setStatus('open')}/>
+      <KPI label="Jarayonda" value={counts.in_progress} icon={<Icon name="clock"/>} tone="amber" onClick={()=>setStatus('in_progress')}/>
+      <KPI label="Javob kutilmoqda" value={counts.waiting} icon={<Icon name="info"/>} onClick={()=>setStatus('waiting')}/>
+      <KPI label="Hal qilingan / yopilgan" value={counts.resolved+counts.closed} icon={<Icon name="check"/>} tone="green" onClick={()=>setStatus('all')}/>
+    </div>
     <Card actions={<button type="button" className="primary-glass-btn" disabled={busy} onClick={()=>setCreating(true)}>Yangi murojaat</button>} title="Murojaatlar">
       <div className="pf-toolbar">
         <SearchBox value={query} onChange={setQuery} placeholder="Raqam, mavzu yoki kompaniya" ariaLabel="Murojaatni qidirish"/>
         <select className="ui-input" aria-label="Murojaat holati" value={status} onChange={e=>setStatus(e.target.value)}><option value="active">Ochiq (hal qilinmagan)</option><option value="all">Barchasi</option>{Platform.TICKET_STATUSES.map(s=><option key={s} value={s}>{STATUS_LABEL[s]}</option>)}</select>
         <select className="ui-input" aria-label="Ustuvorlik" value={priority} onChange={e=>setPriority(e.target.value)}><option value="all">Barcha ustuvorliklar</option>{Platform.TICKET_PRIORITIES.map(p=><option key={p} value={p}>{PRIORITY_LABEL[p]}</option>)}</select>
+        <select className="ui-input" aria-label="Toifa" value={category} onChange={e=>setCategory(e.target.value)}><option value="all">Barcha toifalar</option>{Platform.TICKET_CATEGORIES.map(c=><option key={c} value={c}>{CATEGORY_LABEL[c]}</option>)}</select>
+        <select className="ui-input" aria-label="Murojaatlarni saralash" value={sort} onChange={e=>setSort(e.target.value)}><option value="updated">Oxirgi yangilangan</option><option value="priority">Ustuvorlik</option><option value="created">Yangi yaratilgan</option><option value="number">Raqam</option></select>
+        {filtered&&<button type="button" className="ghost-btn" onClick={()=>{setQuery('');setStatus('active');setPriority('all');setCategory('all')}}>Filtrlarni tozalash</button>}
       </div>
       {rows.length?<Table label="Murojaatlar" head={['#','Mavzu','Kompaniya','Toifa','Ustuvorlik','Holat','Mas’ul','Yangilangan']}>
-        {rows.map(t=><tr key={t.id}><td>{t.number}</td><td><button type="button" className="pf-link" onClick={()=>setOpenId(t.id)}><b>{t.subject}</b></button></td><td>{tenantName(saas,t.tenantId)}</td><td>{CATEGORY_LABEL[t.category]}</td><td><StatusBadge tone={t.priority==='urgent'?'danger':t.priority==='high'?'warning':'neutral'}>{PRIORITY_LABEL[t.priority]}</StatusBadge></td><td><StatusBadge tone={STATUS_TONE[t.status]}>{STATUS_LABEL[t.status]}</StatusBadge></td><td>{t.assignee}</td><td>{fmtTime(t.updatedAt)}</td></tr>)}
+        {pg.slice.map(t=><tr key={t.id}><td>{t.number}</td><td><button type="button" className="pf-link" onClick={()=>setOpenId(t.id)}><b>{safe(t.subject)}</b></button></td><td>{tenantName(saas,t.tenantId)}</td><td>{CATEGORY_LABEL[t.category]}</td><td><StatusBadge tone={t.priority==='urgent'?'danger':t.priority==='high'?'warning':'neutral'}>{PRIORITY_LABEL[t.priority]}</StatusBadge></td><td><StatusBadge tone={STATUS_TONE[t.status]}>{STATUS_LABEL[t.status]}</StatusBadge></td><td>{t.assignee}</td><td>{fmtTime(t.updatedAt)}</td></tr>)}
       </Table>:<Empty icon="bell" title={platform.tickets.length?'Mos murojaat yo‘q':'Murojaat hali yo‘q'} text={platform.tickets.length?'Filtrlarni o‘zgartiring.':'Kompaniyadan kelgan so‘rovni qo‘lda ro‘yxatga olish uchun “Yangi murojaat” tugmasini bosing.'}/>}
+      <Pager pg={pg} label="Murojaatlar"/>
     </Card>
     <Card title="Backend talablari"><div className="stack-list">
       <Unavailable title="Kiruvchi kanal (e-pochta / chat)" text="Xabarni murojaatga bog‘laydigan server integratsiyasi kerak (SupportChannelContract)."/>
@@ -111,19 +195,22 @@ function TicketCreate({onClose}:{onClose:()=>void}){
 function TicketDrawer({id,onClose}:{id:string;onClose:()=>void}){
   const {saas,platform,actor,run,busy}=usePlatform()
   const t=platform.tickets.find(x=>x.id===id)
-  const [status,setStatus]=useState<Platform.TicketStatus|''>(''),[assignee,setAssignee]=useState(t?.assignee||''),[note,setNote]=useState('')
+  const [status,setStatus]=useState<Platform.TicketStatus|''>(''),[assignee,setAssignee]=useState(t?.assignee||''),[priority,setPriority]=useState<Platform.TicketPriority>(t?.priority||'normal'),[note,setNote]=useState('')
   if(!t)return null
   const next=Platform.TICKET_STATUSES.filter(s=>Platform.canTransition(t.status,s))
-  const save=async()=>{if(await run(snap=>Platform.opTicketUpdate(snap,actor,id,{status:status||undefined,assignee,note},new Date()))){setStatus('');setNote('')}}
-  return <Drawer open onClose={onClose} title={`#${t.number} · ${t.subject}`} eyebrow="Support murojaati" icon="bell" size="md" actions={t.status!=='closed'?<button type="button" className="primary-glass-btn" disabled={busy} onClick={()=>void save()}>Saqlash</button>:undefined}>
+  const save=async()=>{if(await run(snap=>Platform.opTicketUpdate(snap,actor,id,{status:status||undefined,assignee,priority,note},new Date()))){setStatus('');setNote('')}}
+  return <Drawer open onClose={onClose} title={`#${t.number} · ${safe(t.subject)}`} eyebrow="Support murojaati" icon="bell" size="md" actions={t.status!=='closed'?<button type="button" className="primary-glass-btn" disabled={busy} onClick={()=>void save()}>Saqlash</button>:undefined}>
     <div className="page-stack">
       <InfoGrid columns={2} items={[{label:'Kompaniya',value:tenantName(saas,t.tenantId)},{label:'Holat',value:<StatusBadge tone={STATUS_TONE[t.status]}>{STATUS_LABEL[t.status]}</StatusBadge>},{label:'Toifa',value:CATEGORY_LABEL[t.category]},{label:'Ustuvorlik',value:PRIORITY_LABEL[t.priority]},{label:'Mas’ul',value:t.assignee},{label:'Yaratgan',value:`${t.createdBy} · ${fmtTime(t.createdAt)}`}]}/>
       {t.status==='closed'?<p className="inline-note">Yopilgan murojaat o‘zgartirilmaydi. Kerak bo‘lsa yangi murojaat oching.</p>:<div className="form-stack">
         <Field label="Holatni o‘zgartirish"><select className="ui-input" value={status} onChange={e=>setStatus(e.target.value as Platform.TicketStatus)}><option value="">O‘zgarmasin</option>{next.map(s=><option key={s} value={s}>{STATUS_LABEL[s]}</option>)}</select></Field>
-        <Field label="Mas’ul operator ID"><Input value={assignee} onChange={e=>setAssignee(e.target.value)}/></Field>
+        <div className="pf-grid-2">
+          <Field label="Mas’ul operator ID"><Input value={assignee} onChange={e=>setAssignee(e.target.value)}/></Field>
+          <Field label="Ustuvorlik"><select className="ui-input" value={priority} onChange={e=>setPriority(e.target.value as Platform.TicketPriority)}>{Platform.TICKET_PRIORITIES.map(p=><option key={p} value={p}>{PRIORITY_LABEL[p]}</option>)}</select></Field>
+        </div>
         <Field label="Izoh qo‘shish" hint="Parol, chipta yoki kalitni yozmang"><Textarea value={note} maxLength={2000} onChange={e=>setNote(e.target.value)}/></Field>
       </div>}
-      <Card title="Hal qilish tarixi"><Timeline items={[...t.notes].reverse().map(n=>({title:n.kind==='note'?n.text:n.kind==='status'?`Holat: ${n.text}`:n.kind==='assign'?`Mas’ul: ${n.text}`:n.text,meta:n.actor,time:fmtTime(n.at),tone:n.kind==='status'?'warning':'info'}))}/></Card>
+      <Card title="Hal qilish tarixi"><Timeline items={[...t.notes].reverse().map(n=>({title:n.kind==='note'?safe(n.text):n.kind==='status'?`Holat: ${n.text}`:n.kind==='assign'?`Mas’ul: ${n.text}`:n.kind==='priority'?`Ustuvorlik: ${n.text}`:safe(n.text),meta:n.actor,time:fmtTime(n.at),tone:n.kind==='status'?'warning':'info'}))}/></Card>
     </div>
   </Drawer>
 }
@@ -131,8 +218,10 @@ function TicketDrawer({id,onClose}:{id:string;onClose:()=>void}){
 // ---------------------------------------------------------------- feature management
 const ALL_MODULES=[...SaaS.CORE_MODULES,...SaaS.RESTRICTABLE_MODULES]
 export function FeaturesSection(){
-  const {saas,platform,actor,run,busy}=usePlatform()
+  const {saas,platform,actor,run,busy,now}=usePlatform()
   const [tenantId,setTenantId]=useState(saas.tenants[0]?.id||'')
+  const subActive=tenantId?SaaS.subscriptionActive(SaaS.subscriptionFor(saas,tenantId),now):false
+  const tenantSuspended=saas.tenants.find(t=>t.id===tenantId)?.status==='suspended'
   const [pending,setPending]=useState<{module:string;enable:boolean}|null>(null)
   const plan=tenantId?SaaS.subscriptionFor(saas,tenantId)?.planId:undefined
   const disabled=tenantId?SaaS.disabledModules(saas,tenantId):new Set<string>()
@@ -152,16 +241,20 @@ export function FeaturesSection(){
     </Card>
     <Card title="Kompaniya bo‘yicha funksiyalar">
       {!saas.tenants.length?<Empty compact icon="factory" title="Kompaniya yo‘q"/>:<>
-        <div className="pf-toolbar"><select className="ui-input" aria-label="Kompaniya tanlash" value={tenantId} onChange={e=>setTenantId(e.target.value)}>{saas.tenants.map(t=><option key={t.id} value={t.id}>{t.name}</option>)}</select><span className="pf-muted">Reja: {plan?SaaS.PLAN_CATALOG[plan].name:'obuna yo‘q'}</span></div>
-        <Table label="Kompaniya funksiyalari" head={['Modul','Rejada','Holat','Amal']}>
+        <div className="pf-toolbar"><select className="ui-input" aria-label="Kompaniya tanlash" value={tenantId} onChange={e=>setTenantId(e.target.value)}>{saas.tenants.map(t=><option key={t.id} value={t.id}>{t.name}</option>)}</select><span className="pf-muted">Reja: {plan?SaaS.PLAN_CATALOG[plan].name:'obuna yo‘q'} · obuna {subActive?'faol':'faol emas'}{tenantSuspended?' · kompaniya to‘xtatilgan':''}</span></div>
+        <Table label="Kompaniya funksiyalari" head={['Modul','Rejada','Holat','Amal','Entitlement natijasi']}>
           {ALL_MODULES.map(m=>{const core=SaaS.CORE_MODULES.includes(m),inPlan=core||!!plan&&SaaS.PLAN_CATALOG[plan].modules.includes(m),off=disabled.has(m)
+            const entitled=SaaS.entitlement(saas,tenantId,m,now)
+            const why=core?'asosiy modul':!subActive?'obuna faol emas':!inPlan?'rejada yo‘q':off?'platforma cheklagan':'reja va obuna'
+            const result=<td><StatusBadge tone={entitled?'success':'neutral'}>{entitled?'Ochiq':'Yopiq'}</StatusBadge><small>{why}{tenantSuspended?' · a’zolar kira olmaydi':''}</small></td>
             return <tr key={m}><td>{MODULE_LABELS[m]||m}</td><td>{inPlan?'Ha':'Yo‘q'}</td>
               <td>{core?<StatusBadge tone="info">Asosiy</StatusBadge>:off?<StatusBadge tone="danger">Platforma o‘chirgan</StatusBadge>:inPlan?<StatusBadge tone="success">Yoqilgan</StatusBadge>:<StatusBadge tone="neutral">Rejada yo‘q</StatusBadge>}</td>
-              <td>{core?<span className="pf-muted">O‘chirib bo‘lmaydi</span>:off?<button type="button" className="secondary-glass-btn" disabled={busy} onClick={()=>setPending({module:m,enable:true})}>Reja holatiga qaytarish</button>:inPlan?<button type="button" className="ghost-btn" disabled={busy} onClick={()=>setPending({module:m,enable:false})}>O‘chirish</button>:<span className="pf-muted">Reja o‘zgarishi kerak</span>}</td></tr>})}
+              <td>{core?<span className="pf-muted">O‘chirib bo‘lmaydi</span>:off?<button type="button" className="secondary-glass-btn" disabled={busy} onClick={()=>setPending({module:m,enable:true})}>Reja holatiga qaytarish</button>:inPlan?<button type="button" className="ghost-btn" disabled={busy} onClick={()=>setPending({module:m,enable:false})}>O‘chirish</button>:<span className="pf-muted">Reja o‘zgarishi kerak</span>}</td>{result}</tr>})}
         </Table>
+        <p className="pf-muted">Entitlement = obuna huquqi ∧ funksiya mavjudligi. Foydalanuvchi ruxsati (RBAC) kompaniya ichida alohida tekshiriladi.</p>
       </>}
     </Card>
-    <Card title="Funksiya o‘zgarishlari tarixi"><Timeline items={history.map(a=>({title:`${actionLabel(a.action)} · ${MODULE_LABELS[a.targetId]||a.targetId}`,meta:`${tenantName(saas,a.tenantId)} · ${a.actor} · ${a.reason||''}`,time:fmtTime(a.at),tone:a.action==='feature.disable'?'warning':'info'}))}/></Card>
+    <Card title="Funksiya o‘zgarishlari tarixi"><Timeline items={history.map(a=>({title:`${actionLabel(a.action)} · ${MODULE_LABELS[a.targetId]||a.targetId}`,meta:`${tenantName(saas,a.tenantId)} · ${a.actor} · ${safe(a.reason,'')}`,time:fmtTime(a.at),tone:a.action==='feature.disable'?'warning':'info'}))}/></Card>
     <ReasonDialog open={!!pending} onClose={()=>setPending(null)} danger={pending?.enable===false} title={pending?.enable?'Modulni qaytarish':'Modulni o‘chirish'} confirmText={pending?.enable?'Qaytarish':'O‘chirish'}
       text={pending?`${MODULE_LABELS[pending.module]||pending.module}: ${pending.enable?'reja bo‘yicha qayta mavjud bo‘ladi (rol ruxsati alohida tekshiriladi).':'bu kompaniya uchun yopiladi. Ma’lumotlar o‘chirilmaydi.'}`:''}
       onConfirm={reason=>pending?run(snap=>Platform.opFeature(snap,actor,tenantId,pending.module,pending.enable,reason,new Date())):Promise.resolve(false)}/>
@@ -178,10 +271,13 @@ export function SettingsSection(){
   const errors=Platform.validateSettings(parsed)
   const diff=Platform.settingsDiff(platform.settings,{...parsed,brandName:parsed.brandName.trim(),supportEmail:parsed.supportEmail.trim(),supportPhone:parsed.supportPhone.trim()})
   const sensitive=diff.some(d=>Platform.SENSITIVE_SETTINGS.includes(d.key))
-  const valid=!Object.keys(errors).length&&diff.length>0&&(!sensitive||reason.trim().length>=5)
+  const reasonProblem=reason.trim()||sensitive?Platform.platformReasonProblem(reason):null
+  const valid=!Object.keys(errors).length&&diff.length>0&&!reasonProblem
   const err=(k:keyof Platform.PlatformSettings)=>touched?errors[k]:undefined
   const set=(k:keyof typeof form,v:string)=>{setTouched(true);setForm(f=>({...f,[k]:v}))}
   const reset=()=>{setForm({...platform.settings,defaultTrialDays:String(platform.settings.defaultTrialDays),graceDays:String(platform.settings.graceDays)});setReason('');setTouched(false)}
+  /** Fills the form with platform defaults; saving still needs the diff confirmation (and a reason for sensitive fields). */
+  const defaults=()=>{const d=Platform.DEFAULT_PLATFORM_SETTINGS;setTouched(true);setForm({...d,defaultTrialDays:String(d.defaultTrialDays),graceDays:String(d.graceDays)})}
   return <div className="page-stack">
     <Card title="Platforma sozlamalari" subtitle="Faqat kelajakdagi ro‘yxatdan o‘tish va override amallariga ta’sir qiladi; mavjud obunalar o‘zgarmaydi">
       <form className="form-stack" noValidate onSubmit={e=>{e.preventDefault();setTouched(true);if(valid)setConfirm(true)}}>
@@ -193,8 +289,8 @@ export function SettingsSection(){
           <Field label={SETTING_LABELS.defaultTrialDays} required error={err('defaultTrialDays')} hint="1–60 kun, yangi kompaniyalar uchun"><Input inputMode="numeric" value={form.defaultTrialDays} onChange={e=>set('defaultTrialDays',e.target.value)}/></Field>
           <Field label={SETTING_LABELS.graceDays} required error={err('graceDays')} hint="1–30 kun, imtiyoz override uchun"><Input inputMode="numeric" value={form.graceDays} onChange={e=>set('graceDays',e.target.value)}/></Field>
         </div>
-        {sensitive&&<Field label="O‘zgarish sababi" required hint="Muhim sozlama o‘zgaryapti — kamida 5 belgi"><Textarea value={reason} maxLength={500} onChange={e=>setReason(e.target.value)}/></Field>}
-        <div className="row-actions"><button type="submit" className="primary-glass-btn" disabled={busy||!diff.length}>Saqlash</button><button type="button" className="ghost-btn" disabled={!diff.length} onClick={reset}>Bekor qilish</button>{!diff.length&&<span className="pf-muted">O‘zgarish yo‘q</span>}</div>
+        {sensitive&&<Field label="O‘zgarish sababi" required hint="Muhim sozlama o‘zgaryapti — kamida 5 belgi" error={touched?reasonProblem||undefined:undefined}><Textarea value={reason} maxLength={500} onChange={e=>setReason(e.target.value)}/></Field>}
+        <div className="row-actions"><button type="submit" className="primary-glass-btn" disabled={busy||!diff.length}>Saqlash</button><button type="button" className="ghost-btn" disabled={!diff.length} onClick={reset}>Bekor qilish</button><button type="button" className="ghost-btn" onClick={defaults}>Standart qiymatlar</button>{!diff.length&&<span className="pf-muted">O‘zgarish yo‘q</span>}</div>
       </form>
     </Card>
     <Card title="Faqat backendda sozlanadigan parametrlar"><div className="stack-list">
@@ -213,7 +309,10 @@ export function SettingsSection(){
 type Check={label:string;ok:boolean|null;detail:string}
 function probe(store:Storage|undefined){try{if(!store)return false;const k='zenix-platform-probe';store.setItem(k,'1');const ok=store.getItem(k)==='1';store.removeItem(k);return ok}catch{return false}}
 export function HealthSection(){
-  const {saasState}=usePlatform()
+  const {saasState,saas,platform,now}=usePlatform()
+  const [severity,setSeverity]=useState('all')
+  const alerts=useMemo(()=>Platform.platformAlerts(saasState==='damaged'?null:saas,platform,now),[saasState,saas,platform,now])
+  const shown=alerts.filter(a=>severity==='all'||a.severity===severity)
   const [checks,setChecks]=useState<Check[]>([]),[estimate,setEstimate]=useState<string>('Tekshirilmoqda…'),[checkedAt,setCheckedAt]=useState('')
   const runChecks=()=>{
     const platformRaw=storage.getRaw(Platform.PLATFORM_KEY)
@@ -239,6 +338,17 @@ export function HealthSection(){
   const env=(import.meta as ImportMeta&{env?:Record<string,string|undefined>}).env
   const version=typeof __ZENIX_VERSION__==='string'?__ZENIX_VERSION__:'—'
   return <div className="page-stack">
+    <Card title="Platforma ogohlantirishlari" subtitle="Saqlangan kompaniya, obuna, support va audit yozuvlaridan hisoblanadi; server signali emas" actions={<select className="ui-input" aria-label="Ogohlantirish darajasi" value={severity} onChange={e=>setSeverity(e.target.value)}><option value="all">Barchasi ({alerts.length})</option><option value="danger">Muhim ({alerts.filter(a=>a.severity==='danger').length})</option><option value="warning">Ogohlantirish ({alerts.filter(a=>a.severity==='warning').length})</option><option value="info">Ma’lumot ({alerts.filter(a=>a.severity==='info').length})</option></select>}>
+      {shown.length?<AlertList alerts={shown}/>:<Empty compact icon="check" title={alerts.length?'Bu darajada ogohlantirish yo‘q':'Faol ogohlantirish yo‘q'}/>}
+    </Card>
+    <Card title="Servislar holati" subtitle="Faqat shu brauzerda tekshirish mumkin bo‘lgan qismlar">
+      <InfoGrid columns={4} items={[
+        {label:'Kompaniyalar',value:`${saas.tenants.length} ta`},
+        {label:'Audit yozuvlari (demo)',value:`${platform.audit.length} / ${Platform.PLATFORM_AUDIT_LIMIT}`,tone:platform.audit.length>=Platform.PLATFORM_AUDIT_LIMIT*.9?'warning':undefined},
+        {label:'Murojaatlar (demo)',value:`${platform.tickets.length} / ${Platform.PLATFORM_TICKET_LIMIT}`,tone:platform.tickets.length>=Platform.PLATFORM_TICKET_LIMIT*.9?'warning':undefined},
+        {label:'Kompaniya metama’lumoti',value:saasState==='damaged'?'Shikastlangan':saasState==='missing'?'Yaratilmagan':'Butun',tone:saasState==='damaged'?'danger':'success'},
+      ]}/>
+    </Card>
     <div className="pf-grid-2">
       <Card title="Ilova ma’lumoti">
         <InfoGrid columns={2} items={[{label:'Versiya',value:version},{label:'Build rejimi',value:env?.MODE||'—'},{label:'Brauzer xotirasi',value:estimate},{label:'Oxirgi tekshiruv',value:fmtTime(checkedAt||undefined)}]}/>

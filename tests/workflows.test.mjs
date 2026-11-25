@@ -285,7 +285,7 @@ test('incoming QC keeps stock quarantined until pass and failed material can be 
 
 test('sales reservation can split across warehouses and delivery supports partial quantities',()=>{
   let s=fresh()
-  const moved=A.transferStock(s,ctx(s),'p1','w3','w4',1000);assert.ok(moved.result.ok,moved.result.message);s=moved.state
+  const moved=A.transferStock(s,ctx(s),'p1','w3','w4',1000,undefined,{reason:'Sotuv uchun mahsulot zaxirasini ko‘chirish'});assert.ok(moved.result.ok,moved.result.message);s=moved.state
   const created=A.createSalesOrder(s,ctx(s),{customerId:'cu1',lines:[{productId:'p1',qty:1500}],mode:'Make-to-stock'})
   assert.ok(created.result.ok,created.result.message);s=created.state
   let so=s.salesOrders.find(o=>o.id===created.result.id)
@@ -666,7 +666,7 @@ test('BUG-03: balances stay non-negative and equal to their movements through a 
   const comp=rawOf(s,orderOf(s,mo.id))[0]
   s=scanUnits(s,mo.id,comp.materialId,2);assertStockIntegrity(s)
   const out=A.reportOutput(s,ctx(s),mo.id,10,0);assert.ok(out.result.ok,out.result.message);s=out.state;assertStockIntegrity(s)
-  const moved=A.transferStock(s,ctx(s),'p1','w3','w4',100);assert.ok(moved.result.ok,moved.result.message);s=moved.state;assertStockIntegrity(s)
+  const moved=A.transferStock(s,ctx(s),'p1','w3','w4',100,undefined,{reason:'Ombor qoldig‘ini ishlab chiqarishdan ko‘chirish'});assert.ok(moved.result.ok,moved.result.message);s=moved.state;assertStockIntegrity(s)
   const counted=A.adjustStock(s,ctx(s),'rm1','w1',3,'cycle count');assert.ok(counted.result.ok,counted.result.message);s=counted.state;assertStockIntegrity(s)
   const so=A.createSalesOrder(s,ctx(s),{customerId:'cu1',productId:'p1',qty:20,mode:'Make-to-stock'});assert.ok(so.result.ok,so.result.message);s=so.state
   const delivered=A.deliverSalesOrder(s,ctx(s),so.result.id);assert.ok(delivered.result.ok,delivered.result.message);s=delivered.state;assertStockIntegrity(s)

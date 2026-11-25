@@ -141,6 +141,11 @@
 .pf-contract{display:grid;grid-template-columns:minmax(180px,auto) 1fr;gap:8px 16px;margin:0 0 var(--sp-3)}
 .pf-contract dt{font-family:var(--font-mono);font-size:var(--fs-xs)}.pf-contract dd{margin:0;font-size:var(--fs-sm);color:var(--text-2)}
 .pf-scrim{display:none}
+.pf-pager{margin-top:var(--sp-3);border:1px solid var(--line);border-radius:var(--r-md)}
+.pf-pager .pf-page-size{width:auto;min-width:0;height:var(--control-h-sm);padding-block:0}
+.pf-alert-actions{display:flex;align-items:center;gap:var(--sp-2);flex-shrink:0}
+.pf-plan-note{margin-top:var(--sp-3)}
+.pf-toolbar input[type=date].ui-input{min-width:140px}
 @media(max-width:1100px){.pf .kpi-grid.cols-6{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media(max-width:960px){
   .pf{grid-template-columns:minmax(0,1fr)}
@@ -158,6 +163,8 @@
   .pf-session .ghost-btn{margin-left:auto}
   .pf-toolbar .ui-input{flex:1 1 140px;max-width:none}
   .pf-contract{grid-template-columns:minmax(0,1fr)}
+  .pf-alerts li{flex-wrap:wrap}
+  .pf-alert-actions{width:100%;justify-content:space-between}
 }
 @media(max-width:900px){.tenant-switch{max-width:180px}}
 @media(prefers-reduced-motion:reduce){.pf-side{transition:none}}

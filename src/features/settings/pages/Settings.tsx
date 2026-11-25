@@ -144,7 +144,8 @@ function Locations(){
 
 function SimpleCreate({title,withBranch,onClose,onSave}:{title:string;withBranch?:boolean;onClose:()=>void;onSave:(name:string,code:string,branchId:string)=>boolean}){
   const s=useApp().state
-  const form=useForm({name:'',code:'',branchId:s.branches[0]?.id||''},v=>({name:required(v.name,'Nomi'),code:required(v.code,'Kod')}))
+  // New rows are listed first, so the company default branch — not the newest one — is the default (P4-U-01).
+  const form=useForm({name:'',code:'',branchId:s.branches.find(b=>b.id===s.settings.defaultBranchId&&b.status!=='Arxiv')?.id||s.branches[0]?.id||''},v=>({name:required(v.name,'Nomi'),code:required(v.code,'Kod')}))
   return <Modal open onClose={onClose} title={title} size="sm" footer={<><button type="button" className="secondary-glass-btn" onClick={onClose}>Bekor qilish</button><button type="button" className="primary-glass-btn" onClick={()=>form.submit(v=>{const ok=onSave(v.name.trim(),v.code.trim().toUpperCase(),v.branchId);if(ok)onClose();return ok})}>Saqlash</button></>}>
     <div className="form-stack"><Field label="Nomi" required error={form.error('name')}><Input {...form.input('name')} autoFocus/></Field><Field label="Kod" required error={form.error('code')}><Input {...form.input('code')}/></Field>{withBranch&&<Field label="Filial"><Select value={form.values.branchId} onChange={v=>form.set('branchId',v)}>{s.branches.map(b=><option key={b.id} value={b.id}>{b.name}</option>)}</Select></Field>}</div>
   </Modal>

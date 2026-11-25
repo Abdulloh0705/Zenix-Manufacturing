@@ -1244,6 +1244,16 @@ tr.total td{font-weight:var(--fw-bold);border-top:2px solid var(--line-strong)}
 .qcp-table{min-width:980px}
 .qcp-table .cell-main small{max-width:340px}
 .delivery-table{min-width:900px}
+.delivery-line{display:grid;gap:var(--sp-2);padding-bottom:var(--sp-2);border-bottom:1px solid var(--line)}
+.delivery-line:last-child{border-bottom:0;padding-bottom:0}
+.delivery-qty{width:120px;flex-shrink:0}
+.serial-picker{display:grid;gap:var(--sp-2);margin:0;padding:var(--sp-3);border:1px solid var(--line);border-radius:var(--r-md);background:var(--surface-2);min-width:0}
+.serial-picker legend{padding:0 4px;font-size:var(--fs-xs);color:var(--text-2);font-weight:var(--fw-semibold)}
+.serial-options{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:4px var(--sp-3);max-height:240px;overflow-y:auto;overscroll-behavior:contain}
+.serial-options .check-line b{font-family:var(--font-mono);font-weight:var(--fw-semibold);word-break:break-all}
+.price-hint{display:block;margin-top:2px;color:var(--text-3);font-size:var(--fs-2xs);white-space:normal;text-align:right}
+.price-hint.negative{color:var(--danger)}
+@media(max-width:600px){.delivery-qty{width:96px}.serial-options{grid-template-columns:minmax(0,1fr)}}
 .sub-table{min-width:1000px}
 .perf-cell{min-width:200px}
 .perf-cell b{font-variant-numeric:tabular-nums;min-width:44px;text-align:right}
@@ -2006,6 +2016,11 @@ tr.total td{font-weight:var(--fw-bold);border-top:2px solid var(--line-strong)}
 .pf-contract{display:grid;grid-template-columns:minmax(180px,auto) 1fr;gap:8px 16px;margin:0 0 var(--sp-3)}
 .pf-contract dt{font-family:var(--font-mono);font-size:var(--fs-xs)}.pf-contract dd{margin:0;font-size:var(--fs-sm);color:var(--text-2)}
 .pf-scrim{display:none}
+.pf-pager{margin-top:var(--sp-3);border:1px solid var(--line);border-radius:var(--r-md)}
+.pf-pager .pf-page-size{width:auto;min-width:0;height:var(--control-h-sm);padding-block:0}
+.pf-alert-actions{display:flex;align-items:center;gap:var(--sp-2);flex-shrink:0}
+.pf-plan-note{margin-top:var(--sp-3)}
+.pf-toolbar input[type=date].ui-input{min-width:140px}
 @media(max-width:1100px){.pf .kpi-grid.cols-6{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media(max-width:960px){
   .pf{grid-template-columns:minmax(0,1fr)}
@@ -2023,6 +2038,8 @@ tr.total td{font-weight:var(--fw-bold);border-top:2px solid var(--line-strong)}
   .pf-session .ghost-btn{margin-left:auto}
   .pf-toolbar .ui-input{flex:1 1 140px;max-width:none}
   .pf-contract{grid-template-columns:minmax(0,1fr)}
+  .pf-alerts li{flex-wrap:wrap}
+  .pf-alert-actions{width:100%;justify-content:space-between}
 }
 @media(max-width:900px){.tenant-switch{max-width:180px}}
 @media(prefers-reduced-motion:reduce){.pf-side{transition:none}}

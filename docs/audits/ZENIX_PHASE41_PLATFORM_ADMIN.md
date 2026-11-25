@@ -88,3 +88,7 @@ E2E isolation: `playwright.config.ts` generates a throwaway P-256 key pair per r
 4. Payment provider integration before any paid entitlement; usage metering.
 5. Monitoring stack feeding `SystemHealthContract`.
 6. Swap the browser stores behind the existing `run(op)` boundary for API calls; keep the UI.
+
+## 10. Super Admin completion (2026-11-12)
+
+Sections are now 10: Audit jurnali (`/platform/audit`) is separate from Xavfsizlik (`/platform/security`); Tizim holati is renamed Monitoring (`/platform/health`, same path). Added: company rename (`opTenantRename` → `SaaS.renameTenant`, linked audit), a create dialog that explains owner self-registration (invite = backend), pagination on companies/subscriptions/support/audit, subscription sort, audit actor/date/sort filters and detail drawer, ticket priority changes, support KPIs/category/sort, record-derived alerts (`platformAlerts`) on Monitoring and Overview, registration trend, platform permission matrix, security events, operator summary, per-module entitlement result, settings defaults. Display-time redaction (`safeText`) hides secret-looking text that was planted directly in browser storage. No storage schema change. Details and IDs SA-001…SA-009: `docs/BUG_REGISTRY.md`.

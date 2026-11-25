@@ -290,12 +290,12 @@ test('#11: a lot-tracked transfer needs usable lot records; warehouse quantity a
 
 test('#11: a valid lot transfer keeps origin, expiry and quantities; repeated moves reconcile without duplicates',()=>{
   let s=withStock(clean(),'rm2','w1',[{code:'P',qty:10,expiry:day(30),sourceType:'purchase',sourceId:'po-1',sourceCode:'PO-1'},{code:'Q',qty:4,expiry:day(40)}])
-  s=ok(A.transferStock(s,ctx(s),'rm2','w1','w2',6))
+  s=ok(A.transferStock(s,ctx(s),'rm2','w1','w2',6,undefined,{reason:'LOT zaxirasini ikkinchi omborga ko‘chirish'}))
   const copy=s.lots.filter(l=>l.code==='P'&&l.warehouseId==='w2')
   assert.equal(copy.length,1)
   assert.deepEqual([copy[0].qty,copy[0].sourceType,copy[0].sourceId,copy[0].sourceCode,copy[0].expiry],[6,'purchase','po-1','PO-1',day(30)])
-  s=ok(A.transferStock(s,ctx(s),'rm2','w1','w2',2,[{lot:'Q',qty:2}]))
-  s=ok(A.transferStock(s,ctx(s),'rm2','w1','w2',4))
+  s=ok(A.transferStock(s,ctx(s),'rm2','w1','w2',2,[{lot:'Q',qty:2}],{reason:'Rezervsiz LOTni ko‘chirish'}))
+  s=ok(A.transferStock(s,ctx(s),'rm2','w1','w2',4,undefined,{reason:'Qolgan LOTni ko‘chirish'}))
   assert.equal(s.lots.filter(l=>l.code==='P'&&l.warehouseId==='w2').length,1,'same origin merges into one record')
   assert.equal(s.lots.find(l=>l.code==='P'&&l.warehouseId==='w2').qty,10)
   for(const wh of ['w1','w2'])assert.equal(lotQty(s,'rm2',wh),bal(s,'rm2',wh).onHand,`${wh}: lots = balance`)
@@ -305,7 +305,7 @@ test('#11: a valid lot transfer keeps origin, expiry and quantities; repeated mo
   // An untracked material still moves by balance.
   let u=withStock(clean(),'rm4','w1',[],20)
   u={...u,rawMaterials:u.rawMaterials.map(m=>m.id==='rm4'?{...m,lotTracking:false}:m)}
-  u=ok(A.transferStock(u,ctx(u),'rm4','w1','w2',5))
+  u=ok(A.transferStock(u,ctx(u),'rm4','w1','w2',5,undefined,{reason:'Bolt zaxirasini ko‘chirish'}))
   assert.equal(bal(u,'rm4','w2').onHand,5)
 })
 
@@ -314,7 +314,7 @@ test('#11: a transfer leaves reserved lots alone',()=>{
   const s=ok(A.transitionProduction(base,ctx(base),id,'Tasdiqlangan'))
   // 11 on hand, ~7.47 reserved (all of Y, a little of Z): only Z's free part may move.
   refused(s,A.transferStock(s,ctx(s),'rm2','w1','w2',1,[{lot:'Y',qty:1}]),/LOT Y/)
-  const moved=ok(A.transferStock(s,ctx(s),'rm2','w1','w2',2))
+  const moved=ok(A.transferStock(s,ctx(s),'rm2','w1','w2',2,undefined,{reason:'Yaroqli LOTni ko‘chirish'}))
   assert.deepEqual(moved.lots.filter(l=>l.warehouseId==='w2').map(l=>l.code),['Z'])
 })
 

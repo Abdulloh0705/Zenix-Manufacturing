@@ -230,7 +230,7 @@ export function ForgotPasswordPage(){
       {mode==='owner'&&<>
         <p className="auth-text">Faqat kompaniya egasi uchun: chiptani brauzerdan tashqarida saqlanadigan maxfiy kalit imzolaydi. Loyiha papkasida shu buyruqni bajaring:</p>
         <div className="auth-code"><code>{command}</code><CopyButton text={command} label="Buyruqni nusxalash"/></div>
-        <Field label="Imzolangan chipta" required error={errors.ticket} hint="Shu sahifa ochiq turganda, 15 daqiqa ichida"><Input id="forgot-ticket" value={ticket} onChange={e=>change(setTicket)(e.target.value)} autoComplete="off" spellCheck={false}/></Field>
+        <Field label="Imzolangan chipta" required error={errors.ticket} hint="Shu sahifa ochiq turganda, 15 daqiqa ichida"><Input id="forgot-ticket" type="password" value={ticket} onChange={e=>change(setTicket)(e.target.value)} autoComplete="off" spellCheck={false}/></Field>
       </>}
       {mode==='key'&&<Field label="Tiklash kaliti" required error={errors.key} hint="Ro‘yxatdan o‘tganda berilgan: XXXXX-XXXXX-XXXXX-XXXXX"><Input id="forgot-key" value={key} onChange={e=>change(setKey)(e.target.value)} autoComplete="off" spellCheck={false}/></Field>}
       <PasswordField id="forgot-password" label="Yangi parol" value={password} onChange={change(setPassword)} autoComplete="new-password" error={errors.password} hint={passwordHint(app.auth.policy)}/>
